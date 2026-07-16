@@ -80,12 +80,57 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/Worker, .NET Aspire AppH
 - [Технологический стек](doc/base/tech-stack.md)
 - [Функциональные требования](doc/func-requirements/README.md)
 - [Нефункциональные требования](doc/non-func-requirements/README.md)
+- [Архитектура и запуск исходного кода](src/README.md)
 
-## Стадия
+## Реализовано
 
-Текущая стадия — спецификация и подготовка concierge validation. До полноценной self-service разработки планируется:
+В `src` уже находится первый исполняемый срез self-service MVP:
 
-1. сделать три демонстрационных Release Pack на треках NEЯСЫТЬ;
-2. запустить англоязычный landing;
-3. продать минимум пять пилотов по $19;
-4. подтвердить, что клиенты публикуют ролики, экономят не менее двух часов и хотят вернуться со следующим релизом.
+- англоязычный landing, Clerk onboarding, dashboard, release setup и brand kit;
+- ASP.NET Core API с tenant isolation, ETag concurrency, rate limiting и безопасными ошибками;
+- PostgreSQL schema и миграция для workspaces, releases, assets, uploads, jobs и audit events;
+- прямые single/multipart uploads в S3-compatible storage;
+- durable PostgreSQL job queue и worker для FFmpeg/ffprobe media ingest;
+- проверка magic bytes, duration, dimensions и создание browser-safe derivatives;
+- SSE progress с polling fallback;
+- .NET Aspire topology для PostgreSQL, MinIO, bootstrapper, API, worker и Next.js;
+- OpenAPI contract и сгенерированные TypeScript-типы;
+- unit, API integration, AppHost topology и Playwright smoke tests.
+
+Текущая граница реализации заканчивается на валидированном наборе входных материалов релиза. WhisperX/Essentia analysis, выбор hooks, 18-item campaign, Remotion render, preview, billing и ZIP export остаются следующими инкрементами.
+
+## Быстрый запуск
+
+Требуются .NET SDK 10, Node.js 24, Docker и доступные в `PATH` `ffmpeg`/`ffprobe`.
+
+```bash
+dotnet tool restore
+npm ci --prefix src/web
+dotnet run --project src/Hook2Stream.AppHost
+```
+
+Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует named volumes. CORS для прямой browser upload в MinIO задаётся AppHost. Без Clerk-ключей landing запускается, а защищённая часть показывает экран настройки. Для полного auth-flow:
+
+```bash
+dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:Issuer" "https://your-instance.clerk.accounts.dev"
+dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:PublishableKey" "pk_test_..."
+```
+
+Основные проверки:
+
+```bash
+dotnet test src/Hook2Stream.slnx
+npm run check --prefix src/web
+npm run lint --prefix src/web
+npm run build --prefix src/web
+npm run test:e2e --prefix src/web
+```
+
+После изменения API сначала пересоберите его, затем обновите frontend contract:
+
+```bash
+dotnet build src/Hook2Stream.Api/Hook2Stream.Api.csproj
+npm run generate:api --prefix src/web
+```
+
+Commercial validation идёт параллельно с разработкой: три demo packs на треках NEЯСЫТЬ, первые пилоты по $19 и минимум пять оплат до масштабирования тяжёлого render pipeline.

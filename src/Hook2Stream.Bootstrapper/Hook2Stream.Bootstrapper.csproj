@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Hook2Stream.Bootstrapper</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Hook2Stream.Application/Hook2Stream.Application.csproj" />
+    <ProjectReference Include="../Hook2Stream.Infrastructure/Hook2Stream.Infrastructure.csproj" />
+    <ProjectReference Include="../Hook2Stream.ServiceDefaults/Hook2Stream.ServiceDefaults.csproj" />
+  </ItemGroup>
+
+</Project>

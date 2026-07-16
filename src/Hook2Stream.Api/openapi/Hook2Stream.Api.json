@@ -1,0 +1,1759 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "Hook2Stream.Api | v1",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "Hook2Stream.Api"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/account/me": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/onboarding": {
+      "put": {
+        "tags": [
+          "Endpoints"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteOnboardingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/brand-kit": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandKitResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Endpoints"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBrandKitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandKitResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "includeArchived",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReleaseResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/archive": {
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/restore": {
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/readiness": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/rights": {
+      "put": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RightsAttestationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RightsAttestationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/assets": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AssetResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/uploads": {
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/assets/reorder": {
+      "put": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderAssetsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AssetResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/assets/{assetId}": {
+      "delete": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/v1/uploads/{sessionId}": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/uploads/{sessionId}/parts": {
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadPartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadPartResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/uploads/{sessionId}/complete": {
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteUploadResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/uploads/{sessionId}/abort": {
+      "post": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{jobId}": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{jobId}/events": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountResponse": {
+        "required": [
+          "userId",
+          "subject",
+          "email",
+          "displayName",
+          "onboardingRequired",
+          "workspaceId",
+          "workspaceName",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "displayName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "onboardingRequired": {
+            "type": "boolean"
+          },
+          "workspaceId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "workspaceName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "AssetKind": {
+        "enum": [
+          "audio",
+          "cover",
+          "visual",
+          "brandCharacter"
+        ]
+      },
+      "AssetResponse": {
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "fileName",
+          "contentType",
+          "declaredBytes",
+          "actualBytes",
+          "revision",
+          "sortOrder",
+          "isActive",
+          "failureCode",
+          "failureMessage",
+          "durationMilliseconds",
+          "width",
+          "height",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AssetKind"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AssetState"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "declaredBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "actualBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "revision": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "sortOrder": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "failureCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "failureMessage": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "durationMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "width": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "height": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "AssetState": {
+        "enum": [
+          "reserved",
+          "uploading",
+          "uploaded",
+          "processing",
+          "ready",
+          "rejected",
+          "deleted"
+        ]
+      },
+      "BrandKitResponse": {
+        "required": [
+          "id",
+          "displayName",
+          "primaryColor",
+          "secondaryColor",
+          "accentColor",
+          "headingFont",
+          "bodyFont",
+          "defaultCta",
+          "smartLink",
+          "toneRestrictions",
+          "characterLayerEnabled",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "primaryColor": {
+            "type": "string"
+          },
+          "secondaryColor": {
+            "type": "string"
+          },
+          "accentColor": {
+            "type": "string"
+          },
+          "headingFont": {
+            "type": "string"
+          },
+          "bodyFont": {
+            "type": "string"
+          },
+          "defaultCta": {
+            "type": "string"
+          },
+          "smartLink": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "toneRestrictions": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "characterLayerEnabled": {
+            "type": "boolean"
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "CompletedPartRequest": {
+        "required": [
+          "partNumber",
+          "eTag"
+        ],
+        "type": "object",
+        "properties": {
+          "partNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "eTag": {
+            "type": "string"
+          }
+        }
+      },
+      "CompleteOnboardingRequest": {
+        "required": [
+          "workspaceName",
+          "acceptTerms",
+          "acceptPrivacy",
+          "termsVersion",
+          "privacyVersion",
+          "displayName"
+        ],
+        "type": "object",
+        "properties": {
+          "workspaceName": {
+            "type": "string"
+          },
+          "acceptTerms": {
+            "type": "boolean"
+          },
+          "acceptPrivacy": {
+            "type": "boolean"
+          },
+          "termsVersion": {
+            "type": "string"
+          },
+          "privacyVersion": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "CompleteUploadRequest": {
+        "required": [
+          "parts"
+        ],
+        "type": "object",
+        "properties": {
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompletedPartRequest"
+            }
+          }
+        }
+      },
+      "CompleteUploadResponse": {
+        "required": [
+          "assetId",
+          "jobId"
+        ],
+        "type": "object",
+        "properties": {
+          "assetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "jobId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "CreateReleaseRequest": {
+        "required": [
+          "projectLabel",
+          "artistName",
+          "trackTitle",
+          "language",
+          "internalNotes",
+          "lyricsText",
+          "isInstrumental",
+          "mode",
+          "releaseDate",
+          "campaignStartDate"
+        ],
+        "type": "object",
+        "properties": {
+          "projectLabel": {
+            "type": "string"
+          },
+          "artistName": {
+            "type": "string"
+          },
+          "trackTitle": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "internalNotes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lyricsText": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isInstrumental": {
+            "type": "boolean"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ReleaseMode"
+          },
+          "releaseDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "campaignStartDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          }
+        }
+      },
+      "CreateUploadRequest": {
+        "required": [
+          "kind",
+          "fileName",
+          "contentType",
+          "sizeBytes",
+          "replacesAssetId"
+        ],
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/AssetKind"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "replacesAssetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "JobResponse": {
+        "required": [
+          "id",
+          "type",
+          "state",
+          "progressPercent",
+          "progressStage",
+          "errorCode",
+          "errorMessage",
+          "attemptCount",
+          "createdAt",
+          "completedAt",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "$ref": "#/components/schemas/JobType"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "progressPercent": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "progressStage": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "errorCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "errorMessage": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "attemptCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "JobState": {
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "JobType": {
+        "enum": [
+          "mediaIngest",
+          "assetCleanup"
+        ]
+      },
+      "ProjectState": {
+        "enum": [
+          "draft",
+          "analyzing",
+          "hookReview",
+          "campaignReady",
+          "previewReady",
+          "rendering",
+          "ready",
+          "partiallyReady",
+          "archived"
+        ]
+      },
+      "ReadinessResponse": {
+        "required": [
+          "ready",
+          "missing",
+          "readyVisuals",
+          "hasAudio",
+          "hasCover",
+          "hasLyricsOrInstrumental",
+          "hasRightsAttestation"
+        ],
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "readyVisuals": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "hasAudio": {
+            "type": "boolean"
+          },
+          "hasCover": {
+            "type": "boolean"
+          },
+          "hasLyricsOrInstrumental": {
+            "type": "boolean"
+          },
+          "hasRightsAttestation": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ReleaseMode": {
+        "enum": [
+          "upcoming",
+          "released"
+        ]
+      },
+      "ReleaseResponse": {
+        "required": [
+          "id",
+          "projectLabel",
+          "artistName",
+          "trackTitle",
+          "language",
+          "internalNotes",
+          "lyricsText",
+          "isInstrumental",
+          "mode",
+          "releaseDate",
+          "campaignStartDate",
+          "state",
+          "isArchived",
+          "version",
+          "createdAt",
+          "assets"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectLabel": {
+            "type": "string"
+          },
+          "artistName": {
+            "type": "string"
+          },
+          "trackTitle": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "internalNotes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lyricsText": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isInstrumental": {
+            "type": "boolean"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ReleaseMode"
+          },
+          "releaseDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "campaignStartDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ProjectState"
+          },
+          "isArchived": {
+            "type": "boolean"
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetResponse"
+            }
+          }
+        }
+      },
+      "ReorderAssetsRequest": {
+        "required": [
+          "assetIds"
+        ],
+        "type": "object",
+        "properties": {
+          "assetIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
+      "RightsAttestationRequest": {
+        "required": [
+          "ownsAudioRights",
+          "ownsLyricsRights",
+          "ownsVisualRights",
+          "syntheticContentStatus",
+          "policyVersion"
+        ],
+        "type": "object",
+        "properties": {
+          "ownsAudioRights": {
+            "type": "boolean"
+          },
+          "ownsLyricsRights": {
+            "type": "boolean"
+          },
+          "ownsVisualRights": {
+            "type": "boolean"
+          },
+          "syntheticContentStatus": {
+            "$ref": "#/components/schemas/SyntheticContentStatus"
+          },
+          "policyVersion": {
+            "type": "string"
+          }
+        }
+      },
+      "RightsAttestationResponse": {
+        "required": [
+          "id",
+          "ownsAudioRights",
+          "ownsLyricsRights",
+          "ownsVisualRights",
+          "syntheticContentStatus",
+          "policyVersion",
+          "acceptedAt",
+          "projectVersion"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ownsAudioRights": {
+            "type": "boolean"
+          },
+          "ownsLyricsRights": {
+            "type": "boolean"
+          },
+          "ownsVisualRights": {
+            "type": "boolean"
+          },
+          "syntheticContentStatus": {
+            "$ref": "#/components/schemas/SyntheticContentStatus"
+          },
+          "policyVersion": {
+            "type": "string"
+          },
+          "acceptedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "projectVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "SyntheticContentStatus": {
+        "enum": [
+          "none",
+          "assisted",
+          "fullySynthetic",
+          "unknown"
+        ]
+      },
+      "UpdateBrandKitRequest": {
+        "required": [
+          "displayName",
+          "primaryColor",
+          "secondaryColor",
+          "accentColor",
+          "headingFont",
+          "bodyFont",
+          "defaultCta",
+          "smartLink",
+          "toneRestrictions",
+          "characterLayerEnabled"
+        ],
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "primaryColor": {
+            "type": "string"
+          },
+          "secondaryColor": {
+            "type": "string"
+          },
+          "accentColor": {
+            "type": "string"
+          },
+          "headingFont": {
+            "type": "string"
+          },
+          "bodyFont": {
+            "type": "string"
+          },
+          "defaultCta": {
+            "type": "string"
+          },
+          "smartLink": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "toneRestrictions": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "characterLayerEnabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpdateReleaseRequest": {
+        "required": [
+          "projectLabel",
+          "artistName",
+          "trackTitle",
+          "language",
+          "internalNotes",
+          "lyricsText",
+          "isInstrumental",
+          "mode",
+          "releaseDate",
+          "campaignStartDate"
+        ],
+        "type": "object",
+        "properties": {
+          "projectLabel": {
+            "type": "string"
+          },
+          "artistName": {
+            "type": "string"
+          },
+          "trackTitle": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "internalNotes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lyricsText": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "isInstrumental": {
+            "type": "boolean"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ReleaseMode"
+          },
+          "releaseDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "campaignStartDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          }
+        }
+      },
+      "UploadPartRequest": {
+        "required": [
+          "partNumber"
+        ],
+        "type": "object",
+        "properties": {
+          "partNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "UploadPartResponse": {
+        "required": [
+          "partNumber",
+          "uploadUrl",
+          "expiresAt"
+        ],
+        "type": "object",
+        "properties": {
+          "partNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "uploadUrl": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UploadSessionResponse": {
+        "required": [
+          "sessionId",
+          "assetId",
+          "multipart",
+          "uploadUrl",
+          "multipartUploadId",
+          "partSizeBytes",
+          "partCount",
+          "expiresAt"
+        ],
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "assetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "multipart": {
+            "type": "boolean"
+          },
+          "uploadUrl": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "multipartUploadId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "partSizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "partCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Hook2Stream.Api"
+    },
+    {
+      "name": "Endpoints"
+    }
+  ]
+}

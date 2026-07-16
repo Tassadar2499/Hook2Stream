@@ -24,6 +24,21 @@
 | Observability | OpenTelemetry, structured logs, error tracking | Trace от пользовательской операции до analysis/render jobs |
 | Testing | Unit, integration, golden media corpus, Playwright | Доменная логика, media pipeline и основной пользовательский сценарий |
 
+## Текущий implementation snapshot
+
+Реализованный первый срез использует:
+
+- .NET 10 modular monolith: Domain, Application, Infrastructure, API, Worker и Bootstrapper;
+- .NET Aspire AppHost/ServiceDefaults с PostgreSQL, MinIO, health checks и OpenTelemetry;
+- EF Core migrations и PostgreSQL-backed durable queue с lease/retry;
+- S3-compatible direct single/multipart upload;
+- FFmpeg/ffprobe ingest для audio, image и video derivatives;
+- Clerk JWT validation и персональный workspace;
+- Next.js App Router, React, TypeScript, Tailwind и Playwright;
+- build-time OpenAPI generation и `openapi-typescript` для frontend contracts.
+
+WhisperX/Essentia, Remotion renderer, campaign generation, billing и export не маскируются заглушками: они остаются отдельными следующими инкрементами.
+
 ## Границы компонентов
 
 ```mermaid

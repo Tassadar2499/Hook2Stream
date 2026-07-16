@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/Hook2Stream.AppHostTests/Hook2Stream.AppHostTests.csproj" />
+    <Project Path="tests/Hook2Stream.IntegrationTests/Hook2Stream.IntegrationTests.csproj" />
+    <Project Path="tests/Hook2Stream.UnitTests/Hook2Stream.UnitTests.csproj" />
+  </Folder>
+  <Project Path="Hook2Stream.Api/Hook2Stream.Api.csproj" />
+  <Project Path="Hook2Stream.AppHost/Hook2Stream.AppHost.csproj" />
+  <Project Path="Hook2Stream.Application/Hook2Stream.Application.csproj" />
+  <Project Path="Hook2Stream.Bootstrapper/Hook2Stream.Bootstrapper.csproj" />
+  <Project Path="Hook2Stream.Domain/Hook2Stream.Domain.csproj" />
+  <Project Path="Hook2Stream.Infrastructure/Hook2Stream.Infrastructure.csproj" />
+  <Project Path="Hook2Stream.ServiceDefaults/Hook2Stream.ServiceDefaults.csproj" />
+  <Project Path="Hook2Stream.Worker/Hook2Stream.Worker.csproj" />
+</Solution>

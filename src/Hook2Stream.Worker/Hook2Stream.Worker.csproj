@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Hook2Stream.Worker-bf2dd817-276d-4f4d-841c-0316132e916b</UserSecretsId>
+    <RootNamespace>Hook2Stream.Worker</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Hook2Stream.Application/Hook2Stream.Application.csproj" />
+    <ProjectReference Include="../Hook2Stream.Infrastructure/Hook2Stream.Infrastructure.csproj" />
+    <ProjectReference Include="../Hook2Stream.ServiceDefaults/Hook2Stream.ServiceDefaults.csproj" />
+  </ItemGroup>
+</Project>

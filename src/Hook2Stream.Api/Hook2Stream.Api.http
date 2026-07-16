@@ -1,0 +1,23 @@
+@Hook2Stream.Api_HostAddress = http://localhost:5248
+
+GET {{Hook2Stream.Api_HostAddress}}/
+Accept: application/json
+
+###
+
+GET {{Hook2Stream.Api_HostAddress}}/health/live
+Accept: application/json
+
+###
+
+GET {{Hook2Stream.Api_HostAddress}}/health/ready
+Accept: application/json
+
+###
+
+# Protected endpoints require a Clerk session token.
+GET {{Hook2Stream.Api_HostAddress}}/api/v1/account/me
+Authorization: Bearer {{ClerkToken}}
+Accept: application/json
+
+###

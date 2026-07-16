@@ -214,3 +214,18 @@ Reference load длится не менее 30 минут и включает о
 - Изменение target требует причины, новых acceptance checks и оценки влияния на стоимость.
 - Временное исключение содержит owner, compensating control, expiry и ссылку на risk acceptance.
 - Production incident, нарушивший NFR, должен приводить к корректировке test, alert или runbook, если существующая защита не обнаружила причину.
+
+## 15. Покрытие первым implementation increment
+
+Этот раздел не меняет нормативные targets и не объявляет paid-beta NFR выполненными. Он фиксирует, какие механизмы уже присутствуют в `src`.
+
+| Область | Реализовано сейчас | Следующая проверяемая граница |
+|---|---|---|
+| `PERF` | Media bytes идут напрямую в object storage; API остаётся control plane; progress передаётся через SSE с polling fallback. | Load/RUM измерения и end-to-end targets analysis/render/export. |
+| `REL` | Durable PostgreSQL queue, lease, heartbeat, recovery и bounded retry; replacement asset активируется только после успешного ingest. | Chaos tests на реальных PostgreSQL/MinIO и partial render recovery. |
+| `DATA` | PostgreSQL — source of truth; server-generated object keys; SHA-256 для ingest; versioned derivatives; logical deletion. | Backup/PITR, retention workers, tombstones и restore drills. |
+| `SEC` | Clerk JWT validation, tenant-safe `404`, rate limiting, ETag concurrency, direct presigned upload, magic-byte/media validation и safe process arguments. | Production TLS/secret manager, worker container sandbox, ASVS evidence и signed downloads. |
+| `MEDIA` | ffprobe validation; normalized audio preview, image proxy/thumbnail и H.264 `yuv420p` video proxy. | Golden corpus, final 1080×1920 profiles, A/V sync, SSIM и bundle validation. |
+| `OBS` | ServiceDefaults, OpenTelemetry, structured errors с `traceId`, live/ready health checks и durable job events. | Production dashboards, alerts, cost telemetry и cross-runtime traces. |
+| `UX` | Responsive landing/onboarding/dashboard/release setup, keyboard-native forms, explicit progress и recoverable upload sessions. | axe/browser matrix, timing editor accessibility и complete paid flow. |
+| `ENG` | Strict .NET build, pinned dependencies, EF migration, Aspire topology test, generated OpenAPI TypeScript contract, unit/integration/Playwright suites. | CI release gate, contract-version fixtures, media golden tests and deploy artifacts. |

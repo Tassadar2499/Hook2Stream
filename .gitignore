@@ -10,8 +10,8 @@
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
-[Rr]elease/
-[Rr]eleases/
+/[Rr]elease/
+/[Rr]eleases/
 x64/
 x86/
 [Ww][Ii][Nn]32/
@@ -38,6 +38,22 @@ ScaffoldingReadMe.txt
 
 # dotenv environment variables file
 .env
+.env.local
+.env.*.local
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+*.tsbuildinfo
+playwright-report/
+test-results/
+blob-report/
+
+# Local media and Aspire state
+.aspire/
+media-work/
 
 # Others
 ~$*
@@ -55,8 +71,15 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+/.DS_Store
 /.idea/inspectionProfiles/Project_Default.xml
 /.idea/.gitignore
 /.idea/encodings.xml
 /.idea/indexLayout.xml
 /.idea/vcs.xml
+/src/.idea/.idea.Hook2Stream/.idea/inspectionProfiles/Project_Default.xml
+/src/.idea/.idea.Hook2Stream/.idea/.gitignore
+/src/.idea/.idea.Hook2Stream/.idea/.name
+/src/.idea/.idea.Hook2Stream/.idea/encodings.xml
+/src/.idea/.idea.Hook2Stream/.idea/indexLayout.xml
+/src/.idea/.idea.Hook2Stream/.idea/vcs.xml
