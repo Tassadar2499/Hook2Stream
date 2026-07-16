@@ -191,7 +191,7 @@ Hook2Stream отличается сочетанием пяти свойств:
 2. `EmotionalLyric` — законченная сильная строка или фраза.
 3. `InstrumentalDrop` — drop, riff, solo, build-up payoff или максимальный energy transition.
 
-Правила:
+Правила:молодого
 
 - каждый hook длится 10–30 секунд;
 - начало и конец не обрывают слово без явного подтверждения пользователя;
@@ -607,6 +607,8 @@ Project state не заменяет состояния отдельных jobs �
 
 ### 8.6. Надёжность и безопасность
 
+Измеримые SLO, processing targets, production topology, media profiles, retention, security controls, accessibility и browser support зафиксированы в [нефункциональных требованиях](../non-func-requirements/README.md).
+
 - presigned upload/download URLs;
 - server-generated object keys;
 - workspace isolation на каждом запросе;
@@ -622,6 +624,8 @@ Project state не заменяет состояния отдельных jobs �
 - audit для admin retry, refund и manual entitlement.
 
 ### 8.7. Тестовая стратегия
+
+Verification suites должны ссылаться на соответствующие `FR-*` и `NFR-*`.
 
 - unit tests для recipe, schedule, pricing и state transitions;
 - integration tests с PostgreSQL и S3-compatible storage;

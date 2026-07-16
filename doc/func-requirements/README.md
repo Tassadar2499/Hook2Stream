@@ -173,17 +173,17 @@ hook2stream-{artist}-{track}/
 
 `manifest.json` содержит product, project revision, campaign plan version, выбранные item IDs, render hashes, filenames и timestamps. Он не содержит secrets, presigned URLs или внутренние provider credentials.
 
-## 9. Открытые конфигурационные решения
+## 9. Конфигурационные решения
+
+### 9.1. Открытые решения
 
 | ID | Решение | Требуемо |
 |---|---|---|
 | `DEC-001` | `CFG-AUDIO-MAX-BYTES`, `CFG-AUDIO-MAX-DURATION` и точные codec limits | До upload beta |
 | `DEC-002` | Максимальный размер, duration и resolution visual asset | До upload beta |
 | `DEC-003` | Поддерживаемый allowlist fonts и правила лицензирования | До первого paid render |
-| `DEC-004` | FPS, bitrate, loudness target и GOP final output | До golden corpus validation |
 | `DEC-005` | Payment provider, налоги/MoR и billing grace | До checkout beta |
-| `DEC-006` | Retention original, proxy, preview, render и export | До публичных Terms |
-| `DEC-007` | Download URL TTL и число повторных скачиваний | До paid beta |
+| `DEC-007` | Число повторных выдач нового download URL после expiry; TTL закрыт в `NFR-SEC-008` | До paid beta |
 | `DEC-008` | Low-confidence thresholds WhisperX/Essentia | До hook quality benchmark |
 | `DEC-009` | Поддерживаемые языки copy generation | До public landing |
 | `DEC-010` | Канал support и полномочия admin операций | До первых внешних пользователей |
@@ -191,18 +191,26 @@ hook2stream-{artist}-{track}/
 
 Открытое значение не разрешает его игнорировать: до закрытия используется явно заданная environment configuration и тестируются обе стороны границы.
 
+### 9.2. Закрытые решения
+
+| ID | Решение | Зафиксировано |
+|---|---|---|
+| `DEC-004` | FPS, bitrate, loudness target и GOP preview/final output | `NFR-MEDIA-001..003` |
+| `DEC-006` | Retention originals, proxies, previews, renders и exports | `NFR-DATA-006..008` |
+
 ## 10. Граница функциональных требований
 
-Отдельными нефункциональными спецификациями должны быть зафиксированы:
+Измеримые системные свойства зафиксированы в [нефункциональных требованиях](../non-func-requirements/README.md):
 
-- P50/P95 processing time;
-- availability и recovery targets;
-- resource isolation;
-- encryption и secret management;
-- backup/restore;
-- accessibility;
-- browser support;
-- production topology.
+| Область | Диапазон |
+|---|---|
+| Processing time и capacity | `NFR-PERF-*` |
+| Availability, recovery и production topology | `NFR-REL-*`, `NFR-DATA-*` |
+| Resource isolation, encryption и secrets | `NFR-SEC-*` |
+| Media quality | `NFR-MEDIA-*` |
+| Monitoring и supportability | `NFR-OBS-*` |
+| Accessibility и browser support | `NFR-UX-*` |
+| Maintainability, delivery и cost | `NFR-ENG-*` |
 
 Технологические решения перечислены в [tech stack](../base/tech-stack.md), но библиотека или provider не заменяет наблюдаемое требование.
 
@@ -212,5 +220,5 @@ hook2stream-{artist}-{track}/
 - ID не переиспользуются для другого смысла.
 - Изменение фиксированного recipe, тарифного entitlement или schedule требует новой версии product plan и обновления acceptance tests.
 - Template, analysis и composition contracts версионируются.
-- Тесты и ADR ссылаются на FR-ID.
+- Тесты и ADR ссылаются на FR-ID и NFR-ID.
 - Future roadmap не добавляется в MVP как скрытое обязательство.

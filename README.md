@@ -70,11 +70,16 @@ Generative video backgrounds не входят в MVP. Если они появ�
 - рекламные кабинеты;
 - команды, роли, white label и публичный API.
 
+## Tech stack
+
+MVP stack: Next.js, React, TypeScript, ASP.NET Core API/Worker, .NET Aspire AppHost + ServiceDefaults, PostgreSQL, S3-compatible storage, Remotion, FFmpeg/ffprobe, Python sidecar with WhisperX and Essentia.
+
 ## Документация
 
 - [Продуктовый и технический план](doc/base/Hook2Stream_Product_Plan.md)
 - [Технологический стек](doc/base/tech-stack.md)
 - [Функциональные требования](doc/func-requirements/README.md)
+- [Нефункциональные требования](doc/non-func-requirements/README.md)
 
 ## Стадия
 
