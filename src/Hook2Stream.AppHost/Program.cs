@@ -35,14 +35,15 @@ var postgresPassword = builder.AddParameter(
     persist: true);
 
 var postgres = builder.AddPostgres("postgres", password: postgresPassword)
-    .WithDataVolume("hook2stream-postgres-data");
+    .WithDataVolume();
 var database = postgres.AddDatabase("hook2stream");
 
-var minio = builder
-    .AddContainer(
-        "minio",
-        "minio/minio",
-        "RELEASE.2025-04-22T22-12-26Z")
+var minio = builder.AddContainer(
+    "minio",
+    "minio/minio",
+    "RELEASE.2025-04-22T22-12-26Z");
+
+minio
     .WithArgs("server", "/data", "--console-address", ":9001")
     .WithEnvironment("MINIO_ROOT_USER", "hook2stream")
     .WithEnvironment("MINIO_ROOT_PASSWORD", minioPassword)
@@ -51,7 +52,7 @@ var minio = builder
         "http://localhost:3000,http://127.0.0.1:3000")
     .WithHttpEndpoint(targetPort: 9000, name: "s3")
     .WithHttpEndpoint(targetPort: 9001, name: "console")
-    .WithVolume("hook2stream-minio-data", "/data");
+    .WithVolume(VolumeNameGenerator.Generate(minio, "data"), "/data");
 
 var bootstrapper = builder
     .AddProject<Projects.Hook2Stream_Bootstrapper>("bootstrapper")

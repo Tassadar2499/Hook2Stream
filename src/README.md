@@ -44,12 +44,14 @@ npm ci --prefix src/web
 dotnet run --project src/Hook2Stream.AppHost
 ```
 
-The AppHost generates and persists local PostgreSQL and MinIO passwords in .NET user secrets, then reuses the named data volumes across restarts. MinIO CORS for direct browser uploads is configured by the container environment; the storage adapter can apply bucket CORS for compatible S3 providers. Clerk is optional for the public landing but required for onboarding and release management:
+The AppHost generates and persists local PostgreSQL and MinIO passwords in .NET user secrets, then reuses path-scoped data volumes across restarts. The volume names include the AppHost path identity, so parallel clones and worktrees do not share local state. MinIO CORS for direct browser uploads is configured by the container environment; the storage adapter can apply bucket CORS for compatible S3 providers. Clerk is optional for the public landing but required for onboarding and release management:
 
 ```bash
 dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:Issuer" "https://your-instance.clerk.accounts.dev"
 dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:PublishableKey" "pk_test_..."
 ```
+
+Keep each generated storage password paired with its volume. PostgreSQL only applies `POSTGRES_PASSWORD` while initializing an empty data directory, so changing or deleting `Parameters:postgres-password` while retaining its volume prevents the dependency gate from becoming ready. Legacy installs can remove the unused `hook2stream-postgres-data` and `hook2stream-minio-data` volumes after stopping AppHost; the next run creates clean path-scoped replacements.
 
 The worker expects `ffmpeg` and `ffprobe` in `PATH`. Originals are never rewritten; derivatives use versioned object keys.
 

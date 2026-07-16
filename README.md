@@ -109,12 +109,14 @@ npm ci --prefix src/web
 dotnet run --project src/Hook2Stream.AppHost
 ```
 
-Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует named volumes. CORS для прямой browser upload в MinIO задаётся AppHost. Без Clerk-ключей landing запускается, а защищённая часть показывает экран настройки. Для полного auth-flow:
+Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. CORS для прямой browser upload в MinIO задаётся AppHost. Без Clerk-ключей landing запускается, а защищённая часть показывает экран настройки. Для полного auth-flow:
 
 ```bash
 dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:Issuer" "https://your-instance.clerk.accounts.dev"
 dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:PublishableKey" "pk_test_..."
 ```
+
+Не удаляйте и не меняйте `Parameters:postgres-password` или `Parameters:minio-password`, сохраняя соответствующие volumes: PostgreSQL применяет пароль только при первой инициализации хранилища. Если использовалась ранняя версия AppHost с глобальными volumes, остановите AppHost и удалите устаревшие `hook2stream-postgres-data` и `hook2stream-minio-data`; при следующем запуске Aspire создаст чистые path-scoped volumes.
 
 Основные проверки:
 
