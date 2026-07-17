@@ -1,14 +1,14 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useAppAuth } from "@/components/app-auth-provider";
 import { ApiRequestError, apiFetch } from "@/lib/api";
 
 const legalVersion = "draft-2026-07-16";
 
 export function OnboardingClient() {
-  const { getToken } = useAuth();
+  const { getToken } = useAppAuth();
   const router = useRouter();
   const [workspaceName, setWorkspaceName] = useState("");
   const [displayName, setDisplayName] = useState("");

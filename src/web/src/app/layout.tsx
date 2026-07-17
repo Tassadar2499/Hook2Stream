@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { ClerkProvider } from "@clerk/nextjs";
+import { AppAuthProvider } from "@/components/app-auth-provider";
+import { getAppAuthMode } from "@/lib/auth-config";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -13,22 +14,21 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const authMode = getAppAuthMode();
   const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const content = (
-    <>
-      <div className="noise" aria-hidden="true" />
-      {children}
-    </>
-  );
+  const localToken = process.env.NEXT_PUBLIC_LOCAL_AUTH_TOKEN;
 
   return (
     <html lang="en" data-scroll-behavior="smooth">
       <body>
-        {publishableKey ? (
-          <ClerkProvider publishableKey={publishableKey}>{content}</ClerkProvider>
-        ) : (
-          content
-        )}
+        <AppAuthProvider
+          mode={authMode}
+          clerkPublishableKey={publishableKey}
+          localToken={localToken}
+        >
+          <div className="noise" aria-hidden="true" />
+          {children}
+        </AppAuthProvider>
       </body>
     </html>
   );

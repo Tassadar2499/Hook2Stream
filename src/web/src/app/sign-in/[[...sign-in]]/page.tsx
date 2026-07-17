@@ -1,8 +1,14 @@
 import { SignIn } from "@clerk/nextjs";
+import { redirect } from "next/navigation";
 import { ConfigurationRequired } from "@/components/configuration-required";
+import { getAppAuthMode } from "@/lib/auth-config";
 
 export default function SignInPage() {
-  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+  const authMode = getAppAuthMode();
+  if (authMode === "local") {
+    redirect("/dashboard");
+  }
+  if (authMode === "unconfigured") {
     return <ConfigurationRequired />;
   }
 

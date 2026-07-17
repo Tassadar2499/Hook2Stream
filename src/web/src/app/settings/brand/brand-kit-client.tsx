@@ -1,8 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useAppAuth } from "@/components/app-auth-provider";
 import { AppShell } from "@/components/app-shell";
 import { StatusPanel } from "@/components/status-panel";
 import { ApiRequestError, BrandKit, apiFetch } from "@/lib/api";
@@ -10,7 +10,7 @@ import { ApiRequestError, BrandKit, apiFetch } from "@/lib/api";
 const fonts = ["Inter", "Manrope", "Montserrat", "Oswald"];
 
 export function BrandKitClient() {
-  const { getToken, isLoaded, isSignedIn } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAppAuth();
   const router = useRouter();
   const [brand, setBrand] = useState<BrandKit>();
   const [etag, setEtag] = useState<string>();

@@ -1,6 +1,44 @@
 using Aspire.Hosting.ApplicationModel;
+using Microsoft.Extensions.Hosting;
 
 var builder = DistributedApplication.CreateBuilder(args);
+
+var clerkIssuer = builder.Configuration["Clerk:Issuer"]?.Trim() ?? "";
+var clerkPublishableKey = builder.Configuration["Clerk:PublishableKey"]?.Trim() ?? "";
+var hasClerkIssuer = !string.IsNullOrWhiteSpace(clerkIssuer);
+var hasClerkPublishableKey = !string.IsNullOrWhiteSpace(clerkPublishableKey);
+
+if (hasClerkIssuer != hasClerkPublishableKey)
+{
+    throw new InvalidOperationException(
+        "Clerk configuration is incomplete. Set both Clerk:Issuer and Clerk:PublishableKey, or remove both to use local Development authentication.");
+}
+
+var useLocalAuthentication = !hasClerkIssuer;
+if (useLocalAuthentication && !builder.Environment.IsDevelopment())
+{
+    throw new InvalidOperationException(
+        "Clerk:Issuer and Clerk:PublishableKey are required outside the Development environment.");
+}
+
+IResourceBuilder<ParameterResource>? localAuthenticationToken = null;
+if (useLocalAuthentication)
+{
+    localAuthenticationToken = builder.AddParameter(
+        "local-auth-token",
+        new GenerateParameterDefault
+        {
+            MinLength = 48,
+            Lower = true,
+            Upper = true,
+            Numeric = true,
+            Special = false,
+            MinLower = 4,
+            MinUpper = 4,
+            MinNumeric = 4
+        },
+        secret: true);
+}
 
 var minioPassword = builder.AddParameter(
     "minio-password",
@@ -76,8 +114,14 @@ var api = builder
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
     .WithEnvironment("Storage__ConfigureBucketCors", "false")
-    .WithEnvironment("Clerk__Issuer", builder.Configuration["Clerk:Issuer"] ?? "")
+    .WithEnvironment("Auth__Mode", useLocalAuthentication ? "Local" : "Clerk")
+    .WithEnvironment("Clerk__Issuer", clerkIssuer)
     .WaitForCompletion(bootstrapper);
+
+if (useLocalAuthentication)
+{
+    api.WithEnvironment("Auth__LocalToken", localAuthenticationToken!);
+}
 
 builder
     .AddProject<Projects.Hook2Stream_Worker>("worker")
@@ -90,14 +134,22 @@ builder
     .WithEnvironment("Storage__ConfigureBucketCors", "false")
     .WaitForCompletion(bootstrapper);
 
-builder
+var web = builder
     .AddJavaScriptApp("web", "../web", "dev")
     .WithHttpEndpoint(targetPort: 3000, port: 3000, env: "PORT", isProxied: false)
     .WithEnvironment("NEXT_PUBLIC_API_BASE_URL", api.GetEndpoint("http"))
     .WithEnvironment(
+        "NEXT_PUBLIC_AUTH_MODE",
+        useLocalAuthentication ? "local" : "clerk")
+    .WithEnvironment(
         "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
-        builder.Configuration["Clerk:PublishableKey"] ?? "")
+        clerkPublishableKey)
     .WithReference(api)
     .WaitFor(api);
+
+if (useLocalAuthentication)
+{
+    web.WithEnvironment("NEXT_PUBLIC_LOCAL_AUTH_TOKEN", localAuthenticationToken!);
+}
 
 builder.Build().Run();

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { SiteHeader } from "@/components/site-header";
+import { isAppAuthConfigured } from "@/lib/auth-config";
 
 const deliverables = [
   ["12", "hook-driven lyric, cover and visual-loop variants"],
@@ -50,7 +51,7 @@ const plans = [
 ];
 
 export default function Home() {
-  const clerkEnabled = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+  const authConfigured = isAppAuthConfigured();
 
   return (
     <>
@@ -75,7 +76,7 @@ export default function Home() {
             <div className="mt-9 flex flex-wrap gap-3">
               <Link
                 className="button-primary"
-                href={clerkEnabled ? "/dashboard" : "/setup"}
+                href={authConfigured ? "/dashboard" : "/setup"}
               >
                 Build a release pack
               </Link>
@@ -210,7 +211,7 @@ export default function Home() {
                 <p className="mt-5 flex-1 text-lg leading-7">{plan.copy}</p>
                 <Link
                   className={plan.featured ? "button-primary" : "button-quiet"}
-                  href={clerkEnabled ? "/dashboard" : "/setup"}
+                  href={authConfigured ? "/dashboard" : "/setup"}
                 >
                   Start a release
                 </Link>

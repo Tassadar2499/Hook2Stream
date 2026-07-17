@@ -2,8 +2,6 @@ import Link from "next/link";
 import { AuthActions } from "@/components/auth-actions";
 
 export function SiteHeader() {
-  const clerkEnabled = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
-
   return (
     <header className="shell flex min-h-20 items-center justify-between gap-4 py-4">
       <Link href="/" className="display text-2xl" aria-label="Hook2Stream home">
@@ -15,13 +13,7 @@ export function SiteHeader() {
             Pricing
           </Link>
         </span>
-        {clerkEnabled ? (
-          <AuthActions />
-        ) : (
-          <Link className="button-primary" href="/setup">
-            Configure Clerk
-          </Link>
-        )}
+        <AuthActions />
       </nav>
     </header>
   );

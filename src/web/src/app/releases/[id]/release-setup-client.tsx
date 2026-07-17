@@ -1,8 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useAppAuth } from "@/components/app-auth-provider";
 import { AppShell } from "@/components/app-shell";
 import { StatusPanel } from "@/components/status-panel";
 import { UploadManager } from "@/components/upload-manager";
@@ -15,7 +15,7 @@ import {
 } from "@/lib/api";
 
 export function ReleaseSetupClient({ projectId }: { projectId: string }) {
-  const { getToken, isLoaded, isSignedIn } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAppAuth();
   const router = useRouter();
   const [release, setRelease] = useState<Release>();
   const [readiness, setReadiness] = useState<Readiness>();

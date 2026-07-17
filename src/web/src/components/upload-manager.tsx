@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, useRef, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
+import { useAppAuth } from "@/components/app-auth-provider";
 import {
   ApiRequestError,
   AssetKind,
@@ -32,7 +32,7 @@ export function UploadManager({
   multiple = false,
   onCompleted,
 }: UploadManagerProps) {
-  const { getToken } = useAuth();
+  const { getToken } = useAppAuth();
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState("Waiting for a file");
   const [busy, setBusy] = useState(false);

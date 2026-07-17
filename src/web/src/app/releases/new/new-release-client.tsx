@@ -1,8 +1,8 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
+import { useAppAuth } from "@/components/app-auth-provider";
 import { AppShell } from "@/components/app-shell";
 import { StatusPanel } from "@/components/status-panel";
 import {
@@ -19,7 +19,7 @@ function isoDate(offsetDays: number) {
 }
 
 export function NewReleaseClient() {
-  const { getToken } = useAuth();
+  const { getToken } = useAppAuth();
   const router = useRouter();
   const [mode, setMode] = useState<ReleaseMode>("upcoming");
   const [instrumental, setInstrumental] = useState(false);

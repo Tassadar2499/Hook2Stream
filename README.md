@@ -111,12 +111,16 @@ npm ci --prefix src/web
 
 Скрипт сохраняет HTTPS для Aspire, если локальный .NET development certificate доверен. Если сертификат не доверен, скрипт автоматически включает unsecured transport только для локального запуска Aspire; явно заданный `ASPIRE_ALLOW_UNSECURED_TRANSPORT` имеет приоритет. Чтобы использовать HTTPS, доверьте сертификат командой `dotnet dev-certs https --trust`.
 
-Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. CORS для прямой browser upload в MinIO задаётся AppHost. Без Clerk-ключей landing запускается, а защищённая часть показывает экран настройки. Для полного auth-flow:
+Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. CORS для прямой browser upload в MinIO задаётся AppHost.
+
+При запуске через AppHost без Clerk-ключей автоматически включается фиксированный локальный пользователь. Режим доступен только в Development, принимает запросы только через loopback и использует новый случайный bearer token при каждом запуске. Workspace и данные сохраняются между запусками. Чтобы проверить настоящий Clerk flow, задайте оба ключа:
 
 ```bash
 dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:Issuer" "https://your-instance.clerk.accounts.dev"
 dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:PublishableKey" "pk_test_..."
 ```
+
+Если задан только один из Clerk-ключей, AppHost завершит запуск с подсказкой исправить конфигурацию. Отдельный `npm run dev --prefix src/web` без AppHost не включает Local Auth и показывает экран настройки.
 
 Не удаляйте и не меняйте `Parameters:postgres-password` или `Parameters:minio-password`, сохраняя соответствующие volumes: PostgreSQL применяет пароль только при первой инициализации хранилища. Если использовалась ранняя версия AppHost с глобальными volumes, остановите AppHost и удалите устаревшие `hook2stream-postgres-data` и `hook2stream-minio-data`; при следующем запуске Aspire создаст чистые path-scoped volumes.
 

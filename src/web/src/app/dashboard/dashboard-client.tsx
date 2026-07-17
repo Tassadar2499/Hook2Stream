@@ -1,15 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuth } from "@clerk/nextjs";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useAppAuth } from "@/components/app-auth-provider";
 import { AppShell } from "@/components/app-shell";
 import { StatusPanel } from "@/components/status-panel";
 import { Account, ApiRequestError, Release, apiFetch } from "@/lib/api";
 
 export function DashboardClient() {
-  const { getToken, isLoaded, isSignedIn } = useAuth();
+  const { getToken, isLoaded, isSignedIn } = useAppAuth();
   const router = useRouter();
   const [account, setAccount] = useState<Account>();
   const [releases, setReleases] = useState<Release[]>([]);

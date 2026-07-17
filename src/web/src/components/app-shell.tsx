@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 import { usePathname } from "next/navigation";
+import { useAppAuth } from "@/components/app-auth-provider";
 
 const navigation = [
   { href: "/dashboard", label: "Releases" },
@@ -12,6 +13,7 @@ const navigation = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { mode } = useAppAuth();
 
   return (
     <div className="min-h-screen">
@@ -41,7 +43,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
-          <UserButton />
+          {mode === "clerk" ? (
+            <UserButton />
+          ) : (
+            <span className="rounded-full border border-[var(--line)] bg-[var(--lime)] px-3 py-2 text-xs font-black uppercase">
+              Local developer
+            </span>
+          )}
         </div>
       </header>
       <div className="shell grid gap-7 py-7 md:grid-cols-[13rem_1fr] md:py-10">

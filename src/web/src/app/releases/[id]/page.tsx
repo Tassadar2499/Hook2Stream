@@ -1,4 +1,5 @@
 import { ConfigurationRequired } from "@/components/configuration-required";
+import { isAppAuthConfigured } from "@/lib/auth-config";
 import { ReleaseSetupClient } from "./release-setup-client";
 
 export default async function ReleasePage({
@@ -6,7 +7,7 @@ export default async function ReleasePage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+  if (!isAppAuthConfigured()) {
     return <ConfigurationRequired />;
   }
 

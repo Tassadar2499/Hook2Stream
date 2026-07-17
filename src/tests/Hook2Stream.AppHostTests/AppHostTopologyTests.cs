@@ -1,5 +1,7 @@
+using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Hook2Stream.AppHostTests;
 
@@ -23,10 +25,32 @@ public sealed class AppHostTopologyTests
 
         var postgresPassword = Assert.IsType<ParameterResource>(resources["postgres-password"]);
         var minioPassword = Assert.IsType<ParameterResource>(resources["minio-password"]);
+        var localAuthToken = Assert.IsType<ParameterResource>(resources["local-auth-token"]);
         Assert.True(postgresPassword.Secret);
         Assert.True(minioPassword.Secret);
+        Assert.True(localAuthToken.Secret);
         Assert.Equal("UserSecretsParameterDefault", postgresPassword.Default!.GetType().Name);
         Assert.Equal("UserSecretsParameterDefault", minioPassword.Default!.GetType().Name);
+        Assert.IsType<GenerateParameterDefault>(localAuthToken.Default);
+
+        var executionContext = new DistributedApplicationExecutionContext(
+            DistributedApplicationOperation.Publish);
+        var apiConfiguration = await ExecutionConfigurationBuilder
+            .Create(resources["api"])
+            .WithEnvironmentVariablesConfig()
+            .BuildAsync(executionContext, NullLogger.Instance, CancellationToken.None);
+        var webConfiguration = await ExecutionConfigurationBuilder
+            .Create(resources["web"])
+            .WithEnvironmentVariablesConfig()
+            .BuildAsync(executionContext, NullLogger.Instance, CancellationToken.None);
+        var apiEnvironment = apiConfiguration.EnvironmentVariables.ToDictionary();
+        var webEnvironment = webConfiguration.EnvironmentVariables.ToDictionary();
+
+        Assert.Equal("Local", apiEnvironment["Auth__Mode"]);
+        Assert.Equal("local", webEnvironment["NEXT_PUBLIC_AUTH_MODE"]);
+        Assert.Equal(
+            apiEnvironment["Auth__LocalToken"],
+            webEnvironment["NEXT_PUBLIC_LOCAL_AUTH_TOKEN"]);
 
         var postgresVolume = GetDataVolume(resources["postgres"]);
         var minioVolume = GetDataVolume(resources["minio"]);

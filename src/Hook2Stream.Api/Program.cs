@@ -24,31 +24,69 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
 });
 
-var clerk = builder.Configuration.GetSection(ClerkOptions.SectionName).Get<ClerkOptions>() ?? new ClerkOptions();
-var issuer = string.IsNullOrWhiteSpace(clerk.Issuer)
-    ? "https://clerk-not-configured.invalid"
-    : clerk.Issuer.TrimEnd('/');
+var authentication = builder.Configuration
+    .GetSection(ApplicationAuthenticationOptions.SectionName)
+    .Get<ApplicationAuthenticationOptions>() ?? new ApplicationAuthenticationOptions();
 
-builder.Services
-    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.LocalMode, StringComparison.OrdinalIgnoreCase))
+{
+    if (!builder.Environment.IsDevelopment())
     {
-        options.MapInboundClaims = false;
-        options.Authority = issuer;
-        options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
-        options.TokenValidationParameters = new TokenValidationParameters
+        throw new InvalidOperationException(
+            "Local authentication is only available in the Development environment.");
+    }
+
+    if (string.IsNullOrWhiteSpace(authentication.LocalToken))
+    {
+        throw new InvalidOperationException(
+            "Auth:LocalToken is required when Auth:Mode is Local.");
+    }
+
+    builder.Services
+        .AddAuthentication(LocalDevelopmentAuthenticationHandler.SchemeName)
+        .AddScheme<LocalDevelopmentAuthenticationOptions, LocalDevelopmentAuthenticationHandler>(
+            LocalDevelopmentAuthenticationHandler.SchemeName,
+            options =>
+            {
+                options.Token = authentication.LocalToken;
+                options.Subject = authentication.LocalSubject;
+                options.Email = authentication.LocalEmail;
+                options.DisplayName = authentication.LocalDisplayName;
+            });
+}
+else if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.ClerkMode, StringComparison.OrdinalIgnoreCase))
+{
+    var clerk = builder.Configuration.GetSection(ClerkOptions.SectionName).Get<ClerkOptions>() ?? new ClerkOptions();
+    var issuer = string.IsNullOrWhiteSpace(clerk.Issuer)
+        ? "https://clerk-not-configured.invalid"
+        : clerk.Issuer.TrimEnd('/');
+
+    builder.Services
+        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer(options =>
         {
-            ValidateIssuer = true,
-            ValidIssuer = issuer,
-            ValidateAudience = false,
-            ValidateIssuerSigningKey = true,
-            ValidateLifetime = true,
-            RequireExpirationTime = true,
-            RequireSignedTokens = true,
-            ValidAlgorithms = [SecurityAlgorithms.RsaSha256]
-        };
-        options.Events = ClerkJwtEvents.Create(clerk);
-    });
+            options.MapInboundClaims = false;
+            options.Authority = issuer;
+            options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidIssuer = issuer,
+                ValidateAudience = false,
+                ValidateIssuerSigningKey = true,
+                ValidateLifetime = true,
+                RequireExpirationTime = true,
+                RequireSignedTokens = true,
+                ValidAlgorithms = [SecurityAlgorithms.RsaSha256]
+            };
+            options.Events = ClerkJwtEvents.Create(clerk);
+        });
+}
+else
+{
+    throw new InvalidOperationException(
+        $"Unsupported Auth:Mode '{authentication.Mode}'. Use '{ApplicationAuthenticationOptions.ClerkMode}' or '{ApplicationAuthenticationOptions.LocalMode}'.");
+}
 builder.Services.AddAuthorization();
 
 builder.Services.AddCors(options =>

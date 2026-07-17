@@ -14,12 +14,12 @@ test("landing communicates the campaign result and pricing", async ({ page }) =>
 
 test("unconfigured local build leads to actionable Clerk setup", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("link", { name: "Configure Clerk" }).click();
+  await page.getByRole("link", { name: "Configure auth" }).click();
 
   await expect(
-    page.getByRole("heading", { name: "Connect Clerk first." }),
+    page.getByRole("heading", { name: "Start with AppHost." }),
   ).toBeVisible();
-  await expect(page.getByText(/no development auth bypass/i)).toBeVisible();
+  await expect(page.getByText(/loopback-only development identity/i)).toBeVisible();
 });
 
 test("mobile landing has no horizontal overflow", async ({ page }) => {
