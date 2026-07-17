@@ -36,6 +36,13 @@ public sealed class AppHostTopologyTests
         Assert.NotEqual(postgresVolume.Source, minioVolume.Source);
         Assert.EndsWith("-postgres-data", postgresVolume.Source, StringComparison.Ordinal);
         Assert.EndsWith("-minio-data", minioVolume.Source, StringComparison.Ordinal);
+
+        Assert.Single(resources["minio"].Annotations.OfType<HealthCheckAnnotation>());
+
+        var minioWait = Assert.Single(
+            resources["bootstrapper"].Annotations.OfType<WaitAnnotation>(),
+            annotation => ReferenceEquals(annotation.Resource, resources["minio"]));
+        Assert.Equal(WaitType.WaitUntilHealthy, minioWait.WaitType);
     }
 
     private static ContainerMountAnnotation GetDataVolume(IResource resource)

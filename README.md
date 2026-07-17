@@ -106,8 +106,10 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/Worker, .NET Aspire AppH
 ```bash
 dotnet tool restore
 npm ci --prefix src/web
-dotnet run --project src/Hook2Stream.AppHost
+./scripts/run.sh
 ```
+
+Скрипт сохраняет HTTPS для Aspire, если локальный .NET development certificate доверен. Если сертификат не доверен, скрипт автоматически включает unsecured transport только для локального запуска Aspire; явно заданный `ASPIRE_ALLOW_UNSECURED_TRANSPORT` имеет приоритет. Чтобы использовать HTTPS, доверьте сертификат командой `dotnet dev-certs https --trust`.
 
 Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. CORS для прямой browser upload в MinIO задаётся AppHost. Без Clerk-ключей landing запускается, а защищённая часть показывает экран настройки. Для полного auth-flow:
 

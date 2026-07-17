@@ -52,7 +52,8 @@ minio
         "http://localhost:3000,http://127.0.0.1:3000")
     .WithHttpEndpoint(targetPort: 9000, name: "s3")
     .WithHttpEndpoint(targetPort: 9001, name: "console")
-    .WithVolume(VolumeNameGenerator.Generate(minio, "data"), "/data");
+    .WithVolume(VolumeNameGenerator.Generate(minio, "data"), "/data")
+    .WithHttpHealthCheck("/minio/health/ready", endpointName: "s3");
 
 var bootstrapper = builder
     .AddProject<Projects.Hook2Stream_Bootstrapper>("bootstrapper")
