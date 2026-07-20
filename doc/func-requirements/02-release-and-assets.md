@@ -8,34 +8,34 @@ Release project связывает входные материалы, analysis, 
 
 | ID | Требование | Проверка |
 |---|---|---|
-| `FR-REL-001` | Система должна позволять создать release project в персональном workspace с уникальным ID и состоянием `Draft`. | После создания project доступен только владельцу и отображается в dashboard без обязательного запуска analysis. |
-| `FR-REL-002` | Project должен хранить имя артиста, название трека, язык, internal notes и выбранный brand kit snapshot; имя артиста и трека обязательны до analysis. | Попытка запустить analysis без обязательной metadata блокируется с указанием отсутствующих полей; валидные значения сохраняются. |
-| `FR-REL-003` | Пользователь должен выбрать `Upcoming` с будущей release date либо `Released` с фактической release date и датой начала новой кампании. | Upcoming не принимает прошедшую release date; Released не требует будущую дату и сохраняет отдельный campaign start. |
-| `FR-REL-004` | До analysis пользователь должен подтвердить права на audio, lyrics, cover и visual assets и указать synthetic/altered-content status. | Без rights attestation analysis не запускается; подтверждение сохраняет actor, timestamp, policy version и flags. |
-| `FR-REL-005` | Система должна вычислять и показывать каноническое состояние project: `Draft`, `Analyzing`, `HookReview`, `CampaignReady`, `PreviewReady`, `Rendering`, `Ready`, `PartiallyReady` или `Archived`. | Состояние соответствует фактическим artifacts/jobs; failure одного item не переводит весь project в несуществующий общий `Failed`. |
+| `FR-REL-001` | Система должна одним MP3-first command создать в персональном workspace release project, audio asset и upload session. Новый project имеет `FlowKind=Mp3First`, `Mode=Unscheduled` и уникальный ID. | Повтор с тем же `Idempotency-Key` и payload возвращает те же IDs; другое тело с тем же ключом получает `409`; project недоступен другому workspace. |
+| `FR-REL-002` | Project должен хранить имя артиста, название трека, RU/EN language, internal notes и brand kit snapshot. ID3/filename используются только как предложения и не перезаписывают пользовательское значение. | Один MP3 можно загрузить до metadata; перед первым external artwork request система требует подтверждённые artist/title/language/release timing. |
+| `FR-REL-003` | До campaign generation пользователь должен заменить начальный `Unscheduled` на `Upcoming` с будущей release date либо `Released` с фактической release date и будущей/сегодняшней campaign start date. | `Unscheduled` разрешает ingest/analysis; Upcoming и Released валидируются раздельно; без schedule не создаются artwork/campaign по production policy. |
+| `FR-REL-004` | До отправки MP3 пользователь должен подтвердить права на audio/lyrics/performance и разрешить external AI processing через OpenRouter с Zero Data Retention. Только детерминированные ingest/analysis не требуют внешнего provider call; transcription, artwork и campaign проверяют актуальный consent до и после каждого вызова. | Без двух quick-upload flags API отклоняет запрос; revoke/replacement отменяет AI stage и не сохраняет поздний provider result; attestation хранит actor, timestamp, policy version, bound audio asset и fingerprint. |
+| `FR-REL-005` | Система должна отдавать reload-safe workflow с lanes `Audio`, `Analysis`, `Transcript`, `Artwork`, `Hooks`, `Campaign`, `Preview`, `FinalRender`, progress, blockers и next action; coarse project state остаётся производным представлением. | Перезагрузка/другое устройство восстанавливает канонические lanes; failure одного item не переводит весь project в общий необратимый `Failed`. |
 | `FR-REL-006` | Пользователь должен иметь возможность переименовать internal project label, архивировать, восстановить из архива и удалить project. | Archive скрывает project из active list без удаления; restore возвращает его; delete немедленно закрывает доступ и запускает configured cleanup. |
-| `FR-REL-007` | Система должна хранить dependency versions и помечать downstream artifacts устаревшими после изменения audio, lyrics, timing, approved hook, brand snapshot или composition controls. | Замена audio инвалидирует analysis и plan; изменение одного campaign item инвалидирует только его affected render и export bundle revision. |
+| `FR-REL-007` | Система должна хранить immutable dependency revisions/fingerprints и помечать downstream artifacts stale после изменения audio, transcript approval, hook, approved cover, background, release timing или item controls. | Замена audio инвалидирует analysis/transcript/artwork/campaign; transcript edit сохраняет cover; hook/background/item edit инвалидирует только ссылающиеся items/renders и export revision. |
 
 ## AST — media assets
 
 | ID | Требование | Проверка |
 |---|---|---|
-| `FR-AST-001` | Project должен принимать один обязательный финальный audio asset в MP3 или WAV в пределах `CFG-AUDIO-*`. | Валидный MP3/WAV сохраняется; unsupported type, превышение bytes или duration отклоняются до analysis с точной причиной. |
-| `FR-AST-002` | Project должен принимать одну обязательную cover image и создавать browser-safe proxy/thumbnail. | Без cover analysis не запускается; валидная cover отображается в setup, brand defaults и animated-cover template. |
-| `FR-AST-003` | Project должен содержать от 3 до 10 активных visual assets, каждый из которых является поддерживаемым изображением или коротким видео. | При двух assets запуск блокируется; 3 и 10 принимаются; одиннадцатый не активируется без удаления или замены существующего. |
+| `FR-AST-001` | Главный flow должен принимать один финальный MP3 в пределах `CFG-AUDIO-*`; WAV поддерживается как advanced replacement. | Валидный MP3 создаёт draft/upload session; WAV не предлагается основной dropzone, но принимается Sources-панелью; unsupported/corrupt media отклоняется с точной причиной. |
+| `FR-AST-002` | User cover необязательна: система создаёт три AI cover-кандидата либо принимает собственную cover и создаёт browser-safe proxy/thumbnail. | Analysis не зависит от cover; campaign generation блокируется до approval ровно одной current cover revision. |
+| `FR-AST-003` | Пользовательские visuals необязательны и могут содержать 0–10 поддерживаемых изображений/коротких видео; после cover approval система создаёт три согласованных campaign backgrounds. | Проект без custom visuals доходит до storyboard; одиннадцатый custom visual не активируется; manual sources и generated backgrounds различимы по origin/purpose. |
 | `FR-AST-004` | Upload должен выполняться напрямую в object storage через ограниченную session, показывать progress и поддерживать безопасное возобновление там, где размер требует multipart. | Обрыв multipart upload можно продолжить без duplicate asset; отменённая session не считается активным входом. |
-| `FR-AST-005` | До analysis система должна проверить MIME/container, codec, duration, dimensions, наличие audio stream и отсутствие повреждения, применяя `CFG-AUDIO-*` и `CFG-VISUAL-*`. | Переименованный либо повреждённый файл отклоняется по фактическому содержимому; UI показывает исправимое действие. |
+| `FR-AST-005` | До analysis система должна проверить audio magic/container, codec, duration, наличие audio stream и отсутствие повреждения; image/video checks выполняются до их выбора в artwork/campaign. | Переименованный либо повреждённый файл отклоняется по фактическому содержимому; UI показывает исправимое действие. |
 | `FR-AST-006` | Система должна создать normalized audio, image/video proxies, metadata и content hashes, не изменяя original bytes. | Analysis и browser preview используют derived assets; original hash остаётся неизменным и доступен в internal manifest. |
-| `FR-AST-007` | Пользователь должен иметь возможность заменить cover/audio, добавить, удалить и переупорядочить visuals, сохраняя правило 3–10 перед запуском campaign generation. | Замена обновляет dependency revision; удаление, оставляющее менее трёх active visuals, разрешено в draft, но блокирует generation с объяснением. |
+| `FR-AST-007` | Пользователь должен иметь возможность заменить audio/cover, добавить, удалить и переупорядочить optional visuals. | Замена audio инвалидирует analysis, transcript approval, hooks, artwork approval, campaign и renders; изменение visual инвалидирует только зависимые items. |
 | `FR-AST-008` | Asset keys, metadata, proxies и downloads должны быть изолированы workspace; project deletion должен применяться к original и derived assets по `CFG-RETENTION-*`. | Чужой key или URL не даёт доступ; после logical delete новые URLs не выдаются, а physical cleanup подтверждается audit event. |
 
-## Обязательный набор для analysis
+## Gates MP3-first flow
 
 ```text
-audio: 1 × MP3/WAV
-lyrics: text OR Instrumental
-cover: 1 image
-visuals: 3..10 image/video assets
-metadata: artist + track + language + release timing
-rights: accepted
+start + local analysis: 1 × MP3
+first external artwork: processed audio + artist + track + RU/EN + release timing + rights
+campaign generation: approved transcript OR confirmed Instrumental
+                     + approved cover + 3 generated/uploaded backgrounds
+                     + exactly 3 editable hooks
+advanced overrides: WAV + prepared lyrics + own cover + 0..10 visuals
 ```

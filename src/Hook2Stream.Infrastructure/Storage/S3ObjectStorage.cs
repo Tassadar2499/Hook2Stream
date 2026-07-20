@@ -71,6 +71,23 @@ public sealed class S3ObjectStorage(
         return Task.FromResult(ToPublicUri(client.GetPreSignedURL(request)));
     }
 
+    public Task<Uri> CreateReadUrlAsync(
+        string objectKey,
+        TimeSpan lifetime,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var request = new GetPreSignedUrlRequest
+        {
+            BucketName = _options.Bucket,
+            Key = objectKey,
+            Verb = HttpVerb.GET,
+            Expires = DateTime.UtcNow.Add(lifetime)
+        };
+
+        return Task.FromResult(ToPublicUri(client.GetPreSignedURL(request)));
+    }
+
     public async Task<Hook2Stream.Application.MultipartUpload> CreateMultipartUploadAsync(
         string objectKey,
         string contentType,

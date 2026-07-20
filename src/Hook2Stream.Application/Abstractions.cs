@@ -16,6 +16,10 @@ public interface IObjectStorage
         string contentType,
         TimeSpan lifetime,
         CancellationToken cancellationToken);
+    Task<Uri> CreateReadUrlAsync(
+        string objectKey,
+        TimeSpan lifetime,
+        CancellationToken cancellationToken);
     Task<MultipartUpload> CreateMultipartUploadAsync(
         string objectKey,
         string contentType,
@@ -54,11 +58,31 @@ public sealed record LeasedJob(
     string PayloadJson,
     int AttemptNumber,
     int MaxAttempts,
+    string RequiredCapability,
+    string HandlerVersion,
+    string? InputFingerprint,
+    int PayloadSchemaVersion,
     string LeaseOwner,
-    DateTimeOffset LeaseExpiresAt);
+    DateTimeOffset LeaseExpiresAt,
+    Guid LeaseToken);
+
+public sealed record JobEnqueueRequest(
+    Guid WorkspaceId,
+    Guid? ProjectId,
+    Guid? AssetId,
+    JobType Type,
+    string PayloadJson,
+    string? IdempotencyKey,
+    string RequiredCapability = "media",
+    string HandlerVersion = "v1",
+    string? InputFingerprint = null,
+    int PayloadSchemaVersion = 1,
+    Guid? PipelineRunId = null,
+    string? PipelineStage = null);
 
 public interface IJobQueue
 {
+    Task<Guid> EnqueueAsync(JobEnqueueRequest request, CancellationToken cancellationToken);
     Task<Guid> EnqueueAsync(
         Guid workspaceId,
         Guid? projectId,
@@ -66,19 +90,45 @@ public interface IJobQueue
         JobType type,
         string payloadJson,
         string? idempotencyKey,
+        CancellationToken cancellationToken) =>
+        EnqueueAsync(
+            new JobEnqueueRequest(
+                workspaceId,
+                projectId,
+                assetId,
+                type,
+                payloadJson,
+                idempotencyKey),
+            cancellationToken);
+    Task<LeasedJob?> TryLeaseAsync(
+        string workerId,
+        TimeSpan leaseDuration,
+        IReadOnlyCollection<string> capabilities,
         CancellationToken cancellationToken);
     Task<LeasedJob?> TryLeaseAsync(
         string workerId,
         TimeSpan leaseDuration,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken) =>
+        TryLeaseAsync(workerId, leaseDuration, ["media"], cancellationToken);
     Task<bool> HeartbeatAsync(
         Guid jobId,
         string workerId,
+        Guid leaseToken,
         TimeSpan leaseDuration,
         int progressPercent,
         string stage,
         CancellationToken cancellationToken);
-    Task CompleteAsync(Guid jobId, string workerId, CancellationToken cancellationToken);
+    Task CompleteAsync(Guid jobId, string workerId, Guid leaseToken, CancellationToken cancellationToken);
+    Task DeferAsync(
+        LeasedJob job,
+        TimeSpan delay,
+        string reasonCode,
+        CancellationToken cancellationToken);
+    Task BlockAsync(
+        LeasedJob job,
+        string reasonCode,
+        string safeMessage,
+        CancellationToken cancellationToken);
     Task FailAsync(
         LeasedJob job,
         string errorCode,

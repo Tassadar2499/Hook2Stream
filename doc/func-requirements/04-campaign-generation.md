@@ -1,27 +1,42 @@
-# 04. Campaign generation
+# 04. Artwork и campaign generation
 
-Источник: [Product Plan, §§ 4.4–4.7, 5, 6.6](../base/Hook2Stream_Product_Plan.md).
+Источник: [Product Plan, §§ 4.3–4.8, 5, 6.6–6.7](../base/Hook2Stream_Product_Plan.md).
 
-Campaign generation превращает три утверждённых hooks и brand snapshot в детерминированный storyboard. Система не выбирает произвольное число результатов: валидный plan всегда содержит ровно 18 items.
+Artwork generation создаёт контролируемый visual pack, а campaign generation превращает его, три hooks и brand snapshot в детерминированный storyboard. Система не выбирает произвольное число результатов: валидный plan всегда содержит ровно 18 items.
+
+## ART — cover и campaign backgrounds
+
+| ID | Требование | Проверка |
+|---|---|---|
+| `FR-ART-001` | Первый OpenRouter artwork request разрешён только после processed audio, подтверждённых artist/title/RU-or-EN/release timing и актуального external-processing attestation, связанного с audio asset/fingerprint. | До gate API возвращает blocker без provider call; revoke во время вызова отбрасывает результат; transcript approval не обязан быть завершён, поэтому artwork может выполняться параллельно review. |
+| `FR-ART-002` | Creative brief может использовать brand kit, mood/BPM/energy и несколько коротких draft transcript excerpts, но не должен отправлять provider MP3, object URL или полный transcript. | Adapter contract/log test не содержит media bytes/URL/полный lyrics; provenance сохраняет configured и returned model ID, provider request ID, input hash и parameter hash. |
+| `FR-ART-003` | Initial operation должна создать три independent text-free cover candidates через `bytedance-seed/seedream-4.5` в OpenRouter image API; adapter выбирает поддерживаемый source size, а artist/title накладываются детерминированно. | Три candidates допускают correction/retry внутри одной business operation; прямой provider API или неподдерживаемый model ID отклоняется без придуманного fallback; approved composition локально экспортируется в 3000×3000 sRGB. |
+| `FR-ART-004` | При non-retryable moderation failure одного candidate review разрешён с двумя успешными candidates и действием заменить недостающий; user/prompt error предлагает исправить prompt или загрузить cover. | 429/5xx/network retry bounded и учитывает `Retry-After`; moderation/400 не повторяются автоматически и не заменяются процедурной картинкой. |
+| `FR-ART-005` | Controlled editor должен поддерживать candidate selection, prompt/regenerate, palette, crop/focal point и редактируемые artist/title typography либо собственную cover; brush/inpainting/full canvas не входят в MVP. | Изменение composition создаёт revision и не вызывает AI; reload воспроизводит exact selection/controls. |
+| `FR-ART-006` | Cover approval должен быть привязан к exact artwork revision, selected asset, composition и actor/timestamp; campaign никогда не использует неутверждённую cover. | Stale revision получает `409`; approved revision становится current, предыдущая остаётся immutable в history. |
+| `FR-ART-007` | После cover approval одна artwork operation должна создать три согласованных portrait backgrounds размером 1088×1920 с final crop 1080×1920, используя approved cover как reference. | Ровно три валидированных backgrounds получают generated origin/purpose; отсутствие batch блокирует campaign, но не transcript review. |
+| `FR-ART-008` | Project включает initial artwork generation и две полные regeneration. После этого каждая generation атомарно расходует одну единицу workspace balance; пакет `$1` добавляет пять generations. Технический retry, crop, palette, typography и upload не расходуют generation. | Duplicate commands не делают двойного списания; после трёх included generations UI требует balance и не расходует его без явного command. |
+| `FR-ART-009` | Смена уже утверждённой cover считается новой полной generation, потому что требует нового background batch; собственная новая cover подчиняется тому же правилу. | Смена потребляет следующую included generation либо одну из пяти купленных, инвалидирует зависимые campaign/renders/export и сохраняет history. |
+| `FR-ART-010` | Бесплатный пользователь видит protected artwork preview; clean approved cover 3000×3000 является отдельным one-time продуктом `$2`, а не скрытой частью video product. | До `Clean Cover` entitlement clean read/export запрещён; покупка Mini/Pack сама по себе не открывает original cover. |
 
 ## CAM — campaign plan, copy и calendar
 
 | ID | Требование | Проверка |
 |---|---|---|
-| `FR-CAM-001` | Система должна разрешать generation только при валидных inputs, rights attestation, актуальном analysis, brand snapshot и ровно трёх утверждённых hooks. | Отсутствующий cover, третий hook или stale alignment блокирует generation с перечнем исправимых причин; готовые prerequisites запускают durable job. |
+| `FR-CAM-001` | Система должна разрешать generation только при setup/rights, актуальных analysis и approved transcript/instrumental revision, approved cover с тремя backgrounds, brand snapshot и ровно трёх валидных hooks. | Отсутствующая approval/dependency или stale revision блокирует durable job с перечнем исправимых причин. Hooks автоматически предложены и редактируемы, но не требуют отдельного approval. |
 | `FR-CAM-002` | Успешный `CampaignPlan` должен содержать ровно 18 ordered campaign items и не считаться валидным при 17 или 19 items. | Contract validation принимает 18 уникальных IDs и отклоняет любое другое количество до storyboard/checkout. |
 | `FR-CAM-003` | Система должна создать 12 hook items: для каждого из трёх hooks по одному `KineticLyrics`, `AnimatedCover`, `VisualLoopA` и `VisualLoopB`. | Matrix содержит `3 × 4` уникальных hook/template combinations без пропуска или duplicate combination. |
 | `FR-CAM-004` | Система должна добавить ровно 2 `Teaser`, 2 `Countdown` и 2 `OutNow` items в режиме `Upcoming`. | Type counts равны `2/2/2`; изменение одного item не может удалить обязательный type из plan. |
 | `FR-CAM-005` | `KineticLyrics` должен использовать только сохранённые phrase timings; для instrumental hook он должен переключаться на beat-reactive title/CTA без lyric payload. | Vocal preview подсвечивает существующий text; instrumental preview не содержит сгенерированных строк и остаётся валидным. |
-| `FR-CAM-006` | `AnimatedCover` должен использовать project cover, brand snapshot и поддерживаемые motion controls без требования дополнительного video asset. | Project с тремя изображениями и без video assets получает валидный animated-cover item для каждого hook. |
-| `FR-CAM-007` | `VisualLoopA` и `VisualLoopB` одного hook должны использовать разные active visual assets либо явно разные crop/motion treatment, если distinct assets технически непригодны. | При наличии минимум двух пригодных assets A/B используют разные IDs; fallback reuse сопровождается diversity warning и отличается composition controls. |
+| `FR-CAM-006` | `AnimatedCover` должен использовать approved project cover, brand snapshot и поддерживаемые motion controls без требования пользовательского video asset. | MP3-only project получает валидный animated-cover item для каждого hook. |
+| `FR-CAM-007` | `VisualLoopA` и `VisualLoopB` одного hook должны использовать разные generated/uploaded backgrounds либо явно разные crop/motion treatment, если distinct assets технически непригодны. | Generated visual pack достаточен без custom assets; A/B используют разные IDs, а fallback reuse сопровождается diversity warning. |
 | `FR-CAM-008` | `Teaser`, `Countdown` и `OutNow` должны использовать versioned `CampaignCard` template с phase-specific title, date и CTA; два варианта одного type должны отличаться opening, asset assignment или CTA. | Pair comparison фиксирует хотя бы одно нормативное различие и одинаковый brand snapshot. |
 | `FR-CAM-009` | Каждый item должен иметь duration от 10 до 30 секунд включительно; hook item не может выходить за утверждённые hook boundaries, кроме versioned intro/outro padding внутри audio. | Contract отклоняет 9.99/30.01 seconds и выход за audio; разрешённый padding сохраняется в composition spec. |
 | `FR-CAM-010` | Upcoming plan должен применять канонические posting offsets и default assignment из таблицы ниже, сохраняя возможность пользователю изменить время внутри дня. | Новая campaign с future release date получает 8 pre-release, 2 release-day и 8 post-release items на ожидаемых offsets. |
 | `FR-CAM-011` | Для `Released` plan система должна создать 18 slots в днях `0..20`, заменить оба `Countdown` на post-release CTA items и не создавать copy, будто релиз ещё не вышел. | Released fixture не содержит countdown wording; два replacement items имеют type `PostReleaseCTA`, а последняя дата не позже start +20 days. |
 | `FR-CAM-012` | Каждый `CampaignItem` должен хранить day/phase, hook, template/version, asset IDs, duration, composition controls, text payload, copy variants, CTA и revision status. | Сериализация/повторное чтение возвращает все поля; item можно полностью восстановить без обращения к mutable global defaults. |
-| `FR-CAM-013` | Система должна генерировать для каждого item neutral caption, emotional short caption, CTA, hashtags и destination-specific text для TikTok, YouTube Shorts, Instagram Reels и VK Clips. | Storyboard показывает редактируемые variants для четырёх destinations; ошибка одного copy adapter не блокирует video plan и помечается для retry/manual edit. |
-| `FR-CAM-014` | Asset assignment должен распределять 3–10 visuals по plan, избегать длинной серии одного asset и сохранять единый brand snapshot. | Default plan не использует один visual asset более чем в трёх последовательных visual-dependent items; все items ссылаются на одну snapshot version. |
+| `FR-CAM-013` | Система должна генерировать через `openai/gpt-oss-120b` в OpenRouter для каждого item neutral caption, emotional short caption, CTA, hashtags и destination-specific text для TikTok, YouTube Shorts, Instagram Reels и VK Clips. | Structured-output contract принимает только валидный 18-item plan; storyboard показывает редактируемые variants, а ошибка copy stage помечается для retry/manual edit без прямого provider fallback. |
+| `FR-CAM-014` | Asset assignment должен распределять approved cover, три generated backgrounds и optional custom visuals, избегать длинной серии одного asset и сохранять единый brand snapshot. | MP3-only default plan валиден; один visual не используется более чем в трёх последовательных visual-dependent items; все items ссылаются на одну snapshot version. |
 | `FR-CAM-015` | До дорогостоящего paid render система должна показать storyboard всех 18 items с day, phase, hook, template, asset, duration, text/CTA и readiness warning. | Пользователь видит 18 ordered cards до checkout; отсутствие полного video preview у 17 cards не скрывается. |
 | `FR-CAM-016` | Пользователь должен иметь возможность изменить asset, supported template, opening, CTA или copy и перегенерировать один item без изменения утверждённых revisions остальных items. | Item A получает новую revision; hashes и rendered state items B–R остаются прежними. |
 | `FR-CAM-017` | Campaign generation должна быть versioned и детерминированной относительно input revisions, recipe version и generation seed; повтор той же операции должен переиспользовать plan либо вернуть идентичный contract. | Повтор с теми же hashes/version/seed не создаёт второй логический plan или usage charge; изменение recipe version создаёт новую plan revision. |
@@ -80,6 +95,8 @@ MVP позволяет:
 - переключить поддерживаемый template;
 - выбрать разрешённый opening treatment;
 - изменить fit/fill и focal point;
+- изменить palette и text layout;
+- изменить hook in/out в пределах 10–30 секунд;
 - исправить text, CTA и copy;
 - повторно сгенерировать один item.
 

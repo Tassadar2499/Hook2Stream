@@ -1,6 +1,6 @@
 # Hook2Stream source
 
-`src` содержит первый исполняемый срез Hook2Stream: от регистрации и release brief до прямой загрузки и серверной нормализации media.
+`src` содержит исполняемый MP3-first срез Hook2Stream: от регистрации и загрузки одного MP3 до revision-based review транскрипта, artwork, hooks и 18-item campaign. В локальном профиле внешние AI/media providers заменяются детерминированными fixtures.
 
 ## Topology
 
@@ -10,9 +10,15 @@ flowchart LR
     API --> DB["PostgreSQL"]
     WEB --> S3["MinIO / S3 upload"]
     API --> S3
-    API --> JOBS["PostgreSQL durable jobs"]
-    JOBS --> WORKER["Media worker"]
-    WORKER --> S3
+    API --> JOBS["PostgreSQL durable jobs + outbox"]
+    JOBS --> CONTROL["Control worker"]
+    JOBS --> MEDIA["Media / FFmpeg"]
+    JOBS --> ANALYSIS["Deterministic DSP analysis"]
+    JOBS --> RENDER["Deterministic FFmpeg render"]
+    CONTROL --> AI["OpenRouter: STT / image / campaign"]
+    MEDIA --> S3
+    ANALYSIS --> S3
+    RENDER --> S3
     BOOT["Bootstrapper"] --> DB
     BOOT --> S3
     ASPIRE["Aspire AppHost"] --> WEB
@@ -25,11 +31,11 @@ flowchart LR
 
 | Project | Responsibility |
 |---|---|
-| `Hook2Stream.Domain` | Entities, lifecycle state and domain enums |
-| `Hook2Stream.Application` | Contracts, validation, media policy and ports |
-| `Hook2Stream.Infrastructure` | EF Core/PostgreSQL, S3, durable queue, FFmpeg/ffprobe ingest |
-| `Hook2Stream.Api` | Clerk-authenticated `/api/v1`, uploads, releases, assets, jobs and SSE |
-| `Hook2Stream.Worker` | Leased background job execution and media processing |
+| `Hook2Stream.Domain` | Entities, immutable revisions, workflow lanes and domain enums |
+| `Hook2Stream.Application` | API/provider contracts, validation, media policy and ports |
+| `Hook2Stream.Infrastructure` | EF Core/PostgreSQL, S3, capability-routed queue, FFmpeg and fixture/external providers |
+| `Hook2Stream.Api` | Authenticated `/api/v1`, MP3 quick upload, workflow/review, assets, jobs and SSE |
+| `Hook2Stream.Worker` | Leased background execution, outbox dispatch and capability handlers |
 | `Hook2Stream.Bootstrapper` | Database migrations and object-storage bucket/CORS bootstrap |
 | `Hook2Stream.ServiceDefaults` | OpenTelemetry, service discovery and health endpoints |
 | `Hook2Stream.AppHost` | Local Aspire topology: PostgreSQL, MinIO, backend and web |
@@ -57,7 +63,25 @@ A partial Clerk configuration fails fast. Running the Next.js app by itself does
 
 Keep each generated storage password paired with its volume. PostgreSQL only applies `POSTGRES_PASSWORD` while initializing an empty data directory, so changing or deleting `Parameters:postgres-password` while retaining its volume prevents the dependency gate from becoming ready. Legacy installs can remove the unused `hook2stream-postgres-data` and `hook2stream-minio-data` volumes after stopping AppHost; the next run creates clean path-scoped replacements.
 
-The worker expects `ffmpeg` and `ffprobe` in `PATH`. Originals are never rewritten; derivatives use versioned object keys.
+The media worker expects `ffmpeg` and `ffprobe` in `PATH`. Originals are never rewritten; derivatives and provider staging objects use versioned keys. Default development configuration uses deterministic fixture providers. Production uses separate capability pools without local neural models:
+
+- `media` — FFmpeg/ffprobe ingest and normalization;
+- `analysis` — deterministic FFmpeg/DSP beat, section and energy extraction;
+- `control` — pipeline reconciliation and OpenRouter transcription, artwork and campaign planning;
+- `render` — deterministic FFmpeg template rendering;
+- `export` — validation and immutable ZIP assembly.
+
+Workers lease only matching capabilities. A lease token fences late attempts; only .NET commits canonical business state after validating a sidecar manifest.
+
+## MP3-first API flow
+
+1. `POST /api/v1/releases/audio-uploads` with `Idempotency-Key`, rights confirmation and external-AI consent creates an `Unscheduled` project, bound attestation, audio asset and direct-upload session atomically.
+2. Existing upload completion starts ingest through the outbox. Deterministic analysis and OpenRouter transcription begin once the audio master is ready and consent remains current.
+3. `PUT /api/v1/releases/{id}/setup` confirms metadata; the existing rights endpoint confirms rights before artwork generation.
+4. `/transcript`, `/artwork`, `/hooks` and `/campaign` expose immutable revisions. Mutations require current `If-Match`; asynchronous generation commands also require `Idempotency-Key`.
+5. `GET /api/v1/releases/{id}/workflow` is the reload-safe aggregate of lane progress, blockers and next action. `GET /api/v1/releases/{id}/events` streams ordered project events, resumes from `Last-Event-ID` (or `?after=`), and uses workflow polling as fallback; job-level SSE remains available for focused diagnostics.
+
+Automatic transcription has a supported quality baseline for `en` and `ru`. WAV, prepared lyrics, user cover and custom visuals remain optional advanced sources; they are not required by the main MP3 flow.
 
 ## Contracts
 
@@ -80,6 +104,8 @@ npm run build --prefix src/web
 npm run test:e2e --prefix src/web
 ```
 
-## Deliberate boundary
+## Implementation boundary
 
-This increment ends when one release has validated audio, cover, 3–10 visuals, lyrics/instrumental mode and rights attestation. Analysis with WhisperX/Essentia, hook review, campaign planning, Remotion rendering, billing and ZIP export are intentionally the next increments.
+The repository contains the MP3-first domain/API/UI foundation, revision invalidation, provider ports, durable orchestration, OpenRouter adapters and deterministic media processors. A fixture can prove contracts and the exact 18-item recipe, but is never selected as a production AI provider.
+
+The repository includes deterministic analysis, clean FFmpeg render and validated ZIP assembly. Production readiness still requires an OpenRouter key configured for Zero Data Retention, a real-provider staging smoke for the pinned models, deployed Stripe Checkout/catalog/webhooks, infrastructure configuration, golden-media evaluation and the staged rollout described in the product requirements. No local neural-model image or sidecar is required.

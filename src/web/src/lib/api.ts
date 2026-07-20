@@ -9,6 +9,7 @@ export type AssetState = Schemas["AssetState"];
 export type Asset = Schemas["AssetResponse"];
 export type ReleaseMode = Schemas["ReleaseMode"];
 export type Release = Schemas["ReleaseResponse"];
+export type RightsAttestation = Schemas["RightsAttestationResponse"];
 export type Readiness = Schemas["ReadinessResponse"];
 export type UploadSession = Schemas["UploadSessionResponse"];
 export type UploadPart = Schemas["UploadPartResponse"];
@@ -127,6 +128,65 @@ export async function streamJobEvents(
         if (line.startsWith("data:")) rawData = line.slice(5).trim();
       }
 
+      let data: unknown = rawData;
+      try {
+        data = JSON.parse(rawData);
+      } catch {
+        // Preserve non-JSON server data.
+      }
+      onEvent({ id, type, data });
+    }
+  }
+}
+
+export async function streamProjectEvents(
+  projectId: string,
+  token: string,
+  onEvent: (event: { id?: string; type: string; data: unknown }) => void,
+  signal: AbortSignal,
+) {
+  const response = await fetch(
+    `${apiBaseUrl}/api/v1/releases/${projectId}/events`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "text/event-stream",
+      },
+      cache: "no-store",
+      signal,
+    },
+  );
+  if (!response.ok || !response.body) {
+    throw new ApiRequestError(
+      "Live project progress is unavailable.",
+      response.status,
+      "project.stream_unavailable",
+    );
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (!signal.aborted) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      if (frame.startsWith(":")) continue;
+      let id: string | undefined;
+      let type = "message";
+      const dataLines: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("id:")) id = line.slice(3).trim();
+        if (line.startsWith("event:")) type = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+
+      const rawData = dataLines.join("\n") || "{}";
       let data: unknown = rawData;
       try {
         data = JSON.parse(rawData);

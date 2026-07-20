@@ -1,8 +1,8 @@
 # Функциональные требования Hook2Stream
 
 > Статус: спецификация MVP
-> Версия: 2.0
-> Дата: 16 июля 2026 года
+> Версия: 3.0
+> Дата: 20 июля 2026 года
 > Основной источник: [Hook2Stream Product Plan](../base/Hook2Stream_Product_Plan.md)
 
 ## 1. Назначение
@@ -10,17 +10,19 @@
 Комплект описывает наблюдаемое поведение первого self-service продукта:
 
 ```text
-one song
-→ analysis and three hooks
+one MP3
+→ automatic analysis + RU/EN transcript review
+→ three cover candidates + approved visual pack
+→ three editable hooks
 → 18-item campaign
 → one free preview
 → paid render
 → ZIP and calendar
 ```
 
-Нормативный scope ограничен MVP. Автопубликация, social analytics, команды, white label, generative video и публичный API упоминаются только как исключения и не создают обязательств реализации.
+Нормативный scope ограничен MVP. Генерируются static artwork и template-driven videos, но не text-to-video. Автопубликация, social analytics, команды, white label и публичный API упоминаются только как исключения и не создают обязательств реализации.
 
-Общее количество требований: **97**.
+Общее количество требований: **108**.
 
 ## 2. Нормативные соглашения
 
@@ -36,6 +38,7 @@ one song
 | `AST` | Media assets |
 | `LYR` | Lyrics и phrase timing |
 | `ANL` | Music analysis и hooks |
+| `ART` | AI/manual cover и campaign backgrounds |
 | `CAM` | Campaign plan, copy и calendar |
 | `REN` | Preview и render |
 | `EXP` | Entitled export |
@@ -61,8 +64,11 @@ one song
 | Посетитель | Просматривает landing и начинает создание release pack |
 | Пользователь | Управляет своим brand kit, релизами, оплатой и exports |
 | Платёжный провайдер | Создаёт checkout и передаёт подписанные billing events |
-| Analysis worker | Выполняет normalization, WhisperX и Essentia analysis |
-| Render worker | Выполняет Remotion/FFmpeg render и validation |
+| Media worker | Проверяет/нормализует FFmpeg/ffprobe media |
+| Analysis worker | Выполняет детерминированный FFmpeg/DSP analysis без model weights |
+| OpenRouter gateway | Выполняет Whisper transcription, Seedream artwork и structured campaign/copy generation только с ZDR |
+| Control worker | Согласует workflow, revisions, provider manifests и durable jobs |
+| Render worker | Выполняет детерминированный FFmpeg template render и validation |
 | Сотрудник поддержки | Диагностирует jobs и выполняет разрешённые retry/refund |
 | Система | Проверяет права, состояния, entitlements и инварианты |
 
@@ -75,19 +81,19 @@ one song
 | [Аккаунт и brand kit](01-account-and-brand-kit.md) | `FR-ACC-001..006`, `FR-BRD-001..006` | 12 |
 | [Release и assets](02-release-and-assets.md) | `FR-REL-001..007`, `FR-AST-001..008` | 15 |
 | [Lyrics, analysis и hooks](03-lyrics-analysis-and-hooks.md) | `FR-LYR-001..007`, `FR-ANL-001..011` | 18 |
-| [Campaign generation](04-campaign-generation.md) | `FR-CAM-001..017` | 17 |
+| [Artwork и campaign generation](04-campaign-generation.md) | `FR-ART-001..010`, `FR-CAM-001..017` | 27 |
 | [Review, render и export](05-review-render-and-export.md) | `FR-REN-001..008`, `FR-EXP-001..008` | 16 |
-| [Billing и operations](06-billing-and-operations.md) | `FR-BIL-001..009`, `FR-OPS-001..010` | 19 |
+| [Billing и operations](06-billing-and-operations.md) | `FR-BIL-001..010`, `FR-OPS-001..010` | 20 |
 
 ## 5. Сквозной сценарий
 
 ```mermaid
 flowchart LR
-    A["Landing and signup"] --> B["Release project"]
-    B --> C["Audio, lyrics, cover, 3–10 visuals"]
-    C --> D["Alignment and song analysis"]
-    D --> E["Approve three hooks"]
-    E --> F["18-item campaign storyboard"]
+    A["Landing and signup"] --> B["One MP3 quick upload"]
+    B --> C["Automatic analysis + transcript"]
+    C --> D["Confirm metadata and rights"]
+    D --> E["Review transcript + 3 cover candidates"]
+    E --> F["3 editable hooks + 18-item storyboard"]
     F --> G["One watermarked preview"]
     G --> H["Mini / Release / subscription entitlement"]
     H --> I["Paid batch render"]
@@ -96,7 +102,7 @@ flowchart LR
 
 ## 6. Общие состояния
 
-### 6.1. Release project
+### 6.1. Release project и workflow lanes
 
 ```text
 Draft
@@ -118,6 +124,8 @@ Draft
 - `Ready` — готовы все items, разрешённые entitlement.
 - `PartiallyReady` — часть разрешённых items готова, часть завершилась ошибкой или ожидает retry.
 - `Archived` — пользователь исключил проект из активного списка; данные не считаются удалёнными.
+
+Основной UI не выводит прогресс только из coarse state. `GET .../workflow` содержит независимые lanes `Audio`, `Analysis`, `Transcript`, `Artwork`, `Hooks`, `Campaign`, `Preview`, `FinalRender` со состояниями `NotStarted`, `Queued`, `Running`, `WaitingUser`, `Retrying`, `Succeeded`, `Degraded`, `Failed`, `Cancelled`, `Stale`, а также blockers и next action.
 
 Логическое удаление является отдельным lifecycle-признаком и немедленно закрывает доступ независимо от состояния.
 
@@ -142,7 +150,7 @@ Planned → Previewable → RenderQueued → Rendering → Ready | Failed
 ## 7. Глобальные инварианты
 
 1. Валидный `CampaignPlan` содержит ровно 18 items.
-2. В плане присутствуют ровно три утверждённых hooks.
+2. В плане присутствуют ровно три валидных hooks, привязанных к current approved transcript revision.
 3. Каждый hook имеет четыре composition variants: kinetic, animated cover и два visual loops.
 4. План содержит два teaser, два countdown и два out-now items; в режиме `Released` два countdown заменяются post-release variants.
 5. Каждый ролик длится от 10 до 30 секунд включительно.
@@ -155,6 +163,10 @@ Planned → Previewable → RenderQueued → Rendering → Ready | Failed
 12. Instrumental mode не создаёт вымышленные lyrics.
 13. Ошибка одного item не удаляет успешные items.
 14. Social publication не является частью MVP и не блокирует export.
+15. Cover/transcript approvals всегда относятся к точной immutable revision и input fingerprint.
+16. Внешняя artwork generation не начинается до metadata/release timing/rights checkpoint.
+17. Project включает три artwork operations; следующая требует workspace credit.
+18. Clean cover 3000×3000 доступна только по отдельному entitlement `$2`; video purchases не открывают её автоматически.
 
 ## 8. Канонический export bundle
 
@@ -173,6 +185,8 @@ hook2stream-{artist}-{track}/
 
 `manifest.json` содержит product, project revision, campaign plan version, выбранные item IDs, render hashes, filenames и timestamps. Он не содержит secrets, presigned URLs или внутренние provider credentials.
 
+Clean cover 3000×3000 не входит в video ZIP. После отдельной покупки `$2` она выдаётся как `cover-3000x3000.png` по отдельной 10-minute signed URL только пока entitlement активен.
+
 ## 9. Конфигурационные решения
 
 ### 9.1. Открытые решения
@@ -182,12 +196,11 @@ hook2stream-{artist}-{track}/
 | `DEC-001` | `CFG-AUDIO-MAX-BYTES`, `CFG-AUDIO-MAX-DURATION` и точные codec limits | До upload beta |
 | `DEC-002` | Максимальный размер, duration и resolution visual asset | До upload beta |
 | `DEC-003` | Поддерживаемый allowlist fonts и правила лицензирования | До первого paid render |
-| `DEC-005` | Payment provider, налоги/MoR и billing grace | До checkout beta |
+| `DEC-005` | Налоги/MoR и billing grace для Stripe Checkout | До checkout beta |
 | `DEC-007` | Число повторных выдач нового download URL после expiry; TTL закрыт в `NFR-SEC-008` | До paid beta |
-| `DEC-008` | Low-confidence thresholds WhisperX/Essentia | До hook quality benchmark |
-| `DEC-009` | Поддерживаемые языки copy generation | До public landing |
+| `DEC-008` | Low-confidence thresholds OpenRouter STT/детерминированного DSP | До hook quality benchmark |
+| `DEC-009` | Языки copy generation сверх RU/EN quality baseline | До public landing |
 | `DEC-010` | Канал support и полномочия admin операций | До первых внешних пользователей |
-| `DEC-011` | Число и правила user-initiated paid re-renders после успешного output | До paid beta |
 
 Открытое значение не разрешает его игнорировать: до закрытия используется явно заданная environment configuration и тестируются обе стороны границы.
 
@@ -197,6 +210,9 @@ hook2stream-{artist}-{track}/
 |---|---|---|
 | `DEC-004` | FPS, bitrate, loudness target и GOP preview/final output | `NFR-MEDIA-001..003` |
 | `DEC-006` | Retention originals, proxies, previews, renders и exports | `NFR-DATA-006..008` |
+| `DEC-011` | Один content rerender на purchased item; технические исправления бесплатны | `FR-BIL-010` |
+| `DEC-012` | Stripe-hosted Checkout и webhook-only entitlement activation | `FR-BIL-006..008` |
+| `DEC-013` | RU/EN automatic transcription baseline | `FR-LYR-001..005` |
 
 ## 10. Граница функциональных требований
 

@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.10" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
@@ -17,6 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="../../Hook2Stream.Application/Hook2Stream.Application.csproj" />
     <ProjectReference Include="../../Hook2Stream.Domain/Hook2Stream.Domain.csproj" />
+    <ProjectReference Include="../../Hook2Stream.Infrastructure/Hook2Stream.Infrastructure.csproj" />
+    <ProjectReference Include="../../Hook2Stream.Worker/Hook2Stream.Worker.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -11,14 +11,21 @@ import {
   Asset,
   Readiness,
   Release,
+  RightsAttestation,
   apiFetch,
 } from "@/lib/api";
+import { Workflow } from "@/lib/workflow";
+import { workflowCheckpointCanonicalKey } from "@/lib/release-workflow-form-state";
+import { useProjectAutoRefresh } from "@/lib/use-project-auto-refresh";
+import { ReleaseWorkflowHub } from "./release-workflow-hub";
 
 export function ReleaseSetupClient({ projectId }: { projectId: string }) {
   const { getToken, isLoaded, isSignedIn } = useAppAuth();
   const router = useRouter();
   const [release, setRelease] = useState<Release>();
   const [readiness, setReadiness] = useState<Readiness>();
+  const [rights, setRights] = useState<RightsAttestation>();
+  const [workflow, setWorkflow] = useState<Workflow>();
   const [etag, setEtag] = useState<string>();
   const [error, setError] = useState<string>();
   const [rightsSaving, setRightsSaving] = useState(false);
@@ -26,12 +33,26 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
   const refresh = useCallback(async () => {
     const token = await getToken();
     if (!token) throw new Error("No session token.");
-    const [releaseResult, readinessResult] = await Promise.all([
+    const [releaseResult, readinessResult, workflowResult, rightsResult] = await Promise.all([
       apiFetch<Release>(`/api/v1/releases/${projectId}`, token),
       apiFetch<Readiness>(`/api/v1/releases/${projectId}/readiness`, token),
+      apiFetch<Workflow>(`/api/v1/releases/${projectId}/workflow`, token).catch(
+        (caught) => {
+          if (caught instanceof ApiRequestError && caught.status === 404) return undefined;
+          throw caught;
+        },
+      ),
+      apiFetch<RightsAttestation>(`/api/v1/releases/${projectId}/rights`, token).catch(
+        (caught) => {
+          if (caught instanceof ApiRequestError && caught.status === 404) return undefined;
+          throw caught;
+        },
+      ),
     ]);
     setRelease(releaseResult.data);
     setReadiness(readinessResult.data);
+    setWorkflow(workflowResult?.data);
+    setRights(rightsResult?.data);
     setEtag(releaseResult.etag ?? `"${releaseResult.data.version}"`);
   }, [getToken, projectId]);
 
@@ -53,6 +74,8 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
     return () => window.clearTimeout(timer);
   }, [isLoaded, isSignedIn, refresh, router]);
 
+  useProjectAutoRefresh(projectId, getToken, refresh, isLoaded && isSignedIn);
+
   async function confirmRights(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!etag) return;
@@ -69,8 +92,10 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
           ownsAudioRights: form.get("audio") === "on",
           ownsLyricsRights: form.get("lyrics") === "on",
           ownsVisualRights: form.get("visuals") === "on",
+          allowsExternalAiArtwork: form.get("externalAi") === "on",
+          allowsExternalAiProcessing: form.get("externalAi") === "on",
           syntheticContentStatus: form.get("synthetic"),
-          policyVersion: "draft-2026-07-16",
+          policyVersion: "external-ai-zdr-v1",
         }),
       });
       await refresh();
@@ -111,6 +136,22 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
           title={error ? "Could not load release" : "Loading release"}
           message={error ?? "Reading metadata and media state…"}
           tone={error ? "error" : "neutral"}
+        />
+      </AppShell>
+    );
+  }
+
+  if (workflow?.flowKind === "mp3First") {
+    return (
+      <AppShell>
+        <ReleaseWorkflowHub
+          key={workflowCheckpointCanonicalKey(release, rights)}
+          projectId={projectId}
+          release={release}
+          rights={rights}
+          workflow={workflow}
+          etag={etag}
+          onRefresh={refresh}
         />
       </AppShell>
     );
@@ -263,6 +304,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
               ["audio", "I have the right to process this audio."],
               ["lyrics", "I have the right to use these lyrics."],
               ["visuals", "I have the right to use the cover and visuals."],
+              ["externalAi", "I allow audio, text and the visual brief to be processed through OpenRouter using Zero Data Retention."],
             ].map(([name, label]) => (
               <label
                 key={name}

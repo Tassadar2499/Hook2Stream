@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Hook2Stream.Application;
+using Hook2Stream.Domain;
 
 namespace Hook2Stream.Infrastructure.Media;
 
@@ -11,7 +12,9 @@ public sealed record MediaInspection(
     int? Width,
     int? Height,
     string? VideoCodec,
-    string? AudioCodec);
+    string? AudioCodec,
+    string? ArtistName,
+    string? TrackTitle);
 
 public sealed class MediaRejectedException(string code, string safeMessage) : Exception(safeMessage)
 {
@@ -19,7 +22,40 @@ public sealed class MediaRejectedException(string code, string safeMessage) : Ex
     public string SafeMessage { get; } = safeMessage;
 }
 
-internal static class MediaInspector
+public static class MediaMetadataSuggestions
+{
+    public static void ApplyMp3FirstDraft(
+        ReleaseProject project,
+        MediaInspection inspection,
+        string? fallbackTrackTitle = null)
+    {
+        if (project.FlowKind != FlowKind.Mp3First || project.SetupCompletedAt is not null) return;
+        if (string.IsNullOrWhiteSpace(project.ArtistName) &&
+            !string.IsNullOrWhiteSpace(inspection.ArtistName))
+        {
+            project.ArtistName = inspection.ArtistName;
+        }
+
+        if (string.IsNullOrWhiteSpace(project.TrackTitle))
+        {
+            project.TrackTitle = !string.IsNullOrWhiteSpace(inspection.TrackTitle)
+                ? inspection.TrackTitle
+                : NormalizeFallback(fallbackTrackTitle);
+        }
+    }
+
+    private static string NormalizeFallback(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var normalized = new string(value
+            .Select(character => char.IsControl(character) ? ' ' : character)
+            .ToArray())
+            .Trim();
+        return normalized[..Math.Min(normalized.Length, 160)];
+    }
+}
+
+public static class MediaInspector
 {
     public static async Task<MediaInspection> InspectAsync(
         string path,
@@ -56,8 +92,9 @@ internal static class MediaInspector
             var audio = streams.FirstOrDefault(stream =>
                 stream.TryGetProperty("codec_type", out var type) && type.GetString() == "audio");
 
+            var hasFormat = document.RootElement.TryGetProperty("format", out var format);
             long? durationMilliseconds = null;
-            if (document.RootElement.TryGetProperty("format", out var format) &&
+            if (hasFormat &&
                 format.TryGetProperty("duration", out var durationElement) &&
                 TryGetDouble(durationElement, out var duration))
             {
@@ -71,7 +108,9 @@ internal static class MediaInspector
                 GetInt32(video, "width"),
                 GetInt32(video, "height"),
                 GetString(video, "codec_name"),
-                GetString(audio, "codec_name"));
+                GetString(audio, "codec_name"),
+                hasFormat ? GetNormalizedTag(format, "artist") : null,
+                hasFormat ? GetNormalizedTag(format, "title") : null);
         }
         catch (JsonException)
         {
@@ -157,6 +196,27 @@ internal static class MediaInspector
         value.TryGetInt32(out var result)
             ? result
             : null;
+
+    private static string? GetNormalizedTag(JsonElement format, string name)
+    {
+        if (!format.TryGetProperty("tags", out var tags) || tags.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var tag = tags.EnumerateObject().FirstOrDefault(value =>
+            string.Equals(value.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (tag.Value.ValueKind != JsonValueKind.String) return null;
+        var raw = tag.Value.GetString();
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var normalized = new string(raw
+            .Select(value => char.IsControl(value) ? ' ' : value)
+            .ToArray())
+            .Trim();
+        return normalized.Length == 0
+            ? null
+            : normalized[..Math.Min(normalized.Length, 160)];
+    }
 
     private static bool TryGetDouble(JsonElement element, out double value)
     {

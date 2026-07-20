@@ -9,6 +9,7 @@ namespace Hook2Stream.Api;
 public static class Endpoints
 {
     private static readonly TimeSpan UploadUrlLifetime = TimeSpan.FromMinutes(60);
+    private const string ExternalAiPolicyVersion = "external-ai-zdr-v1";
 
     public static IEndpointRouteBuilder MapHook2StreamApi(this IEndpointRouteBuilder endpoints)
     {
@@ -29,6 +30,8 @@ public static class Endpoints
             .Produces<BrandKitResponse>();
 
         var releases = api.MapGroup("/releases");
+        api.MapMp3FirstApi();
+        endpoints.MapBillingApi(api);
         releases.MapGet("/", ListReleases)
             .Produces<IReadOnlyList<ReleaseResponse>>();
         releases.MapPost("/", CreateRelease)
@@ -45,6 +48,9 @@ public static class Endpoints
             .Produces(StatusCodes.Status204NoContent);
         releases.MapGet("/{projectId:guid}/readiness", GetReadiness)
             .Produces<ReadinessResponse>();
+        releases.MapGet("/{projectId:guid}/rights", GetRights)
+            .Produces<RightsAttestationResponse>()
+            .Produces(StatusCodes.Status404NotFound);
         releases.MapPut("/{projectId:guid}/rights", UpdateRights)
             .Produces<RightsAttestationResponse>();
 
@@ -244,6 +250,64 @@ public static class Endpoints
         brandKit.ToneRestrictions = request.ToneRestrictions?.Trim();
         brandKit.CharacterLayerEnabled = request.CharacterLayerEnabled;
 
+        var nextBrandVersion = brandKit.Version + 1;
+        var affectedProjects = await dbContext.Projects
+            .Where(value => value.WorkspaceId == context.Workspace.Id &&
+                            value.FlowKind == FlowKind.Mp3First &&
+                            !value.IsArchived)
+            .ToListAsync(cancellationToken);
+        foreach (var project in affectedProjects)
+        {
+            project.BrandKitVersion = nextBrandVersion;
+            if (project.CurrentCampaignPlanRevisionId is { } campaignId)
+            {
+                var campaign = await dbContext.CampaignPlanRevisions.SingleOrDefaultAsync(
+                    value => value.Id == campaignId,
+                    cancellationToken);
+                if (campaign is not null) campaign.State = RevisionState.Superseded;
+                project.CurrentCampaignPlanRevisionId = null;
+            }
+            dbContext.OutboxMessages.Add(new OutboxMessage
+            {
+                WorkspaceId = project.WorkspaceId,
+                AggregateId = project.Id,
+                Destination = "pipeline",
+                MessageType = "pipeline.reconcile",
+                DedupeKey = $"pipeline.reconcile:{project.Id:N}:brand:{nextBrandVersion}:{Guid.CreateVersion7():N}",
+                PayloadJson = JsonSerializer.Serialize(new { projectId = project.Id, reason = "brand.updated" })
+            });
+            dbContext.ProjectEvents.Add(new ProjectEvent
+            {
+                WorkspaceId = project.WorkspaceId,
+                ProjectId = project.Id,
+                EventType = "brand.updated",
+                DataJson = JsonSerializer.Serialize(new { projectId = project.Id, brandKitVersion = nextBrandVersion })
+            });
+        }
+        var affectedProjectIds = affectedProjects.Select(value => value.Id).ToArray();
+        var staleBrandJobs = await dbContext.Jobs
+            .Where(value => value.ProjectId != null &&
+                            affectedProjectIds.Contains(value.ProjectId.Value) &&
+                            (value.Type == JobType.CampaignGeneration || value.Type == JobType.PreviewRender) &&
+                            (value.State == JobState.Queued || value.State == JobState.Running))
+            .ToListAsync(cancellationToken);
+        foreach (var staleJob in staleBrandJobs)
+        {
+            staleJob.State = JobState.Cancelled;
+            staleJob.ErrorCode = "brand.changed";
+            staleJob.ErrorMessage = "The job was cancelled because the brand kit changed.";
+            staleJob.CompletedAt = DateTimeOffset.UtcNow;
+            staleJob.LeaseOwner = null;
+            staleJob.LeaseToken = null;
+            staleJob.LeaseExpiresAt = null;
+            dbContext.JobEvents.Add(new JobEvent
+            {
+                JobId = staleJob.Id,
+                EventType = "cancelled",
+                DataJson = "{\"code\":\"brand.changed\"}"
+            });
+        }
+
         dbContext.AuditEvents.Add(new AuditEvent
         {
             WorkspaceId = context.Workspace.Id,
@@ -384,6 +448,7 @@ public static class Endpoints
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
         ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
+
         project.Archive();
         await dbContext.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, project.Version);
@@ -442,6 +507,30 @@ public static class Endpoints
         return Results.NoContent();
     }
 
+    private static async Task<IResult> GetRights(
+        Guid projectId,
+        CurrentUserService currentUser,
+        Hook2StreamDbContext dbContext,
+        HttpResponse response,
+        CancellationToken cancellationToken)
+    {
+        var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
+        var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
+        var attestation = await dbContext.RightsAttestations
+            .AsNoTracking()
+            .SingleOrDefaultAsync(value => value.ProjectId == project.Id, cancellationToken);
+        if (attestation is null)
+        {
+            throw new ApiProblemException(
+                StatusCodes.Status404NotFound,
+                "rights.not_found",
+                "No rights attestation has been saved for this release.");
+        }
+
+        ApiEndpointHelpers.SetEtag(response, project.Version);
+        return Results.Ok(ToResponse(attestation, project.Version));
+    }
+
     private static async Task<IResult> UpdateRights(
         Guid projectId,
         RightsAttestationRequest request,
@@ -451,17 +540,38 @@ public static class Endpoints
         HttpResponse response,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.PolicyVersion) || request.PolicyVersion.Length > 64)
+        var expectedVersion = ApiEndpointHelpers.RequireIfMatch(httpRequest);
+        var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
+        var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
+        ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
+
+        if (project.FlowKind != FlowKind.Mp3First &&
+            (string.IsNullOrWhiteSpace(request.PolicyVersion) || request.PolicyVersion.Length > 64))
         {
             var errors = new ValidationErrors();
             errors.Add("policyVersion", "Policy version is required.");
             ApiEndpointHelpers.RequireValid(errors);
         }
 
-        var expectedVersion = ApiEndpointHelpers.RequireIfMatch(httpRequest);
-        var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
-        var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
-        ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
+        MediaAsset? attestedAudio = null;
+        if (project.FlowKind == FlowKind.Mp3First)
+        {
+            attestedAudio = await dbContext.MediaAssets.AsNoTracking()
+                .Where(value => value.ProjectId == project.Id && value.Kind == AssetKind.Audio)
+                .OrderByDescending(value => value.IsActive)
+                .ThenByDescending(value => value.Revision)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (request.AllowsExternalAiProcessing &&
+                (attestedAudio is null ||
+                 attestedAudio.State != AssetState.Ready ||
+                 string.IsNullOrWhiteSpace(attestedAudio.Sha256)))
+            {
+                throw new ApiProblemException(
+                    StatusCodes.Status409Conflict,
+                    "audio.not_ready",
+                    "Wait for the audio master to finish processing before granting external AI access.");
+            }
+        }
 
         var attestation = await dbContext.RightsAttestations
             .SingleOrDefaultAsync(value => value.ProjectId == project.Id, cancellationToken);
@@ -478,25 +588,216 @@ public static class Endpoints
         }
 
         attestation.ActorSubject = currentUser.Subject;
-        attestation.PolicyVersion = request.PolicyVersion;
+        attestation.PolicyVersion = project.FlowKind == FlowKind.Mp3First
+            ? ExternalAiPolicyVersion
+            : request.PolicyVersion.Trim();
         attestation.OwnsAudioRights = request.OwnsAudioRights;
         attestation.OwnsLyricsRights = request.OwnsLyricsRights;
         attestation.OwnsVisualRights = request.OwnsVisualRights;
+        attestation.AllowsExternalAiArtwork = request.AllowsExternalAiArtwork;
+        attestation.AllowsExternalAiProcessing = request.AllowsExternalAiProcessing;
+        if (attestedAudio is not null)
+        {
+            attestation.AudioAssetId = attestedAudio.Id;
+            if (!string.IsNullOrWhiteSpace(attestedAudio.Sha256))
+                attestation.AudioFingerprint = attestedAudio.Sha256;
+        }
         attestation.SyntheticContentStatus = request.SyntheticContentStatus;
         attestation.AcceptedAt = DateTimeOffset.UtcNow;
+        dbContext.AuditEvents.Add(new AuditEvent
+        {
+            WorkspaceId = project.WorkspaceId,
+            ActorSubject = currentUser.Subject,
+            Action = request.AllowsExternalAiProcessing
+                ? "rights.external_ai_processing_accepted"
+                : "rights.external_ai_processing_revoked",
+            ResourceType = "rights_attestation",
+            ResourceId = attestation.Id,
+            DataJson = JsonSerializer.Serialize(new
+            {
+                attestation.PolicyVersion,
+                attestation.AudioAssetId,
+                attestation.OwnsAudioRights,
+                attestation.OwnsLyricsRights,
+                attestation.OwnsVisualRights,
+                attestation.AllowsExternalAiProcessing
+            })
+        });
         dbContext.Entry(project).Property(value => value.Version).IsModified = true;
+        if (project.FlowKind == FlowKind.Mp3First)
+        {
+            var contentRightsReady = attestedAudio is not null &&
+                                     request.OwnsAudioRights &&
+                                     (project.IsInstrumental && project.IsInstrumentalConfirmed || request.OwnsLyricsRights);
+            var pausedTypes = new HashSet<JobType>();
+            if (!contentRightsReady)
+            {
+                pausedTypes.UnionWith([
+                    JobType.Transcription,
+                    JobType.ArtworkGeneration,
+                    JobType.CampaignGeneration,
+                    JobType.PreviewRender,
+                    JobType.FinalRender,
+                    JobType.ExportBundle
+                ]);
+            }
+            else if (!request.AllowsExternalAiProcessing)
+            {
+                pausedTypes.UnionWith([
+                    JobType.Transcription,
+                    JobType.ArtworkGeneration,
+                    JobType.CampaignGeneration
+                ]);
+            }
+
+            Guid[] uploadedVisualAssetIds = request.OwnsVisualRights
+                ? []
+                : await dbContext.MediaAssets.AsNoTracking()
+                    .Where(value => value.ProjectId == project.Id &&
+                                    value.Origin == AssetOrigin.Uploaded &&
+                                    value.State != AssetState.Rejected &&
+                                    value.State != AssetState.Deleted &&
+                                    (value.Kind == AssetKind.Cover || value.Kind == AssetKind.Visual))
+                    .Select(value => value.Id)
+                    .ToArrayAsync(cancellationToken);
+            var hasUploadedVisuals = uploadedVisualAssetIds.Length > 0;
+            if (hasUploadedVisuals)
+            {
+                pausedTypes.UnionWith([
+                    JobType.ArtworkGeneration,
+                    JobType.CampaignGeneration,
+                    JobType.PreviewRender,
+                    JobType.FinalRender,
+                    JobType.CleanCoverRender,
+                    JobType.ExportBundle
+                ]);
+            }
+            var now = DateTimeOffset.UtcNow;
+
+            // User-blocked jobs do not poll. Resume the same immutable command
+            // only when this attestation satisfies the blocker that stopped it.
+            var blockedJobs = await dbContext.Jobs
+                .Where(value => value.ProjectId == project.Id &&
+                                value.State == JobState.Cancelled &&
+                                (value.ErrorCode == "rights.required" ||
+                                 value.ErrorCode == "rights.external_ai_processing_required" ||
+                                 value.ErrorCode == "rights.visual_required"))
+                .ToListAsync(cancellationToken);
+            foreach (var blockedJob in blockedJobs)
+            {
+                var needsAiConsent = blockedJob.Type is
+                    JobType.Transcription or
+                    JobType.ArtworkGeneration or
+                    JobType.CampaignGeneration;
+                var needsContentRights = blockedJob.Type is not (JobType.CleanCoverRender or JobType.MediaIngest);
+                var needsVisualRights = blockedJob.ErrorCode == "rights.visual_required" ||
+                                        hasUploadedVisuals && blockedJob.Type is
+                                            JobType.ArtworkGeneration or
+                                            JobType.CampaignGeneration or
+                                            JobType.PreviewRender or
+                                            JobType.FinalRender or
+                                            JobType.CleanCoverRender or
+                                            JobType.ExportBundle or
+                                            JobType.MediaIngest;
+                var canResume = (!needsContentRights || contentRightsReady) &&
+                                (!needsAiConsent || request.AllowsExternalAiProcessing) &&
+                                (!needsVisualRights || request.OwnsVisualRights);
+                if (!canResume) continue;
+                blockedJob.State = JobState.Queued;
+                blockedJob.AvailableAt = now;
+                blockedJob.CompletedAt = null;
+                blockedJob.ProgressStage = "queued";
+                blockedJob.ErrorCode = null;
+                blockedJob.ErrorMessage = null;
+                dbContext.JobEvents.Add(new JobEvent
+                {
+                    JobId = blockedJob.Id,
+                    EventType = "resumed",
+                    DataJson = "{\"reason\":\"rights.updated\"}"
+                });
+            }
+            if (pausedTypes.Count > 0 || uploadedVisualAssetIds.Length > 0)
+            {
+                var pausedJobs = await dbContext.Jobs
+                    .Where(value => value.ProjectId == project.Id &&
+                                    (pausedTypes.Contains(value.Type) ||
+                                     value.Type == JobType.MediaIngest &&
+                                     value.AssetId != null &&
+                                     uploadedVisualAssetIds.Contains(value.AssetId.Value)) &&
+                                    (value.State == JobState.Queued || value.State == JobState.Running))
+                    .ToListAsync(cancellationToken);
+                foreach (var pausedJob in pausedJobs)
+                {
+                    var isExternalAiJob = pausedJob.Type is
+                        JobType.Transcription or
+                        JobType.ArtworkGeneration or
+                        JobType.CampaignGeneration;
+                    var needsVisualRights = pausedJob.Type == JobType.MediaIngest ||
+                                            hasUploadedVisuals && pausedJob.Type is
+                                                JobType.ArtworkGeneration or
+                                                JobType.CampaignGeneration or
+                                                JobType.PreviewRender or
+                                                JobType.FinalRender or
+                                                JobType.CleanCoverRender or
+                                                JobType.ExportBundle;
+                    var blockerCode = !contentRightsReady
+                        ? "rights.required"
+                        : needsVisualRights && !request.OwnsVisualRights
+                            ? "rights.visual_required"
+                            : isExternalAiJob && !request.AllowsExternalAiProcessing
+                                ? "rights.external_ai_processing_required"
+                                : "rights.required";
+                    pausedJob.State = JobState.Cancelled;
+                    pausedJob.CompletedAt = now;
+                    pausedJob.ProgressStage = "waiting_user";
+                    pausedJob.LeaseOwner = null;
+                    pausedJob.LeaseToken = null;
+                    pausedJob.LeaseExpiresAt = null;
+                    pausedJob.ErrorCode = blockerCode;
+                    pausedJob.ErrorMessage = "The job is paused until the required rights are confirmed.";
+                    dbContext.JobEvents.Add(new JobEvent
+                    {
+                        JobId = pausedJob.Id,
+                        EventType = "waiting_user",
+                        DataJson = JsonSerializer.Serialize(new { code = blockerCode })
+                    });
+                }
+                var pausedIds = pausedJobs.Select(value => value.Id).ToArray();
+                var runningAttempts = await dbContext.JobAttempts
+                    .Where(value => pausedIds.Contains(value.JobId) && value.State == JobState.Running)
+                    .ToListAsync(cancellationToken);
+                foreach (var attempt in runningAttempts)
+                {
+                    attempt.State = JobState.Cancelled;
+                    attempt.CompletedAt = now;
+                    attempt.ErrorCode = pausedJobs
+                        .Where(value => value.Id == attempt.JobId)
+                        .Select(value => value.ErrorCode)
+                        .SingleOrDefault() ?? "rights.required";
+                    attempt.ErrorMessage = "The job is waiting for updated rights.";
+                }
+            }
+            dbContext.OutboxMessages.Add(new OutboxMessage
+            {
+                WorkspaceId = project.WorkspaceId,
+                AggregateId = project.Id,
+                Destination = "pipeline",
+                MessageType = "pipeline.reconcile",
+                DedupeKey = $"pipeline.reconcile:{project.Id:N}:rights:{attestation.Id:N}:{Guid.CreateVersion7():N}",
+                PayloadJson = JsonSerializer.Serialize(new { projectId = project.Id, reason = "rights.updated" })
+            });
+            dbContext.ProjectEvents.Add(new ProjectEvent
+            {
+                WorkspaceId = project.WorkspaceId,
+                ProjectId = project.Id,
+                EventType = "rights.updated",
+                DataJson = JsonSerializer.Serialize(new { projectId = project.Id })
+            });
+        }
         await dbContext.SaveChangesAsync(cancellationToken);
 
         ApiEndpointHelpers.SetEtag(response, project.Version);
-        return Results.Ok(new RightsAttestationResponse(
-            attestation.Id,
-            attestation.OwnsAudioRights,
-            attestation.OwnsLyricsRights,
-            attestation.OwnsVisualRights,
-            attestation.SyntheticContentStatus,
-            attestation.PolicyVersion,
-            attestation.AcceptedAt,
-            project.Version));
+        return Results.Ok(ToResponse(attestation, project.Version));
     }
 
     private static async Task<IResult> GetReadiness(
@@ -818,7 +1119,27 @@ public static class Endpoints
         session.State = UploadState.Completed;
         session.CompletedAt = DateTimeOffset.UtcNow;
         session.Asset.State = AssetState.Uploaded;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        dbContext.OutboxMessages.Add(new OutboxMessage
+        {
+            WorkspaceId = session.WorkspaceId,
+            AggregateId = session.ProjectId,
+            Destination = "pipeline",
+            MessageType = "pipeline.reconcile",
+            DedupeKey = $"pipeline.reconcile:{session.ProjectId:N}:upload:{session.AssetId:N}:r{session.Asset.Revision}",
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                projectId = session.ProjectId,
+                assetId = session.AssetId,
+                reason = "audio.upload_completed"
+            })
+        });
+        dbContext.ProjectEvents.Add(new ProjectEvent
+        {
+            WorkspaceId = session.WorkspaceId,
+            ProjectId = session.ProjectId,
+            EventType = "audio.upload_completed",
+            DataJson = JsonSerializer.Serialize(new { projectId = session.ProjectId, assetId = session.AssetId })
+        });
 
         var payload = JsonSerializer.Serialize(new { assetId = session.AssetId });
         var jobId = await jobQueue.EnqueueAsync(
@@ -1088,6 +1409,7 @@ public static class Endpoints
             value.InternalNotes,
             value.LyricsText,
             value.IsInstrumental,
+            value.IsInstrumentalConfirmed,
             value.Mode,
             value.ReleaseDate,
             value.CampaignStartDate,
@@ -1097,10 +1419,27 @@ public static class Endpoints
             value.CreatedAt,
             assets.OrderBy(asset => asset.Kind).ThenBy(asset => asset.SortOrder).Select(ToResponse).ToList());
 
+    private static RightsAttestationResponse ToResponse(RightsAttestation value, long projectVersion) =>
+        new(
+            value.Id,
+            value.OwnsAudioRights,
+            value.OwnsLyricsRights,
+            value.OwnsVisualRights,
+            value.AllowsExternalAiArtwork,
+            value.AllowsExternalAiProcessing,
+            value.SyntheticContentStatus,
+            value.PolicyVersion,
+            value.AcceptedAt,
+            value.AudioAssetId,
+            value.AudioFingerprint,
+            projectVersion);
+
     private static AssetResponse ToResponse(MediaAsset value) =>
         new(
             value.Id,
             value.Kind,
+            value.Origin,
+            value.Purpose,
             value.State,
             value.OriginalFileName,
             value.DeclaredContentType,

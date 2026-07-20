@@ -3,6 +3,7 @@ using System.Text.Json;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure.Persistence;
+using Hook2Stream.Infrastructure.Jobs;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -46,7 +47,7 @@ public sealed class MediaIngestProcessor(
         try
         {
             asset.State = AssetState.Processing;
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await JobLeaseFence.CommitAsync(dbContext, job, cancellationToken);
             await Heartbeat(job, 5, "downloading", cancellationToken);
 
             await objectStorage.DownloadAsync(asset.ObjectKey, originalPath, cancellationToken);
@@ -69,6 +70,11 @@ public sealed class MediaIngestProcessor(
             asset.VideoCodec = inspection.VideoCodec;
             asset.AudioCodec = inspection.AudioCodec;
             asset.Sha256 = await ComputeSha256Async(originalPath, cancellationToken);
+            if (asset.Kind == AssetKind.Audio)
+            {
+                await BindPendingExternalAiConsentAsync(dbContext, asset, cancellationToken);
+                await ApplyMp3FirstMetadataSuggestionsAsync(asset, inspection, cancellationToken);
+            }
 
             await Heartbeat(job, 35, "normalizing", cancellationToken);
             var outputs = await CreateDerivativesAsync(asset, originalPath, workDirectory, cancellationToken);
@@ -129,7 +135,7 @@ public sealed class MediaIngestProcessor(
                     derivativeCount = outputs.Count
                 })
             });
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await JobLeaseFence.CommitAsync(dbContext, job, cancellationToken);
             await Heartbeat(job, 98, "finalizing", cancellationToken);
         }
         catch (MediaRejectedException exception)
@@ -138,7 +144,7 @@ public sealed class MediaIngestProcessor(
             asset.IsActive = false;
             asset.FailureCode = exception.Code;
             asset.FailureMessage = exception.SafeMessage;
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await JobLeaseFence.CommitAsync(dbContext, job, cancellationToken);
             throw;
         }
         finally
@@ -311,6 +317,46 @@ public sealed class MediaIngestProcessor(
         }
     }
 
+    private async Task ApplyMp3FirstMetadataSuggestionsAsync(
+        MediaAsset asset,
+        MediaInspection inspection,
+        CancellationToken cancellationToken)
+    {
+        var project = await dbContext.Projects.SingleOrDefaultAsync(
+            value => value.Id == asset.ProjectId && value.WorkspaceId == asset.WorkspaceId,
+            cancellationToken);
+        if (project is not null)
+        {
+            MediaMetadataSuggestions.ApplyMp3FirstDraft(
+                project,
+                inspection,
+                Path.GetFileNameWithoutExtension(asset.OriginalFileName));
+        }
+    }
+
+    internal static async Task BindPendingExternalAiConsentAsync(
+        Hook2StreamDbContext dbContext,
+        MediaAsset asset,
+        CancellationToken cancellationToken)
+    {
+        if (asset.Kind != AssetKind.Audio || string.IsNullOrWhiteSpace(asset.Sha256)) return;
+        var attestation = await dbContext.RightsAttestations.SingleOrDefaultAsync(
+            value => value.ProjectId == asset.ProjectId,
+            cancellationToken);
+        if (attestation is null ||
+            attestation.AudioAssetId != asset.Id ||
+            !attestation.AllowsExternalAiProcessing ||
+            !string.IsNullOrWhiteSpace(attestation.AudioFingerprint))
+        {
+            return;
+        }
+
+        // The attestation and validated asset hash are committed in the same EF
+        // unit of work. The shared concurrency token prevents a concurrent revoke
+        // from being overwritten; a retry re-reads the now-revoked attestation.
+        attestation.AudioFingerprint = asset.Sha256;
+    }
+
     private async Task Heartbeat(
         LeasedJob job,
         int progress,
@@ -320,6 +366,7 @@ public sealed class MediaIngestProcessor(
         var renewed = await jobQueue.HeartbeatAsync(
             job.Id,
             job.LeaseOwner,
+            job.LeaseToken,
             LeaseDuration,
             progress,
             stage,

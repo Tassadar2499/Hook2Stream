@@ -2,7 +2,7 @@
 
 > **One song. Three weeks of ready-to-post lyric shorts.**
 
-Hook2Stream — SaaS для независимых и AI-музыкантов, который превращает одну песню и небольшой набор визуальных материалов в готовую 21-дневную кампанию коротких вертикальных видео.
+Hook2Stream — SaaS для независимых и AI-музыкантов, который превращает один MP3 в готовую 21-дневную кампанию коротких вертикальных видео. Транскрипт, обложка, визуальный набор и storyboard создаются автоматически, а пользователь подтверждает и при необходимости редактирует результат.
 
 ## Результат
 
@@ -18,52 +18,50 @@ Hook2Stream продаёт не генерацию отдельного виде
 
 ## Что загружает артист
 
-Обязательно:
+Для основного сценария нужен только финальный MP3. Перед upload пользователь подтверждает права и разрешает обработку через OpenRouter в режиме Zero Data Retention. После загрузки Hook2Stream запускает media ingest, детерминированный музыкальный анализ и RU/EN-транскрибацию через OpenRouter; перед campaign generation пользователь проверяет актуальные транскрипт и обложку.
 
-- финальный MP3 или WAV;
-- текст песни либо отметку `Instrumental`;
-- обложку;
-- от 3 до 10 изображений или видео;
-- название артиста и трека;
-- дату релиза либо дату начала кампании для уже выпущенного трека.
+Все прежние источники остаются расширенными overrides:
 
-Опционально:
+- WAV вместо MP3;
+- готовый lyrics-текст или отметка `Instrumental`;
+- собственная обложка;
+- собственные изображения и короткие видео;
+- фирменные цвета, шрифты, персонаж, CTA и ссылки.
 
-- фирменные цвета и шрифты;
-- изображения персонажа или маскота;
-- стандартные CTA и ссылки.
-
-Если brand kit не заполнен, безопасные цвета и стили формируются из обложки и остаются редактируемыми.
+По умолчанию система предлагает через OpenRouter три AI-варианта обложки и после выбора создаёт три согласованных вертикальных фона. Artist/title наносятся детерминированно и остаются редактируемыми. Видео собирается локальным FFmpeg renderer из утверждённых assets и template spec: OpenRouter video generation в MVP не используется, потому что она несовместима со строгим ZDR.
 
 ## Тарифная модель
 
 | Тариф | Цена | Результат |
 |---|---:|---|
 | Preview | Бесплатно | Один low-resolution ролик с watermark и storyboard остальных вариантов |
-| Mini Release | $19 | Любые 6 clean-роликов из кампании |
-| Release Pack | $39 | Все 18 clean-роликов, copy, CTA и календарь |
-| Active Artist | $29/мес. | Один Release Pack за billing period, brand kit и история релизов |
+| Clean Cover | $2 | Утверждённая clean-обложка 3000×3000 |
+| Mini Release | $5 | Ровно 6 выбранных clean-роликов |
+| Release Pack | $9.90 | Ровно 18 clean-роликов, copy, CTA и календарь |
+| Active Artist | $29/мес. | Один Release Pack за billing period без rollover, brand kit и история релизов |
+| Artwork Generations | $1 | Пять дополнительных полных artwork generations |
 
-Generative video backgrounds не входят в MVP. Если они появятся позже, то будут оплачиваться отдельными credits.
+В проект включены initial artwork operation и две полные regeneration. Пакет за $1 добавляет пять workspace generations. Одна generation создаёт новый batch из трёх cover-кандидатов и, после утверждения обложки, трёх согласованных backgrounds; технический retry не расходует generation.
 
 ## Граница MVP
 
 В MVP входят:
 
-- audio-first upload;
-- phrase-level lyrics alignment;
+- MP3-first quick upload и опциональные advanced overrides;
+- автоматическая RU/EN-транскрибация и phrase-level ручная проверка;
 - BPM, song structure и energy analysis;
+- три AI cover-кандидата, контролируемый artwork editor и три backgrounds;
 - три редактируемых hook;
 - четыре семейства шаблонов;
 - campaign storyboard;
 - один бесплатный watermarked preview;
 - пакетный render 1080×1920;
 - copy, CTA, календарь и ZIP export;
-- оплата за Mini Release, Release Pack или подписку.
+- отдельные покупки clean cover, Mini Release, Release Pack, artwork generations или подписка.
 
 В MVP не входят:
 
-- собственная text-to-video модель;
+- собственная или внешняя text-to-video генерация;
 - автопубликация в социальные сети;
 - Spotify analytics;
 - полноценный multi-track видеоредактор;
@@ -72,7 +70,7 @@ Generative video backgrounds не входят в MVP. Если они появ�
 
 ## Tech stack
 
-MVP stack: Next.js, React, TypeScript, ASP.NET Core API/Worker, .NET Aspire AppHost + ServiceDefaults, PostgreSQL, S3-compatible storage, Remotion, FFmpeg/ffprobe, Python sidecar with WhisperX and Essentia.
+MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, PostgreSQL, S3-compatible storage, OpenRouter API, Stripe Checkout и FFmpeg/ffprobe. В production-пути нет локальных neural-model weights и прямых интеграций с отдельными AI-провайдерами.
 
 ## Документация
 
@@ -88,16 +86,17 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/Worker, .NET Aspire AppH
 
 - англоязычный landing, Clerk onboarding, dashboard, release setup и brand kit;
 - ASP.NET Core API с tenant isolation, ETag concurrency, rate limiting и безопасными ошибками;
-- PostgreSQL schema и миграция для workspaces, releases, assets, uploads, jobs и audit events;
+- PostgreSQL schema и additive migration для workspaces, releases, revisioned workflow, assets, uploads, jobs, outbox/inbox и audit events;
 - прямые single/multipart uploads в S3-compatible storage;
-- durable PostgreSQL job queue и worker для FFmpeg/ffprobe media ingest;
+- MP3-first quick-upload API, workflow lanes, ETag/idempotency gates и editors для transcript/artwork/hooks/campaign;
+- durable PostgreSQL job queue с capability routing, lease fencing и workers для FFmpeg/ffprobe ingest и fixture/external providers;
 - проверка magic bytes, duration, dimensions и создание browser-safe derivatives;
 - SSE progress с polling fallback;
 - .NET Aspire topology для PostgreSQL, MinIO, bootstrapper, API, worker и Next.js;
 - OpenAPI contract и сгенерированные TypeScript-типы;
 - unit, API integration, AppHost topology и Playwright smoke tests.
 
-Текущая граница реализации заканчивается на валидированном наборе входных материалов релиза. WhisperX/Essentia analysis, выбор hooks, 18-item campaign, Remotion render, preview, billing и ZIP export остаются следующими инкрементами.
+Текущий срез реализует MP3-first orchestration, revision contracts, UI review surfaces, OpenRouter adapters для transcription/artwork/campaign, детерминированный audio analysis и FFmpeg clean render, а также валидируемую ZIP assembly. Production требует `OPENROUTER_API_KEY` со строгим ZDR, Stripe catalog/webhooks, infrastructure configuration и staging/golden-media validation. Локальные fixture providers используются только в development/tests и никогда не подменяют production AI-результат.
 
 ## Быстрый запуск
 
@@ -108,6 +107,8 @@ dotnet tool restore
 npm ci --prefix src/web
 ./scripts/run.sh
 ```
+
+Локальный профиль использует fixtures и не требует AI key. Для production worker задайте `OPENROUTER_API_KEY` через secret store и включите режимы из `deploy/providers/appsettings.Production.example.json`; ключ должен быть настроен на Zero Data Retention.
 
 Скрипт сохраняет HTTPS для Aspire, если локальный .NET development certificate доверен. Если сертификат не доверен, скрипт автоматически включает unsecured transport только для локального запуска Aspire; явно заданный `ASPIRE_ALLOW_UNSECURED_TRANSPORT` имеет приоритет. Чтобы использовать HTTPS, доверьте сертификат командой `dotnet dev-certs https --trust`.
 
@@ -141,4 +142,4 @@ dotnet build src/Hook2Stream.Api/Hook2Stream.Api.csproj
 npm run generate:api --prefix src/web
 ```
 
-Commercial validation идёт параллельно с разработкой: три demo packs на треках NEЯСЫТЬ, первые пилоты по $19 и минимум пять оплат до масштабирования тяжёлого render pipeline.
+Commercial validation идёт параллельно с разработкой: три demo packs на треках NEЯСЫТЬ, первые self-service Mini pilots по $5 и минимум пять оплат до масштабирования тяжёлого render pipeline.

@@ -12,17 +12,17 @@ const steps = [
   {
     number: "01",
     title: "Drop the song",
-    copy: "Upload one master, lyrics, cover art and 3–10 images or short video clips.",
+    copy: "Upload one finished MP3. Audio analysis and RU / EN transcription start automatically.",
   },
   {
     number: "02",
     title: "Keep the taste",
-    copy: "Set your palette, typography, CTA and release timing once. The pack stays visually coherent.",
+    copy: "Check the transcript, release details and three generated cover directions. Edit only what needs your taste.",
   },
   {
     number: "03",
     title: "Post for three weeks",
-    copy: "Review the campaign and download platform-ready vertical files, copy and calendar in one bundle.",
+    copy: "Review or tune 18 generated video cards, then unlock the clean files, copy and calendar you need.",
   },
 ];
 
@@ -34,12 +34,12 @@ const plans = [
   },
   {
     name: "Mini release",
-    price: "$19",
+    price: "$5",
     copy: "Choose six clean shorts from the campaign.",
   },
   {
     name: "Release pack",
-    price: "$39",
+    price: "$9.90",
     copy: "All 18 shorts, captions, CTAs and calendar.",
     featured: true,
   },
@@ -47,6 +47,16 @@ const plans = [
     name: "Active artist",
     price: "$29/mo",
     copy: "One monthly pack, reusable brand kit and release history.",
+  },
+  {
+    name: "Clean cover",
+    price: "$2",
+    copy: "The approved 3000×3000 cover without a preview watermark.",
+  },
+  {
+    name: "Artwork refill",
+    price: "$1",
+    copy: "Five additional three-candidate artwork generations.",
   },
 ];
 
@@ -70,8 +80,8 @@ export default function Home() {
               of shorts.
             </h1>
             <p className="mt-7 max-w-2xl text-xl leading-8 sm:text-2xl">
-              Turn a finished track and a handful of visuals into a coherent
-              21-day campaign of ready-to-post lyric videos.
+              Turn one finished MP3 into an editable transcript, cover and a
+              coherent 21-day campaign of ready-to-post vertical videos.
             </p>
             <div className="mt-9 flex flex-wrap gap-3">
               <Link
@@ -196,7 +206,7 @@ export default function Home() {
               retries never quietly destroy the value of your plan.
             </p>
           </div>
-          <div className="mt-12 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-12 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {plans.map((plan) => (
               <article
                 key={plan.name}

@@ -7,12 +7,14 @@ import { useAppAuth } from "@/components/app-auth-provider";
 import { AppShell } from "@/components/app-shell";
 import { StatusPanel } from "@/components/status-panel";
 import { Account, ApiRequestError, Release, apiFetch } from "@/lib/api";
+import { Workflow, titleCase } from "@/lib/workflow";
 
 export function DashboardClient() {
   const { getToken, isLoaded, isSignedIn } = useAppAuth();
   const router = useRouter();
   const [account, setAccount] = useState<Account>();
   const [releases, setReleases] = useState<Release[]>([]);
+  const [workflows, setWorkflows] = useState<Record<string, Workflow>>({});
   const [error, setError] = useState<string>();
 
   useEffect(() => {
@@ -37,6 +39,24 @@ export function DashboardClient() {
         if (!active) return;
         setAccount(accountResult.data);
         setReleases(releaseResult.data);
+        const workflowResults = await Promise.all(
+          releaseResult.data.map(async (release) => {
+            try {
+              const workflow = await apiFetch<Workflow>(
+                `/api/v1/releases/${release.id}/workflow`,
+                token,
+              );
+              return [release.id, workflow.data] as const;
+            } catch {
+              return undefined;
+            }
+          }),
+        );
+        if (active) {
+          setWorkflows(
+            Object.fromEntries(workflowResults.filter((item) => item !== undefined)),
+          );
+        }
       } catch (caught) {
         if (active) {
           setError(
@@ -81,21 +101,21 @@ export function DashboardClient() {
                 Bring one finished track.
               </h2>
               <p className="mt-5 max-w-xl text-lg leading-8">
-                Start with metadata and lyrics. Then upload the master, cover
-                and a small visual library directly to secure object storage.
+                Upload one finished MP3. We create an editable transcript,
+                artwork and an 18-video campaign automatically.
               </p>
               <Link className="button-secondary mt-7" href="/releases/new">
                 Set up the release
               </Link>
             </div>
             <div className="rounded-3xl bg-[var(--ink)] p-6 text-white">
-              <p className="eyebrow text-[var(--lime)]">You will need</p>
+              <p className="eyebrow text-[var(--lime)]">The flow</p>
               <ul className="mt-5 grid gap-4 font-bold">
-                <li>01 · MP3 or WAV master</li>
-                <li>02 · Lyrics or instrumental mode</li>
-                <li>03 · Cover artwork</li>
-                <li>04 · 3–10 images or short videos</li>
-                <li>05 · Rights confirmation</li>
+                <li>01 · Upload one MP3</li>
+                <li>02 · Review the transcript</li>
+                <li>03 · Choose the official cover</li>
+                <li>04 · Tune hooks and storyboard</li>
+                <li>05 · Preview, purchase and export</li>
               </ul>
             </div>
           </div>
@@ -119,8 +139,12 @@ export function DashboardClient() {
                 </span>
               </div>
               <div className="mt-7 flex items-center justify-between text-sm font-bold">
-                <span>{release.assets.filter((asset) => asset.isActive).length} assets</span>
-                <span className="group-hover:text-[var(--violet)]">Open setup →</span>
+                <span>
+                  {workflows[release.id]?.nextAction
+                    ? titleCase(workflows[release.id].nextAction ?? "")
+                    : `${release.assets.filter((asset) => asset.isActive).length} assets`}
+                </span>
+                <span className="group-hover:text-[var(--violet)]">Open workflow →</span>
               </div>
             </Link>
           ))}

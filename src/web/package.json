@@ -12,6 +12,7 @@
     "generate:api": "openapi-typescript ../Hook2Stream.Api/openapi/Hook2Stream.Api.json -o src/lib/api-schema.d.ts",
     "check": "tsc --noEmit",
     "lint": "eslint .",
+    "test:unit": "node --test unit-tests/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

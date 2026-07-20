@@ -18,6 +18,12 @@ namespace Hook2Stream.IntegrationTests;
 public sealed class Hook2StreamApiFactory : WebApplicationFactory<Program>
 {
     private readonly string _databaseName = $"hook2stream-tests-{Guid.NewGuid():N}";
+    private readonly Action<IServiceCollection>? _configureTestServices;
+
+    public Hook2StreamApiFactory(Action<IServiceCollection>? configureTestServices = null)
+    {
+        _configureTestServices = configureTestServices;
+    }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -43,6 +49,8 @@ public sealed class Hook2StreamApiFactory : WebApplicationFactory<Program>
                 .AddScheme<AuthenticationSchemeOptions, TestAuthHandler>(
                     TestAuthHandler.SchemeName,
                     _ => { });
+
+            _configureTestServices?.Invoke(services);
         });
     }
 }
@@ -79,6 +87,12 @@ internal sealed class FakeObjectStorage : IObjectStorage
         TimeSpan lifetime,
         CancellationToken cancellationToken) =>
         Task.FromResult(new Uri($"https://storage.example.test/{objectKey}"));
+
+    public Task<Uri> CreateReadUrlAsync(
+        string objectKey,
+        TimeSpan lifetime,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new Uri($"https://storage.example.test/{objectKey}?read=true"));
 
     public Task<MultipartUpload> CreateMultipartUploadAsync(
         string objectKey,

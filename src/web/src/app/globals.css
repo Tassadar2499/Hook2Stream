@@ -153,6 +153,42 @@ a {
   text-transform: uppercase;
 }
 
+.stage-dot {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  background: #a3a3a3;
+  box-shadow: 0 0 0 4px rgba(18, 18, 18, 0.06);
+}
+
+.stage-dot-success {
+  background: #16a34a;
+}
+
+.stage-dot-attention {
+  background: #f59e0b;
+}
+
+.stage-dot-error {
+  background: #dc2626;
+}
+
+.stage-dot-running {
+  background: var(--violet);
+}
+
+.cover-preview img {
+  max-width: none;
+}
+
+.campaign-poster {
+  background:
+    radial-gradient(circle at 20% 20%, rgba(217, 255, 87, 0.24), transparent 35%),
+    radial-gradient(circle at 80% 80%, rgba(109, 85, 255, 0.55), transparent 45%),
+    var(--ink);
+}
+
 .noise {
   position: fixed;
   inset: 0;

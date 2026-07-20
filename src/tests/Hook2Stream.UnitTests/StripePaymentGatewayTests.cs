@@ -1,0 +1,368 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Hook2Stream.Application;
+using Hook2Stream.Infrastructure;
+using Hook2Stream.Infrastructure.Billing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
+
+namespace Hook2Stream.UnitTests;
+
+public sealed class StripePaymentGatewayTests
+{
+    private const string WebhookSecret = "whsec_acceptance_test_secret";
+    private static readonly DateTimeOffset Now = DateTimeOffset.FromUnixTimeSeconds(1_784_505_600);
+    private static readonly Guid CheckoutId = Guid.Parse("01981fee-6ac0-7000-8000-000000000000");
+    private static readonly Guid WorkspaceId = Guid.Parse("01981fee-6ac0-7000-8000-000000000001");
+    private static readonly Guid ProjectId = Guid.Parse("01981fee-6ac0-7000-8000-000000000002");
+
+    [Fact]
+    public void Billing_catalog_has_locked_products_and_video_entitlements()
+    {
+        Assert.Equal(
+            new[]
+            {
+                BillingProducts.ActiveArtist,
+                BillingProducts.ArtworkCredits5,
+                BillingProducts.CleanCover,
+                BillingProducts.MiniRelease,
+                BillingProducts.ReleasePack
+            },
+            BillingProducts.All.Order(StringComparer.Ordinal));
+        Assert.False(BillingProducts.IsSubscription(BillingProducts.ArtworkCredits5));
+        Assert.False(BillingProducts.IsSubscription(BillingProducts.CleanCover));
+        Assert.False(BillingProducts.IsSubscription(BillingProducts.MiniRelease));
+        Assert.False(BillingProducts.IsSubscription(BillingProducts.ReleasePack));
+        Assert.True(BillingProducts.IsSubscription(BillingProducts.ActiveArtist));
+        Assert.Equal(0, BillingProducts.IncludedVideoCount(BillingProducts.ArtworkCredits5));
+        Assert.Equal(0, BillingProducts.IncludedVideoCount(BillingProducts.CleanCover));
+        Assert.Equal(6, BillingProducts.IncludedVideoCount(BillingProducts.MiniRelease));
+        Assert.Equal(18, BillingProducts.IncludedVideoCount(BillingProducts.ReleasePack));
+        Assert.Equal(18, BillingProducts.IncludedVideoCount(BillingProducts.ActiveArtist));
+        Assert.Equal(100, BillingProducts.AmountCents(BillingProducts.ArtworkCredits5));
+        Assert.Equal(200, BillingProducts.AmountCents(BillingProducts.CleanCover));
+        Assert.Equal(500, BillingProducts.AmountCents(BillingProducts.MiniRelease));
+        Assert.Equal(990, BillingProducts.AmountCents(BillingProducts.ReleasePack));
+        Assert.Equal(2_900, BillingProducts.AmountCents(BillingProducts.ActiveArtist));
+        Assert.DoesNotContain("MINI_RELEASE", BillingProducts.All);
+    }
+
+    [Fact]
+    public void Valid_checkout_webhook_is_verified_and_parsed_from_metadata()
+    {
+        var payload = EventPayload("evt_paid", "checkout.session.completed", BillingProducts.ReleasePack);
+
+        var result = Gateway().ParseAndVerifyWebhook(
+            payload,
+            Signature(payload, Now.ToUnixTimeSeconds()),
+            Now);
+
+        Assert.Equal("evt_paid", result.EventId);
+        Assert.Equal("checkout.session.completed", result.Type);
+        Assert.Equal(CheckoutId, result.CheckoutId);
+        Assert.Equal("cs_test_acceptance", result.ExternalSessionId);
+        Assert.Equal(BillingProducts.ReleasePack, result.ProductCode);
+        Assert.Equal(WorkspaceId, result.WorkspaceId);
+        Assert.Equal(ProjectId, result.ProjectId);
+        Assert.Equal("cus_acceptance", result.ExternalCustomerId);
+        Assert.Equal("sub_acceptance", result.ExternalSubscriptionId);
+        Assert.True(result.Paid);
+        Assert.False(result.Refunded);
+        Assert.Equal(Now.AddSeconds(-10), result.OccurredAt);
+        Assert.Equal(
+            Convert.ToHexStringLower(SHA256.HashData(payload)),
+            result.PayloadHash);
+    }
+
+    [Fact]
+    public void Delayed_checkout_success_is_treated_as_a_verified_payment()
+    {
+        var payload = EventPayload(
+            "evt_async_paid",
+            "checkout.session.async_payment_succeeded",
+            BillingProducts.MiniRelease);
+
+        var result = Gateway().ParseAndVerifyWebhook(
+            payload,
+            Signature(payload, Now.ToUnixTimeSeconds()),
+            Now);
+
+        Assert.True(result.Paid);
+        Assert.Equal("cs_test_acceptance", result.ExternalSessionId);
+        Assert.Equal(BillingProducts.MiniRelease, result.ProductCode);
+    }
+
+    [Fact]
+    public void Refund_event_is_not_treated_as_payment()
+    {
+        var payload = EventPayload("evt_refund", "charge.refunded", BillingProducts.MiniRelease);
+
+        var result = Gateway().ParseAndVerifyWebhook(
+            payload,
+            Signature(payload, Now.ToUnixTimeSeconds()),
+            Now);
+
+        Assert.False(result.Paid);
+        Assert.True(result.Refunded);
+    }
+
+    [Fact]
+    public void Renewal_invoice_reads_subscription_metadata_and_period_references()
+    {
+        var periodStart = Now.AddDays(-2);
+        var periodEnd = Now.AddDays(28);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_renewal",
+            type = "invoice.paid",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "in_renewal",
+                    customer = "cus_acceptance",
+                    amount_paid = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    currency = "usd",
+                    metadata = new { },
+                    parent = new
+                    {
+                        subscription_details = new
+                        {
+                            subscription = "sub_acceptance",
+                            metadata = new Dictionary<string, string>
+                            {
+                                ["workspace_id"] = WorkspaceId.ToString("N"),
+                                ["checkout_id"] = CheckoutId.ToString("N"),
+                                ["product_code"] = BillingProducts.ActiveArtist
+                            }
+                        }
+                    },
+                    lines = new
+                    {
+                        data = new[]
+                        {
+                            new { period = new { start = periodStart.ToUnixTimeSeconds(), end = periodEnd.ToUnixTimeSeconds() } }
+                        }
+                    }
+                }
+            }
+        });
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.True(result.Paid);
+        Assert.Equal(CheckoutId, result.CheckoutId);
+        Assert.Equal("sub_acceptance", result.ExternalSubscriptionId);
+        Assert.Equal("in_renewal", result.ExternalInvoiceId);
+        Assert.Equal(periodStart, result.PeriodStartsAt);
+        Assert.Equal(periodEnd, result.PeriodEndsAt);
+    }
+
+    [Fact]
+    public void Full_charge_refund_can_be_correlated_without_top_level_metadata()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_refund_without_metadata",
+            type = "charge.refunded",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "ch_refunded",
+                    payment_intent = "pi_acceptance",
+                    amount = 500,
+                    amount_refunded = 500,
+                    refunded = true,
+                    metadata = new { }
+                }
+            }
+        });
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.True(result.Refunded);
+        Assert.Null(result.CheckoutId);
+        Assert.Null(result.ProductCode);
+        Assert.Equal("pi_acceptance", result.ExternalPaymentIntentId);
+    }
+
+    [Theory]
+    [InlineData(BillingProducts.ArtworkCredits5)]
+    [InlineData(BillingProducts.CleanCover)]
+    [InlineData(BillingProducts.MiniRelease)]
+    [InlineData(BillingProducts.ReleasePack)]
+    [InlineData(BillingProducts.ActiveArtist)]
+    public void Signed_webhook_accepts_each_catalog_product(string productCode)
+    {
+        var payload = EventPayload("evt_catalog", "checkout.session.completed", productCode);
+
+        var result = Gateway().ParseAndVerifyWebhook(
+            payload,
+            Signature(payload, Now.ToUnixTimeSeconds()),
+            Now);
+
+        Assert.Equal(productCode, result.ProductCode);
+    }
+
+    [Fact]
+    public void Webhook_outside_timestamp_tolerance_is_rejected_before_parsing()
+    {
+        var payload = EventPayload("evt_old", "checkout.session.completed", BillingProducts.ReleasePack);
+        var timestamp = Now.AddSeconds(-301).ToUnixTimeSeconds();
+
+        var exception = Assert.Throws<CryptographicException>(() =>
+            Gateway().ParseAndVerifyWebhook(payload, Signature(payload, timestamp), Now));
+
+        Assert.Contains("timestamp", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Webhook_with_invalid_signature_is_rejected()
+    {
+        var payload = EventPayload("evt_tampered", "checkout.session.completed", BillingProducts.ReleasePack);
+        var signature = $"t={Now.ToUnixTimeSeconds()},v1={new string('0', 64)}";
+
+        var exception = Assert.Throws<CryptographicException>(() =>
+            Gateway().ParseAndVerifyWebhook(payload, signature, Now));
+
+        Assert.Contains("signature", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Webhook_accepts_any_matching_v1_during_secret_rotation()
+    {
+        var payload = EventPayload("evt_rotation", "checkout.session.completed", BillingProducts.ReleasePack);
+        var valid = Signature(payload, Now.ToUnixTimeSeconds());
+        var signature = $"t={Now.ToUnixTimeSeconds()},v1={new string('0', 64)},{valid[(valid.IndexOf(',') + 1)..]}";
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, signature, Now);
+
+        Assert.True(result.Paid);
+    }
+
+    [Fact]
+    public void Webhook_with_out_of_range_timestamp_is_rejected_as_cryptographic_failure()
+    {
+        var payload = EventPayload("evt_bad_timestamp", "checkout.session.completed", BillingProducts.ReleasePack);
+        var signature = $"t={long.MaxValue},v1={new string('0', 64)}";
+
+        var exception = Assert.Throws<CryptographicException>(() =>
+            Gateway().ParseAndVerifyWebhook(payload, signature, Now));
+
+        Assert.Contains("timestamp", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Signed_webhook_with_unknown_product_is_rejected()
+    {
+        var payload = EventPayload("evt_unknown", "checkout.session.completed", "unknown_product");
+
+        var exception = Assert.Throws<JsonException>(() =>
+            Gateway().ParseAndVerifyWebhook(
+                payload,
+                Signature(payload, Now.ToUnixTimeSeconds()),
+                Now));
+
+        Assert.Contains("product", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Fixture_gateway_is_rejected_in_production()
+    {
+        var services = new ServiceCollection();
+        services.AddHook2StreamInfrastructure(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Stripe:Mode"] = "Fixture",
+                ["Stripe:PublicWebBaseUrl"] = "https://app.example.test"
+            }).Build(),
+            new TestHostEnvironment(Environments.Production));
+        using var provider = services.BuildServiceProvider();
+
+        var exception = Assert.Throws<OptionsValidationException>(() =>
+            _ = provider.GetRequiredService<IOptions<StripeOptions>>().Value);
+
+        Assert.Contains("only allowed", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Stripe_gateway_fails_fast_without_secrets_and_catalog_prices()
+    {
+        var services = new ServiceCollection();
+        services.AddHook2StreamInfrastructure(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Stripe:Mode"] = "Stripe",
+                ["Stripe:PublicWebBaseUrl"] = "https://app.example.test"
+            }).Build(),
+            new TestHostEnvironment(Environments.Production));
+        using var provider = services.BuildServiceProvider();
+
+        Assert.Throws<OptionsValidationException>(() =>
+            _ = provider.GetRequiredService<IOptions<StripeOptions>>().Value);
+    }
+
+    private static StripePaymentGateway Gateway() => new(
+        new HttpClient(),
+        Options.Create(new StripeOptions
+        {
+            WebhookSecret = WebhookSecret,
+            WebhookToleranceSeconds = 300
+        }));
+
+    private static byte[] EventPayload(string eventId, string type, string productCode) =>
+        JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = eventId,
+            type,
+            created = Now.AddSeconds(-10).ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "cs_test_acceptance",
+                    customer = "cus_acceptance",
+                    subscription = "sub_acceptance",
+                    payment_status = "paid",
+                    amount_total = TestAmount(productCode),
+                    amount_paid = TestAmount(productCode),
+                    amount = TestAmount(productCode),
+                    amount_refunded = TestAmount(productCode),
+                    refunded = type == "charge.refunded",
+                    currency = "usd",
+                    metadata = new Dictionary<string, string>
+                    {
+                        ["workspace_id"] = WorkspaceId.ToString("N"),
+                        ["checkout_id"] = CheckoutId.ToString("N"),
+                        ["project_id"] = ProjectId.ToString("N"),
+                        ["product_code"] = productCode
+                    }
+                }
+            }
+        });
+
+    private static int TestAmount(string productCode) =>
+        BillingProducts.All.Contains(productCode) ? BillingProducts.AmountCents(productCode) : 990;
+
+    private static string Signature(byte[] payload, long timestamp)
+    {
+        var signed = Encoding.UTF8.GetBytes($"{timestamp}.{Encoding.UTF8.GetString(payload)}");
+        var signature = HMACSHA256.HashData(Encoding.UTF8.GetBytes(WebhookSecret), signed);
+        return $"t={timestamp},v1={Convert.ToHexStringLower(signature)}";
+    }
+
+    private sealed class TestHostEnvironment(string environmentName) : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = environmentName;
+        public string ApplicationName { get; set; } = "Hook2Stream.UnitTests";
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
+}

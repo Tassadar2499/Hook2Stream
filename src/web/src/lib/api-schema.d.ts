@@ -37,6 +37,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/billing/stripe/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/account/me": {
         parameters: {
             query?: never;
@@ -437,7 +470,35 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RightsAttestationResponse"];
+                    };
+                };
+                /** @description Not Found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
         put: {
             parameters: {
                 query?: never;
@@ -621,6 +682,811 @@ export interface paths {
                 };
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/audio-uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["QuickAudioUploadRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["QuickAudioUploadResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["SetupReleaseRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReleaseResponse"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/workflow": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["WorkflowResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/transcript": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TranscriptResponse"];
+                    };
+                };
+            };
+        };
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PutTranscriptRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TranscriptResponse"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/transcript/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ApproveRevisionRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TranscriptResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/transcript/regenerations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Accepted */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobAcceptedResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/artwork": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArtworkPackResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["GenerateArtworkRequest"];
+                };
+            };
+            responses: {
+                /** @description Accepted */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobAcceptedResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/artwork/selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["UpdateArtworkSelectionRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArtworkPackResponse"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/artwork/cover-approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ApproveRevisionRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ArtworkPackResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/hooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HookSetResponse"];
+                    };
+                };
+            };
+        };
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PutHooksRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HookSetResponse"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/campaign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CampaignResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/campaign/items/{itemId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    itemId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PutCampaignItemRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CampaignResponse"];
+                    };
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/assets/{assetId}/view-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AssetReadUrlResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/billing/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BillingSummaryResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/billing/checkouts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateCheckoutRequest"];
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CheckoutResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/renders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["StartRenderRequest"];
+                };
+            };
+            responses: {
+                /** @description Accepted */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RenderBatchResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/renders/{batchId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    batchId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["RenderBatchStatusResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/artwork/clean-cover/download-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DownloadGrantResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -869,12 +1735,48 @@ export interface components {
             /** Format: int64 */
             version: null | number | string;
         };
+        ApproveRevisionRequest: {
+            /** Format: uuid */
+            revisionId: string;
+        };
+        ArtworkPackResponse: {
+            /** Format: uuid */
+            revisionId: string;
+            /** Format: int32 */
+            number: number | string;
+            /** Format: int32 */
+            operationNumber: number | string;
+            state: components["schemas"]["RevisionState"];
+            prompt: string;
+            candidateAssetIds: string[];
+            backgroundAssetIds: string[];
+            /** Format: uuid */
+            selectedAssetId: null | string;
+            compositionJson: string;
+            /** Format: date-time */
+            approvedAt: null | string;
+            /** Format: int64 */
+            version: number | string;
+        };
         /** @enum {unknown} */
         AssetKind: "audio" | "cover" | "visual" | "brandCharacter";
+        /** @enum {unknown} */
+        AssetOrigin: "uploaded" | "generated";
+        /** @enum {unknown} */
+        AssetPurpose: "source" | "audioMaster" | "coverCandidate" | "approvedCover" | "campaignBackground" | "campaignVideo" | "previewVideo" | "exportBundle" | "cleanCover";
+        AssetReadUrlResponse: {
+            /** Format: uuid */
+            assetId: string;
+            url: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
         AssetResponse: {
             /** Format: uuid */
             id: string;
             kind: components["schemas"]["AssetKind"];
+            origin: components["schemas"]["AssetOrigin"];
+            purpose: components["schemas"]["AssetPurpose"];
             state: components["schemas"]["AssetState"];
             fileName: string;
             contentType: string;
@@ -900,6 +1802,12 @@ export interface components {
         };
         /** @enum {unknown} */
         AssetState: "reserved" | "uploading" | "uploaded" | "processing" | "ready" | "rejected" | "deleted";
+        BillingSummaryResponse: {
+            /** Format: int32 */
+            workspaceArtworkCredits: number | string;
+            activeSubscription: null | string;
+            entitlements: components["schemas"]["EntitlementResponse"][];
+        };
         BrandKitResponse: {
             /** Format: uuid */
             id: string;
@@ -915,6 +1823,35 @@ export interface components {
             characterLayerEnabled: boolean;
             /** Format: int64 */
             version: number | string;
+        };
+        CampaignItemRequest: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            slot: number | string;
+            template: string;
+            hookId: string;
+            /** Format: uuid */
+            backgroundAssetId: null | string;
+            text: string;
+            compositionJson: string;
+        };
+        CampaignResponse: {
+            /** Format: uuid */
+            revisionId: string;
+            /** Format: int32 */
+            number: number | string;
+            state: components["schemas"]["RevisionState"];
+            items: components["schemas"]["CampaignItemRequest"][];
+            /** Format: int64 */
+            version: number | string;
+        };
+        CheckoutResponse: {
+            /** Format: uuid */
+            checkoutId: string;
+            productCode: string;
+            status: string;
+            checkoutUrl: string;
         };
         CompletedPartRequest: {
             /** Format: int32 */
@@ -937,6 +1874,13 @@ export interface components {
             assetId: string;
             /** Format: uuid */
             jobId: string;
+        };
+        CreateCheckoutRequest: {
+            productCode: string;
+            /** Format: uuid */
+            projectId: null | string;
+            itemIds: null | string[];
+            returnPath: string;
         };
         CreateReleaseRequest: {
             projectLabel: string;
@@ -961,6 +1905,68 @@ export interface components {
             /** Format: uuid */
             replacesAssetId: null | string;
         };
+        DownloadGrantResponse: {
+            /** Format: uuid */
+            assetId: string;
+            fileName: string;
+            contentType: string;
+            /** Format: int64 */
+            sizeBytes: number | string;
+            /** Format: int32 */
+            width: null | number | string;
+            /** Format: int32 */
+            height: null | number | string;
+            url: string;
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        EntitlementResponse: {
+            /** Format: uuid */
+            id: string;
+            productCode: string;
+            /** Format: uuid */
+            projectId: null | string;
+            state: string;
+            /** Format: int32 */
+            includedItemCount: number | string;
+            itemIds: string[];
+            /** Format: int32 */
+            remainingContentRerenders: number | string;
+            /** Format: date-time */
+            validUntil: null | string;
+        };
+        /** @enum {unknown} */
+        FlowKind: "legacy" | "mp3First";
+        GenerateArtworkRequest: {
+            prompt: string;
+            style: null | string;
+        };
+        HookRequest: {
+            id: string;
+            kind: string;
+            /** Format: int64 */
+            startMilliseconds: number | string;
+            /** Format: int64 */
+            endMilliseconds: number | string;
+            label: null | string;
+        };
+        HookSetResponse: {
+            /** Format: uuid */
+            revisionId: string;
+            /** Format: int32 */
+            number: number | string;
+            /** Format: uuid */
+            transcriptRevisionId: string;
+            hooks: components["schemas"]["HookRequest"][];
+            /** Format: int64 */
+            version: number | string;
+        };
+        JobAcceptedResponse: {
+            /** Format: uuid */
+            jobId: string;
+            /** Format: uuid */
+            revisionId: null | string;
+        };
         JobResponse: {
             /** Format: uuid */
             id: string;
@@ -983,9 +1989,41 @@ export interface components {
         /** @enum {unknown} */
         JobState: "queued" | "running" | "succeeded" | "failed" | "cancelled";
         /** @enum {unknown} */
-        JobType: "mediaIngest" | "assetCleanup";
+        JobType: "mediaIngest" | "assetCleanup" | "audioAnalysis" | "transcription" | "artworkGeneration" | "campaignGeneration" | "previewRender" | "finalRender" | "exportBundle" | "cleanCoverRender";
+        /** @enum {unknown} */
+        PipelineStageState: "notStarted" | "queued" | "running" | "waitingUser" | "retrying" | "succeeded" | "degraded" | "failed" | "cancelled" | "stale";
         /** @enum {unknown} */
         ProjectState: "draft" | "analyzing" | "hookReview" | "campaignReady" | "previewReady" | "rendering" | "ready" | "partiallyReady" | "archived";
+        PutCampaignItemRequest: {
+            template: string;
+            hookId: string;
+            /** Format: uuid */
+            backgroundAssetId: null | string;
+            text: string;
+            compositionJson: string;
+        };
+        PutHooksRequest: {
+            hooks: components["schemas"]["HookRequest"][];
+        };
+        PutTranscriptRequest: {
+            source: components["schemas"]["TranscriptSource"];
+            language: string;
+            isInstrumental: boolean;
+            phrases: components["schemas"]["TranscriptPhraseRequest"][];
+        };
+        QuickAudioUploadRequest: {
+            fileName: string;
+            contentType: string;
+            /** Format: int64 */
+            sizeBytes: number | string;
+            confirmsContentRights: boolean;
+            allowsExternalAiProcessing: boolean;
+        };
+        QuickAudioUploadResponse: {
+            project: components["schemas"]["ReleaseResponse"];
+            upload: components["schemas"]["UploadSessionResponse"];
+            workflow: components["schemas"]["WorkflowResponse"];
+        };
         ReadinessResponse: {
             ready: boolean;
             missing: string[];
@@ -997,7 +2035,7 @@ export interface components {
             hasRightsAttestation: boolean;
         };
         /** @enum {unknown} */
-        ReleaseMode: "upcoming" | "released";
+        ReleaseMode: "upcoming" | "released" | "unscheduled";
         ReleaseResponse: {
             /** Format: uuid */
             id: string;
@@ -1008,6 +2046,7 @@ export interface components {
             internalNotes: null | string;
             lyricsText: null | string;
             isInstrumental: boolean;
+            isInstrumentalConfirmed: boolean;
             mode: components["schemas"]["ReleaseMode"];
             /** Format: date */
             releaseDate: null | string;
@@ -1021,13 +2060,49 @@ export interface components {
             createdAt: string;
             assets: components["schemas"]["AssetResponse"][];
         };
+        RenderBatchResponse: {
+            /** Format: uuid */
+            batchId: string;
+            state: string;
+            jobIds: string[];
+        };
+        RenderBatchStatusResponse: {
+            /** Format: uuid */
+            batchId: string;
+            /** Format: uuid */
+            entitlementId: string;
+            state: string;
+            kind: components["schemas"]["RenderRequestKind"];
+            items: components["schemas"]["RenderItemStatusResponse"][];
+            export: null | components["schemas"]["DownloadGrantResponse"];
+            /** Format: date-time */
+            completedAt: null | string;
+        };
+        RenderItemStatusResponse: {
+            /** Format: uuid */
+            campaignItemId: string;
+            state: string;
+            /** Format: uuid */
+            jobId: null | string;
+            errorCode: null | string;
+            download: null | components["schemas"]["DownloadGrantResponse"];
+        };
+        /**
+         * @default initial
+         * @enum {unknown}
+         */
+        RenderRequestKind: "initial" | "contentChange" | "technicalRetry";
         ReorderAssetsRequest: {
             assetIds: string[];
         };
+        /** @enum {unknown} */
+        RevisionState: "draft" | "processing" | "readyForReview" | "approved" | "failed" | "superseded";
         RightsAttestationRequest: {
             ownsAudioRights: boolean;
             ownsLyricsRights: boolean;
             ownsVisualRights: boolean;
+            allowsExternalAiArtwork: boolean;
+            allowsExternalAiProcessing: boolean;
             syntheticContentStatus: components["schemas"]["SyntheticContentStatus"];
             policyVersion: string;
         };
@@ -1037,15 +2112,87 @@ export interface components {
             ownsAudioRights: boolean;
             ownsLyricsRights: boolean;
             ownsVisualRights: boolean;
+            allowsExternalAiArtwork: boolean;
+            allowsExternalAiProcessing: boolean;
             syntheticContentStatus: components["schemas"]["SyntheticContentStatus"];
             policyVersion: string;
             /** Format: date-time */
             acceptedAt: string;
+            /** Format: uuid */
+            audioAssetId: null | string;
+            audioFingerprint: null | string;
             /** Format: int64 */
             projectVersion: number | string;
         };
+        SetupReleaseRequest: {
+            projectLabel: string;
+            artistName: string;
+            trackTitle: string;
+            language: string;
+            mode: components["schemas"]["ReleaseMode"];
+            /** Format: date */
+            releaseDate: null | string;
+            /** Format: date */
+            campaignStartDate: null | string;
+            isInstrumental: boolean;
+            isInstrumentalConfirmed: boolean;
+            internalNotes: null | string;
+        };
+        StartRenderRequest: {
+            /** Format: uuid */
+            entitlementId: string;
+            itemIds: string[];
+            kind?: components["schemas"]["RenderRequestKind"];
+        };
         /** @enum {unknown} */
         SyntheticContentStatus: "none" | "assisted" | "fullySynthetic" | "unknown";
+        TranscriptPhraseRequest: {
+            id: string;
+            /** Format: int32 */
+            order: number | string;
+            text: string;
+            /** Format: int64 */
+            startMilliseconds: number | string;
+            /** Format: int64 */
+            endMilliseconds: number | string;
+            /** Format: double */
+            confidence: number | string;
+            warningAcknowledged: boolean;
+            words: null | components["schemas"]["TranscriptWordResponse"][];
+        };
+        TranscriptResponse: {
+            /** Format: uuid */
+            revisionId: string;
+            /** Format: int32 */
+            number: number | string;
+            source: components["schemas"]["TranscriptSource"];
+            state: components["schemas"]["RevisionState"];
+            language: string;
+            isInstrumental: boolean;
+            phrases: components["schemas"]["TranscriptPhraseRequest"][];
+            /** Format: date-time */
+            approvedAt: null | string;
+            /** Format: int64 */
+            version: number | string;
+        };
+        /** @enum {unknown} */
+        TranscriptSource: "automatic" | "imported" | "manual" | "instrumental";
+        TranscriptWordResponse: {
+            text: string;
+            /** Format: int64 */
+            startMilliseconds: number | string;
+            /** Format: int64 */
+            endMilliseconds: number | string;
+            /** Format: double */
+            confidence: number | string;
+        };
+        UpdateArtworkSelectionRequest: {
+            /** Format: uuid */
+            packRevisionId: string;
+            /** Format: uuid */
+            selectedAssetId: string;
+            compositionJson: string;
+        };
         UpdateBrandKitRequest: {
             displayName: string;
             primaryColor: string;
@@ -1097,6 +2244,30 @@ export interface components {
             partCount: number | string;
             /** Format: date-time */
             expiresAt: string;
+            /** Format: uuid */
+            id?: string;
+        };
+        /** @enum {unknown} */
+        WorkflowLane: "audio" | "analysis" | "transcript" | "artwork" | "hooks" | "campaign" | "preview" | "finalRender";
+        WorkflowLaneResponse: {
+            lane: components["schemas"]["WorkflowLane"];
+            state: components["schemas"]["PipelineStageState"];
+            /** Format: int32 */
+            progressPercent: number | string;
+            blockerCode: null | string;
+            errorCode: null | string;
+            /** Format: uuid */
+            currentJobId: null | string;
+        };
+        WorkflowResponse: {
+            /** Format: uuid */
+            projectId: string;
+            flowKind: components["schemas"]["FlowKind"];
+            /** Format: int64 */
+            projectVersion: number | string;
+            blockers: string[];
+            nextAction: null | string;
+            lanes: components["schemas"]["WorkflowLaneResponse"][];
         };
     };
     responses: never;

@@ -79,6 +79,7 @@ public sealed record ReleaseResponse(
     string? InternalNotes,
     string? LyricsText,
     bool IsInstrumental,
+    bool IsInstrumentalConfirmed,
     ReleaseMode Mode,
     DateOnly? ReleaseDate,
     DateOnly? CampaignStartDate,
@@ -92,6 +93,8 @@ public sealed record RightsAttestationRequest(
     bool OwnsAudioRights,
     bool OwnsLyricsRights,
     bool OwnsVisualRights,
+    bool AllowsExternalAiArtwork,
+    bool AllowsExternalAiProcessing,
     SyntheticContentStatus SyntheticContentStatus,
     string PolicyVersion);
 
@@ -100,9 +103,13 @@ public sealed record RightsAttestationResponse(
     bool OwnsAudioRights,
     bool OwnsLyricsRights,
     bool OwnsVisualRights,
+    bool AllowsExternalAiArtwork,
+    bool AllowsExternalAiProcessing,
     SyntheticContentStatus SyntheticContentStatus,
     string PolicyVersion,
     DateTimeOffset AcceptedAt,
+    Guid? AudioAssetId,
+    string? AudioFingerprint,
     long ProjectVersion);
 
 public sealed record ReadinessResponse(
@@ -129,7 +136,10 @@ public sealed record UploadSessionResponse(
     string? MultipartUploadId,
     long PartSizeBytes,
     int PartCount,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt)
+{
+    public Guid Id => SessionId;
+}
 
 public sealed record UploadPartRequest(int PartNumber);
 
@@ -144,6 +154,8 @@ public sealed record CompleteUploadResponse(Guid AssetId, Guid JobId);
 public sealed record AssetResponse(
     Guid Id,
     AssetKind Kind,
+    AssetOrigin Origin,
+    AssetPurpose Purpose,
     AssetState State,
     string FileName,
     string ContentType,

@@ -2,15 +2,15 @@
 
 ## Продуктовый, бизнес- и технический план
 
-> Версия: 3.0  
-> Дата актуализации: 16 июля 2026 года  
-> Статус: концепция утверждена; foundation и media-ingest MVP реализуются параллельно с concierge validation
+> Версия: 4.0
+> Дата актуализации: 20 июля 2026 года
+> Статус: MP3-first концепция утверждена; orchestration/review foundation реализуется параллельно с production-provider и коммерческой validation
 
 ---
 
 ## 1. Резюме
 
-Hook2Stream — SaaS для независимых и AI-музыкантов, который превращает одну готовую песню в визуально согласованную 21-дневную кампанию коротких вертикальных видео.
+Hook2Stream — SaaS для независимых и AI-музыкантов, который превращает один MP3 в визуально согласованную 21-дневную кампанию коротких вертикальных видео. Транскрипт, обложка и видео создаются автоматически и проходят короткий ручной review.
 
 Рабочий оффер:
 
@@ -29,7 +29,7 @@ Hook2Stream — SaaS для независимых и AI-музыкантов, �
 Главная ценность:
 
 - артисту не нужны концертные съёмки, backstage или постоянный поток нового видео;
-- один небольшой набор assets превращается в разнообразную кампанию;
+- одного MP3 достаточно, чтобы получить первый готовый draft кампании;
 - ручная синхронизация текста и повторяющийся монтаж заменяются коротким review;
 - пользователь покупает готовность к релизу, а не технологию генерации.
 
@@ -41,7 +41,7 @@ Hook2Stream — SaaS для независимых и AI-музыкантов, �
 
 ### 2.1. Job To Be Done
 
-> Когда я выпускаю новую песню, я хочу один раз загрузить трек, lyrics и визуальный стиль и получить контент на три недели, чтобы регулярно публиковаться без монтажёра и второй работы в CapCut.
+> Когда я выпускаю новую песню, я хочу загрузить один MP3, проверить автоматически созданные текст и обложку и получить контент на три недели, чтобы регулярно публиковаться без монтажёра и второй работы в CapCut.
 
 ### 2.2. Основная аудитория
 
@@ -55,7 +55,7 @@ Hook2Stream — SaaS для независимых и AI-музыкантов, �
 
 Общие признаки хорошего раннего клиента:
 
-- есть финальный master, обложка и несколько визуальных материалов;
+- есть финальный MP3 master, даже если lyrics, обложка и визуальные материалы ещё не подготовлены;
 - нет постоянного видеографа или SMM-команды;
 - short-form контент нужен регулярно;
 - артист готов самостоятельно загружать готовые файлы на платформы;
@@ -147,20 +147,18 @@ Hook2Stream отличается сочетанием пяти свойств:
 
 ## 4. Канонический продуктовый результат
 
-### 4.1. Обязательные входы
+### 4.1. Вход и gates
 
-Для запуска analysis пользователь предоставляет:
+Основной flow начинается с одного финального MP3. До выдачи upload session пользователь подтверждает права и external AI processing через OpenRouter с Zero Data Retention. Система создаёт `Unscheduled` draft, проверяет media, запускает детерминированный analysis и OpenRouter transcription. WAV, готовый текст, собственные cover/visuals остаются optional advanced overrides.
 
-- один финальный MP3 или WAV;
-- lyrics как текст или текстовый файл либо отмечает `Instrumental`;
-- одну обложку;
-- от 3 до 10 visual assets: изображения и/или короткие видео;
-- имя артиста;
-- название трека;
-- язык;
-- статус релиза и дату.
+Перед upload и каждым внешним AI stage система проверяет:
 
-Поддерживаются два режима времени:
+- имя артиста и название трека;
+- RU/EN language;
+- release timing;
+- права на audio/lyrics/performance, synthetic-content status и явный external-processing consent, связанный с текущим audio fingerprint.
+
+Перед campaign generation должны быть утверждены актуальные transcript/instrumental revision и cover revision; три hooks и три backgrounds должны быть готовы. Поддерживаются два подтверждённых режима времени:
 
 - `Upcoming` — известна будущая дата релиза;
 - `Released` — трек уже выпущен, пользователь выбирает дату начала кампании.
@@ -183,9 +181,22 @@ Hook2Stream отличается сочетанием пяти свойств:
 - CTA остаются редактируемыми defaults;
 - пользователь видит defaults до генерации кампании.
 
-### 4.3. Три hook
+### 4.3. Artwork
 
-Каждый проект содержит три утверждённых hook:
+Первая artwork operation запускается после metadata/rights gate и может выполняться параллельно transcript review:
+
+- OpenRouter adapter вызывает `bytedance-seed/seedream-4.5` и создаёт три независимых text-free cover candidates;
+- artwork request получает creative brief, metadata, music features и только короткие draft excerpts — не MP3, signed URL или полный transcript;
+- пользователь выбирает candidate, меняет prompt, palette, crop/focal point и локальные artist/title typography либо загружает собственную cover;
+- approval привязывается к exact immutable revision;
+- после approval создаются три согласованных portrait backgrounds для campaign;
+- clean cover экспортируется локально как 3000×3000 sRGB.
+
+В project включены initial generation и две полные regeneration. Пакет `$1` добавляет пять workspace generations; каждая следующая полная generation расходует одну единицу balance. Технический retry и ручная composition edit balance не расходуют; смена уже утверждённой cover является новой generation.
+
+### 4.4. Три hook
+
+Каждый проект содержит три автоматически предложенных и редактируемых hook:
 
 1. `Chorus` — наиболее пригодный припев или повторяющаяся вокальная секция.
 2. `EmotionalLyric` — законченная сильная строка или фраза.
@@ -201,7 +212,7 @@ Hook2Stream отличается сочетанием пяти свойств:
 - если идеального кандидата нет, система предлагает лучший fallback и предупреждает о низкой уверенности;
 - instrumental-трек всё равно получает три разных energy/structure hooks, но без выдуманных lyrics.
 
-### 4.4. Фиксированный рецепт 18 роликов
+### 4.5. Фиксированный рецепт 18 роликов
 
 #### 12 hook-вариантов
 
@@ -224,7 +235,7 @@ Hook2Stream отличается сочетанием пяти свойств:
 
 Варианты одного типа должны отличаться как минимум opening, asset assignment или CTA, оставаясь в одном brand kit.
 
-### 4.5. Семейства шаблонов
+### 4.6. Семейства шаблонов
 
 | Семейство | Назначение | Основные controls |
 |---|---|---|
@@ -235,7 +246,7 @@ Hook2Stream отличается сочетанием пяти свойств:
 
 Это template-driven generation. Собственная text-to-video модель в MVP отсутствует.
 
-### 4.6. Календарь 10/1/10
+### 4.7. Календарь 10/1/10
 
 Для будущего релиза кампания занимает 21 календарный день:
 
@@ -254,7 +265,7 @@ Hook2Stream отличается сочетанием пяти свойств:
 - countdown items заменяются дополнительными post-release hook/CTA variants;
 - copy не создаёт ложное впечатление, что релиз ещё не состоялся.
 
-### 4.7. Copy и destinations
+### 4.8. Copy и destinations
 
 Для каждого campaign item генерируются:
 
@@ -272,29 +283,29 @@ Hook2Stream отличается сочетанием пяти свойств:
 
 ```mermaid
 flowchart LR
-    A["Track + lyrics + cover + 3–10 assets"] --> B["Alignment and music analysis"]
-    B --> C["Review 3 hooks"]
-    C --> D["18-item campaign storyboard"]
-    D --> E["One free watermarked preview"]
-    E --> F["Choose Mini or Release Pack"]
-    F --> G["Batch render"]
-    G --> H["ZIP + copy + calendar"]
+    A["One MP3"] --> B["Automatic analysis + transcript"]
+    B --> C["Confirm metadata / rights"]
+    C --> D["Review transcript + cover"]
+    D --> E["3 hooks + 18-item storyboard"]
+    E --> F["One free watermarked preview"]
+    F --> G["Choose Mini or Release Pack"]
+    G --> H["Batch render + cover"]
+    H --> I["ZIP + copy + calendar"]
 ```
 
 1. Посетитель видит оффер и реальные examples.
 2. Пользователь регистрируется и создаёт персональный workspace.
-3. Создаёт release project и указывает release timing.
-4. Загружает audio, lyrics, cover и 3–10 visual assets.
-5. При необходимости настраивает brand kit.
-6. Подтверждает права на загруженные материалы и synthetic-content status.
-7. Система нормализует media и запускает WhisperX/Essentia analysis.
-8. Пользователь проверяет phrase alignment и три hook.
-9. Система формирует 18-item storyboard, copy и календарь.
-10. Пользователь может заменить asset, template, opening или CTA отдельного item.
-11. Система рендерит один лучший low-resolution preview с watermark.
-12. Пользователь покупает Mini Release, Release Pack или использует entitlement подписки.
-13. Paid items рендерятся в 1080×1920.
-14. Пользователь скачивает ZIP и вручную публикует материалы.
+3. Подтверждает права/ZDR processing и загружает MP3; draft, ingest, OpenRouter Whisper transcription и детерминированный FFmpeg/DSP analysis запускаются автоматически.
+4. Подтверждает metadata/release timing, rights и при необходимости brand kit.
+5. Проверяет phrase transcript или подтверждает `Instrumental`; low-confidence warnings нужно исправить либо acknowledge.
+6. Выбирает/редактирует один из трёх cover candidates; после approval система создаёт три backgrounds.
+7. При необходимости корректирует три hook по 10–30 секунд.
+8. Система формирует 18-item storyboard, copy и календарь.
+9. Пользователь может изменить template, visual, text/colors/focal point или hook отдельного item.
+10. Система один раз успешно рендерит лучший low-resolution preview с watermark.
+11. Пользователь покупает Clean Cover, Mini Release, Release Pack, artwork generations или использует entitlement подписки.
+12. Paid items рендерятся отдельными jobs в 1080×1920.
+13. Пользователь скачивает видео ZIP и, при отдельном cover entitlement, clean cover по отдельной короткоживущей signed URL; затем вручную публикует материалы.
 
 Основной self-service сценарий должен быть понятен без звонка с основателем.
 
@@ -357,22 +368,11 @@ Hook2Stream выглядит как спокойная музыкальная re
 
 ### 6.4. Create Release
 
-Четыре коротких шага:
+Основной экран содержит одну MP3 dropzone. Сразу после выбора создаются project/upload session, начинается direct upload и открывается project hub. WAV и прежние sources находятся в свёрнутой панели `Advanced / Sources`.
 
-1. Track и release information.
-2. Lyrics и rights.
-3. Cover и visual assets.
-4. Brand kit и подтверждение запуска.
+Hub показывает независимые стадии Audio, Analysis, Transcript, Details/Rights, Artwork, Hooks, Campaign и Preview, сохраняемые на сервере. После reload или открытия на другом устройстве UI восстанавливается из workflow snapshot, а не из локального wizard state.
 
-До analysis система показывает:
-
-- обязательные отсутствующие данные;
-- upload limits;
-- число assets;
-- ожидаемый результат: 18-item campaign;
-- что будет доступно бесплатно.
-
-### 6.5. Alignment and Hook Review
+### 6.5. Transcript and Hook Review
 
 Экран содержит:
 
@@ -383,11 +383,17 @@ Hook2Stream выглядит как спокойная музыкальная re
 - три hook cards;
 - in/out handles;
 - confidence и warnings;
+- low-confidence queue с действиями fix/acknowledge;
+- phrase text/start/end, split/merge и numeric keyboard controls;
 - действие replace hook.
 
 Полноценного multi-track timeline нет.
 
-### 6.6. Campaign Storyboard
+### 6.6. Artwork Review
+
+Экран показывает три cover candidates, history и действия select, prompt/regenerate, palette, crop/focal point, artist/title typography и upload replacement. Утверждение выбранной composition запускает три backgrounds. Brush, inpainting и свободный canvas отсутствуют.
+
+### 6.7. Campaign Storyboard
 
 Основной экран результата — сетка из 18 карточек.
 
@@ -406,7 +412,7 @@ Hook2Stream выглядит как спокойная музыкальная re
 
 Изменение одной карточки не должно незаметно изменять остальные утверждённые items.
 
-### 6.7. Preview and Checkout
+### 6.8. Preview and Checkout
 
 До оплаты:
 
@@ -414,19 +420,22 @@ Hook2Stream выглядит как спокойная музыкальная re
 - остальные 17 показываются storyboard-карточками;
 - пользователь видит состав Mini и Release Pack;
 - checkout не маскирует подписку под разовую покупку.
+- после первого successful preview поздние edits обновляют poster и помечают preview stale, но не создают второй бесплатный render.
 
 После оплаты:
 
 - Mini позволяет выбрать любые 6 items; по умолчанию предложены top-6;
 - Release Pack открывает все 18;
 - Active Artist использует один Release Pack entitlement текущего billing period.
+- Clean Cover отдельно открывает approved 3000×3000 artwork за $2;
+- пакет за $1 добавляет пять полных artwork generations.
 
-### 6.8. Render and Download
+### 6.9. Render and Download
 
 - общий прогресс и статус каждого item;
 - успешные items доступны при partial failure;
 - retry только для неуспешных items;
-- ZIP появляется после готовности разрешённого набора;
+- ZIP с videos, copy, calendar и manifest появляется после готовности разрешённого набора; clean cover не копируется в video ZIP и выдаётся отдельно только пока активен cover entitlement;
 - история сохраняет manifest и immutable render versions.
 
 ---
@@ -438,18 +447,21 @@ Hook2Stream выглядит как спокойная музыкальная re
 - public landing;
 - managed auth и персональный workspace;
 - release projects и history;
-- MP3/WAV, lyrics, cover и 3–10 visual assets;
+- MP3-only primary intake и optional WAV/prepared lyrics/own cover/0–10 visual overrides;
 - rights declaration и synthetic-content flag;
 - brand kit с безопасными defaults;
-- WhisperX phrase/word alignment;
-- Essentia BPM, beat, structure и energy analysis;
+- automatic RU/EN transcription/alignment через `openai/whisper-large-v3` в OpenRouter ZDR;
+- transcript phrase editor, low-confidence review и explicit instrumental confirmation;
+- детерминированный FFmpeg/DSP BPM, beat, structure и energy analysis;
+- три AI cover candidates, controlled artwork editor и три generated backgrounds;
 - три editable hooks;
 - фиксированный campaign recipe на 18 items;
 - четыре template families;
 - campaign storyboard и item-level controls;
 - descriptions, CTA и 21-day calendar;
 - один watermarked preview;
-- Mini/Release/Active Artist checkout;
+- Clean Cover/Mini/Release/Active Artist checkout;
+- workspace artwork generation balance;
 - batch render 1080×1920;
 - ZIP, CSV, ICS и manifest;
 - durable jobs, retry, idempotency, cost telemetry и deletion.
@@ -457,7 +469,7 @@ Hook2Stream выглядит как спокойная музыкальная re
 ### 7.2. Не входит
 
 - собственная text-to-video модель;
-- generative backgrounds в базовом пакете;
+- произвольное generative video;
 - автоматическая публикация;
 - social OAuth;
 - Spotify analytics;
@@ -476,12 +488,15 @@ Hook2Stream выглядит как спокойная музыкальная re
 MVP готов к платной beta, когда:
 
 - новый пользователь самостоятельно проходит от регистрации до ZIP;
-- типовой трек до пяти минут получает analysis и storyboard без ручной работы оператора;
-- пользователь может исправить lyrics timing и каждый hook;
+- одного MP3 достаточно для automatic analysis/transcript/artwork/storyboard без ручной работы оператора;
+- пользователь может исправить transcript timing, cover composition, каждый hook и отдельный video item;
+- low-confidence transcript не проходит approval без fix/acknowledge, а instrumental mode не создаёт lyrics;
 - campaign plan всегда содержит ровно 18 валидных items;
-- один бесплатный preview содержит watermark, paid outputs его не содержат;
+- project получает не более одного успешного бесплатного preview с watermark, paid outputs его не содержат;
 - Mini экспортирует ровно шесть выбранных items;
 - Release Pack экспортирует все 18;
+- clean cover 3000×3000 недоступна без отдельной покупки `$2`;
+- четвёртая artwork operation требует credit, technical retry не списывает повторно;
 - каждый paid output проходит ffprobe validation;
 - restart worker не создаёт дубликат результата или списания;
 - failure одного render не уничтожает остальные;
@@ -495,13 +510,13 @@ MVP готов к платной beta, когда:
 ### 8.1. Компоненты
 
 - Next.js/React web application;
-- Remotion Player для browser preview;
+- HTML5 preview для versioned composition;
 - ASP.NET Core API;
-- ASP.NET Core orchestration worker;
-- Node.js Remotion render worker;
-- Python-sidecar с WhisperX и Essentia;
+- ASP.NET Core control/media/export workers;
+- ASP.NET Core + FFmpeg deterministic render worker;
+- OpenRouter adapters для transcription, text-free artwork и campaign/copy;
 - PostgreSQL;
-- durable PostgreSQL-backed job queue;
+- capability-routed PostgreSQL job queue, transactional outbox/inbox и reconcile loop;
 - S3-compatible object storage;
 - FFmpeg/ffprobe;
 - Server-Sent Events;
@@ -510,13 +525,16 @@ MVP готов к платной beta, когда:
 
 ```mermaid
 flowchart TD
-    WEB["Next.js + Remotion Player"] --> API["ASP.NET Core API"]
+    WEB["Next.js"] --> API["ASP.NET Core API"]
     API --> DB["PostgreSQL"]
     API --> STORE["Object Storage"]
-    API --> JOBS["Durable Jobs"]
-    JOBS --> ORCH["ASP.NET Core Worker"]
-    ORCH --> AUDIO["Python / WhisperX / Essentia"]
-    ORCH --> VIDEO["Node / Remotion / FFmpeg"]
+    API --> JOBS["Jobs + Outbox"]
+    JOBS --> ORCH[".NET Control"]
+    JOBS --> MEDIA[".NET Media / FFmpeg"]
+    JOBS --> AUDIO[".NET / FFmpeg / DSP"]
+    JOBS --> VIDEO[".NET / FFmpeg"]
+    ORCH --> AI["OpenRouter: STT / image / campaign"]
+    MEDIA --> STORE
     AUDIO --> STORE
     VIDEO --> STORE
 ```
@@ -526,15 +544,16 @@ flowchart TD
 - `User`, `Workspace`;
 - `BrandKit`, `BrandKitSnapshot`;
 - `ReleaseProject`, `ReleaseTiming`;
-- `AudioAsset`, `CoverAsset`, `VisualAsset`, `DerivedAsset`;
-- `LyricsDocument`, `PhraseTiming`;
-- `SongAnalysis`, `SongSection`, `EnergyEvent`;
-- `HookVariant`;
-- `CampaignPlan`, `CampaignItem`;
+- `MediaAsset` с origin, purpose и provenance;
+- `PipelineRun`, `PipelineStage`, `OutboxMessage`, `InboxMessage`;
+- `TrackAnalysisRevision`, `TranscriptRevision`, phrase/word timing и approval;
+- `ArtworkPackRevision`, candidates, selected composition и approval;
+- `HookSetRevision`;
+- `CampaignPlanRevision`, item composition revisions;
 - `CompositionSpec`, `RenderVersion`;
 - `ExportBundle`;
 - `Product`, `Purchase`, `Subscription`, `Entitlement`;
-- `UsageTransaction`, `Job`, `AuditEvent`.
+- `ArtCreditLedger`, `UsageTransaction`, `Job`, `JobAttempt`, `AuditEvent`.
 
 ### 8.3. Versioned contracts
 
@@ -583,27 +602,21 @@ Job:
 Queued → Running → Succeeded | Failed | Cancelled
 ```
 
-Project state не заменяет состояния отдельных jobs и campaign items.
+Project state не заменяет состояния workflow lanes, revisions, jobs и campaign items. Lanes используют `NotStarted`, `Queued`, `Running`, `WaitingUser`, `Retrying`, `Succeeded`, `Degraded`, `Failed`, `Cancelled`, `Stale` и возвращают blockers/next action.
 
 ### 8.5. Pipeline
 
-1. Создать release project.
-2. Загрузить assets напрямую в object storage.
-3. Проверить limits, MIME, container и codecs.
-4. Нормализовать audio и visual proxies.
-5. Вычислить audio hash и analysis version.
-6. Выполнить WhisperX alignment.
-7. Выполнить Essentia analysis.
-8. Сформировать три hook suggestions.
-9. Зафиксировать пользовательские corrections.
-10. Создать versioned 18-item `CampaignPlan`.
-11. Сгенерировать copy и calendar.
-12. Render одного preview.
-13. Активировать entitlement после checkout.
-14. Render разрешённых paid items.
-15. Провести ffprobe validation.
-16. Собрать ZIP, CSV, ICS и manifest.
-17. Записать фактическое usage и освободить reservations.
+1. Атомарно создать `Unscheduled` project, MP3 asset и direct-upload session.
+2. Проверить magic/container/codecs, создать normalized analysis derivative и source fingerprint.
+3. Параллельно выполнить детерминированный FFmpeg/DSP analysis и `openai/whisper-large-v3` transcription через OpenRouter ZDR; не использовать vocal separation или локальные neural models.
+4. Сохранить draft transcript и analysis revisions, ожидать phrase review либо instrumental confirmation.
+5. После setup/rights gate создать три cover candidates; после cover approval — три backgrounds.
+6. Сформировать три hooks; пользователь может корректировать их без отдельного blocking approval.
+7. После transcript+cover gates создать versioned 18-item campaign, copy и calendar.
+8. Render одного бесплатного preview и posters остальных items.
+9. Активировать entitlement только после подписанного Stripe webhook.
+10. Render разрешённых paid items независимыми jobs, провалидировать FFmpeg/ffprobe.
+11. Собрать ZIP с MP4, CSV, ICS и manifest; clean cover выдавать отдельно по 10-minute signed URL пока активен cover entitlement; reconcile usage/reservations.
 
 ### 8.6. Надёжность и безопасность
 
@@ -616,6 +629,8 @@ Project state не заменяет состояния отдельных jobs �
 - FFmpeg без shell interpolation;
 - allowlist fonts и templates;
 - durable retry с idempotency key;
+- capability-filtered leases и fencing token;
+- staging object validation перед canonical commit;
 - composition hash deduplication;
 - signed billing webhooks;
 - immutable usage ledger;
@@ -627,18 +642,19 @@ Project state не заменяет состояния отдельных jobs �
 
 Verification suites должны ссылаться на соответствующие `FR-*` и `NFR-*`.
 
-- unit tests для recipe, schedule, pricing и state transitions;
+- unit tests для recipe, schedule, artwork quota, pricing, invalidation и state transitions;
 - integration tests с PostgreSQL и S3-compatible storage;
-- contract tests между .NET, Python и Node;
+- HTTP contract tests для OpenRouter adapters и deterministic-media contract tests;
 - golden corpus минимум из 20 лицензированных tracks;
-- русский, английский и instrumental fixtures;
+- русский, английский, noisy vocal, VBR/CBR и instrumental fixtures;
 - mixed assets: portrait, landscape, still, short loop, missing character;
 - phrase alignment и manual correction tests;
 - representative-frame snapshots;
 - audio/video sync checks;
 - ffprobe output validation;
 - restart, retry, cancellation и duplicate delivery;
-- Playwright: signup → upload → hooks → storyboard → preview → checkout → ZIP.
+- provider error matrix: transient, moderation, user input, authentication/quota и ambiguous timeout;
+- Playwright: signup → one MP3 → transcript/cover review → storyboard → preview → checkout → ZIP.
 
 ---
 
@@ -649,9 +665,11 @@ Verification suites должны ссылаться на соответству�
 | Product | Цена | Entitlement |
 |---|---:|---|
 | Preview | $0 | Один low-resolution watermarked preview |
-| Mini Release | $19 one-time | Любые 6 clean campaign items |
-| Release Pack | $39 one-time | Все 18 clean items, copy и calendar |
-| Active Artist | $29/month | Один Release Pack в billing period, brand kit и history |
+| Clean Cover | $2 one-time | Утверждённая clean cover 3000×3000 |
+| Mini Release | $5 one-time | Ровно 6 выбранных clean campaign items |
+| Release Pack | $9.90 one-time | Ровно 18 clean items, copy и calendar |
+| Active Artist | $29/month | Один Release Pack в billing period без rollover, brand kit и history |
+| Artwork Generations | $1 one-time | Пять дополнительных полных generations для workspace |
 
 Правила:
 
@@ -661,7 +679,10 @@ Verification suites должны ссылаться на соответству�
 - top-6 предлагается только как default;
 - paid output не содержит сервисный watermark;
 - повторный render неизменённой composition переиспользует готовый asset;
-- generative backgrounds отключены в MVP и позднее получают отдельный credit ledger.
+- initial artwork и две regeneration включены; пакет за $1 добавляет пять generations;
+- одна generation покрывает три cover candidates и три backgrounds после approval;
+- каждый purchased item включает один content rerender, техническое исправление бесплатно;
+- refund закрывает будущие signed URLs и unused entitlement, но не может отозвать уже скачанные bytes.
 
 ### 9.2. Revenue scenarios
 
@@ -680,7 +701,7 @@ Verification suites должны ссылаться на соответству�
 Измеряемые variable units:
 
 - analysed audio seconds;
-- WhisperX GPU/CPU seconds;
+- OpenRouter transcription audio seconds/tokens;
 - rendered output seconds;
 - storage byte-days;
 - delivery bytes;
@@ -710,7 +731,7 @@ Guardrails после появления реальных данных:
 ### 10.2. Продажи
 
 - не предлагать бесплатную beta как основной оффер;
-- стартовый pilot — $19;
+- стартовый self-service Mini pilot — $5;
 - найти 30 релевантных артистов в Suno/Udio Discord, Reddit и indie communities;
 - выполнять первые заказы полуавтоматически;
 - наблюдать, какие items реально публикуются;
@@ -739,30 +760,30 @@ Self-service разработка получает GO, если:
 - managed auth и hosted checkout;
 - готовые UI primitives;
 - ограниченные template controls;
-- отсутствие social integrations и generative video;
-- использование WhisperX, Essentia, Remotion и FFmpeg без обучения собственной модели.
+- отсутствие social integrations и text-to-video;
+- использование OpenRouter для всех AI stages и FFmpeg/DSP для deterministic media без локальных neural models.
 
 ### Неделя 1 — foundation и ingest
 
 - Next.js, API, workers и Aspire;
 - PostgreSQL и object storage;
 - auth/workspace;
-- release project;
-- MP3/WAV, cover и visual upload;
+- MP3-first quick project/upload и optional Sources panel;
 - validation и proxies.
 
 ### Неделя 2 — lyrics и music analysis
 
-- lyrics document;
-- WhisperX alignment;
+- RU/EN OpenRouter Whisper transcription/alignment;
+- immutable transcript revisions;
 - phrase editor;
-- Essentia BPM, sections и energy;
+- deterministic FFmpeg/DSP BPM, sections и energy;
 - analysis progress и retry;
 - initial hook selection.
 
-### Неделя 3 — hooks и campaign plan
+### Неделя 3 — artwork, hooks и campaign plan
 
-- Hook Review;
+- OpenRouter Seedream artwork adapter, три cover candidates и controlled editor;
+- cover approval и три generated backgrounds;
 - manual in/out и replace;
 - deterministic 18-item recipe;
 - 10/1/10 schedule;
@@ -772,7 +793,7 @@ Self-service разработка получает GO, если:
 ### Неделя 4 — compositions и preview
 
 - четыре template families;
-- Remotion Player;
+- HTML5 composition preview;
 - shared `CompositionSpec`;
 - fit/fill/focal point;
 - lyrics styles;
@@ -781,15 +802,17 @@ Self-service разработка получает GO, если:
 ### Неделя 5 — paid render и export
 
 - checkout и entitlements;
+- artwork generation ledger и Stripe webhook inbox;
 - Mini selection;
-- batch Remotion render;
+- batch deterministic FFmpeg render;
 - FFmpeg/ffprobe validation;
-- ZIP, CSV, ICS и manifest;
+- video ZIP с MP4, CSV, ICS и manifest плюс отдельная entitlement-gated выдача clean cover;
 - history и secure download.
 
 ### Неделя 6 — hardening и pilot
 
 - golden corpus;
+- canary flags/kill switches и CPU/fixture development profile;
 - idempotency/restart tests;
 - partial failure UX;
 - cost telemetry;
@@ -798,6 +821,16 @@ Self-service разработка получает GO, если:
 - первые self-service pilots.
 
 Если media edge cases занимают больше времени, scope сохраняется, а beta переносится: social publishing или editor features не добавляются вместо hardening.
+
+### Rollout и совместимость
+
+1. Применить additive expand/contract migration и оставить legacy create/read/upload flow рабочим.
+2. Развернуть новую worker topology с deterministic fixtures/CPU profile, затем production sidecars и credentials по отдельности.
+3. Включить новый UI для internal workspace; существующие drafts не запускают AI jobs автоматически.
+4. Предложить legacy project явное `Continue with existing materials`: lyrics импортируются как unapproved transcript revision, cover/visuals сохраняются как uploaded sources.
+5. Провести canary только для новых projects: 10% → 50% → 100%, проверяя quality, provider cost, queue age и paid render success.
+
+Независимые server-side kill switches обязаны отключать transcription, artwork, campaign и render без потери уже сохранённых revisions. Старые ES/DE/FR данные остаются читаемыми, но automatic quality baseline гарантируется только для RU/EN.
 
 ---
 
@@ -843,7 +876,7 @@ Self-service разработка получает GO, если:
 | 18 роликов выглядят слишком похожими | Фиксированный mix templates, три hooks, asset rotation и storyboard review |
 | Lyrics alignment ошибается на вокале | Пользовательский текст как source, phrase-level confidence и быстрый editor |
 | Не находится instrumental drop | Fallback по energy/structure с warning и ручной replace |
-| У пользователя слабые visual assets | Animated cover, fit/blur defaults и понятные требования к 3–10 assets |
+| У пользователя нет или слабые visual assets | Три generated backgrounds, animated cover, editable crop/focal defaults и optional own uploads |
 | Повторные render уничтожают маржу | Preview low-res, composition hash dedup, limits и telemetry |
 | Подписка churn между релизами | Разовые Mini/Release Pack и ориентация на артистов с частыми релизами |
 | Пользователи хотят editor вместо результата | Ограничить controls и измерять причины item rejection |

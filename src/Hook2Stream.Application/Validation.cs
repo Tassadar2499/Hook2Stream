@@ -125,6 +125,9 @@ public static partial class BrandKitRules
 
 public static class ReleaseRules
 {
+    private static readonly IReadOnlySet<string> AutomaticLanguages =
+        new HashSet<string>(["en", "ru"], StringComparer.OrdinalIgnoreCase);
+
     public static ValidationErrors Validate(CreateReleaseRequest request, DateOnly today) =>
         ValidateCore(
             request.ProjectLabel,
@@ -150,6 +153,26 @@ public static class ReleaseRules
             request.ReleaseDate,
             request.CampaignStartDate,
             today);
+
+    public static ValidationErrors ValidateSetup(SetupReleaseRequest request, DateOnly today)
+    {
+        var errors = new ValidationErrors();
+        RequireText(request.ProjectLabel, "projectLabel", 160, errors);
+        RequireText(request.ArtistName, "artistName", 160, errors);
+        RequireText(request.TrackTitle, "trackTitle", 160, errors);
+        if (!AutomaticLanguages.Contains(request.Language))
+        {
+            errors.Add("language", "Automatic transcription currently supports English and Russian.");
+        }
+
+        if (request.IsInstrumental && !request.IsInstrumentalConfirmed)
+        {
+            errors.Add("isInstrumentalConfirmed", "Confirm that the track is instrumental.");
+        }
+
+        ValidateReleaseTiming(request.Mode, request.ReleaseDate, request.CampaignStartDate, today, errors);
+        return errors;
+    }
 
     private static ValidationErrors ValidateCore(
         string projectLabel,
@@ -180,6 +203,27 @@ public static class ReleaseRules
             errors.Add("lyricsText", "Instrumental releases must not include lyrics.");
         }
 
+        ValidateReleaseTiming(mode, releaseDate, campaignStartDate, today, errors);
+        return errors;
+    }
+
+    private static void ValidateReleaseTiming(
+        ReleaseMode mode,
+        DateOnly? releaseDate,
+        DateOnly? campaignStartDate,
+        DateOnly today,
+        ValidationErrors errors)
+    {
+        if (mode == ReleaseMode.Unscheduled)
+        {
+            if (releaseDate is not null || campaignStartDate is not null)
+            {
+                errors.Add("releaseDate", "Unscheduled releases must not define release or campaign dates.");
+            }
+
+            return;
+        }
+
         if (mode == ReleaseMode.Upcoming)
         {
             if (releaseDate is null || releaseDate <= today)
@@ -205,7 +249,6 @@ public static class ReleaseRules
             }
         }
 
-        return errors;
     }
 
     private static void RequireText(string value, string field, int maxLength, ValidationErrors errors)

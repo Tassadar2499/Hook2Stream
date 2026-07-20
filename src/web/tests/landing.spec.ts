@@ -8,7 +8,8 @@ test("landing communicates the campaign result and pricing", async ({ page }) =>
   ).toBeVisible();
   await expect(page.getByText("18 videos · one ZIP")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pay for the release." })).toBeVisible();
-  await expect(page.getByText("$39")).toBeVisible();
+  await expect(page.getByText("$9.90")).toBeVisible();
+  await expect(page.getByText(/^Upload one finished MP3\./i)).toBeVisible();
   await expect(page.getByText(/no virality promise/i)).toBeVisible();
 });
 

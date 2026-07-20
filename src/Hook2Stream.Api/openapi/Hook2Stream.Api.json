@@ -17,6 +17,18 @@
         }
       }
     },
+    "/api/v1/billing/stripe/webhook": {
+      "post": {
+        "tags": [
+          "BillingEndpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/v1/account/me": {
       "get": {
         "tags": [
@@ -359,6 +371,37 @@
       }
     },
     "/api/v1/releases/{projectId}/rights": {
+      "get": {
+        "tags": [
+          "Endpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RightsAttestationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        }
+      },
       "put": {
         "tags": [
           "Endpoints"
@@ -542,6 +585,757 @@
         "responses": {
           "204": {
             "description": "No Content"
+          }
+        }
+      }
+    },
+    "/api/v1/releases/audio-uploads": {
+      "post": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuickAudioUploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuickAudioUploadResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/setup": {
+      "put": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/workflow": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/events": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/transcript": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutTranscriptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/transcript/approve": {
+      "post": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/transcript/regenerations": {
+      "post": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/artwork": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtworkPackResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateArtworkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/artwork/selection": {
+      "put": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateArtworkSelectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtworkPackResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/artwork/cover-approval": {
+      "post": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtworkPackResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/hooks": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSetResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutHooksRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSetResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/campaign": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/campaign/items/{itemId}": {
+      "put": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "itemId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutCampaignItemRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/assets/{assetId}/view-url": {
+      "get": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetReadUrlResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/summary": {
+      "get": {
+        "tags": [
+          "BillingEndpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingSummaryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/checkouts": {
+      "post": {
+        "tags": [
+          "BillingEndpoints"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/renders": {
+      "post": {
+        "tags": [
+          "BillingEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRenderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenderBatchResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/renders/{batchId}": {
+      "get": {
+        "tags": [
+          "BillingEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "batchId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenderBatchStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/{projectId}/artwork/clean-cover/download-url": {
+      "get": {
+        "tags": [
+          "BillingEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DownloadGrantResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -794,6 +1588,101 @@
           }
         }
       },
+      "ApproveRevisionRequest": {
+        "required": [
+          "revisionId"
+        ],
+        "type": "object",
+        "properties": {
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ArtworkPackResponse": {
+        "required": [
+          "revisionId",
+          "number",
+          "operationNumber",
+          "state",
+          "prompt",
+          "candidateAssetIds",
+          "backgroundAssetIds",
+          "selectedAssetId",
+          "compositionJson",
+          "approvedAt",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "operationNumber": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RevisionState"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "candidateAssetIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "backgroundAssetIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "selectedAssetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "compositionJson": {
+            "type": "string"
+          },
+          "approvedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "AssetKind": {
         "enum": [
           "audio",
@@ -802,10 +1691,52 @@
           "brandCharacter"
         ]
       },
+      "AssetOrigin": {
+        "enum": [
+          "uploaded",
+          "generated"
+        ]
+      },
+      "AssetPurpose": {
+        "enum": [
+          "source",
+          "audioMaster",
+          "coverCandidate",
+          "approvedCover",
+          "campaignBackground",
+          "campaignVideo",
+          "previewVideo",
+          "exportBundle",
+          "cleanCover"
+        ]
+      },
+      "AssetReadUrlResponse": {
+        "required": [
+          "assetId",
+          "url",
+          "expiresAt"
+        ],
+        "type": "object",
+        "properties": {
+          "assetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "url": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "AssetResponse": {
         "required": [
           "id",
           "kind",
+          "origin",
+          "purpose",
           "state",
           "fileName",
           "contentType",
@@ -829,6 +1760,12 @@
           },
           "kind": {
             "$ref": "#/components/schemas/AssetKind"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/AssetOrigin"
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/AssetPurpose"
           },
           "state": {
             "$ref": "#/components/schemas/AssetState"
@@ -935,6 +1872,36 @@
           "deleted"
         ]
       },
+      "BillingSummaryResponse": {
+        "required": [
+          "workspaceArtworkCredits",
+          "activeSubscription",
+          "entitlements"
+        ],
+        "type": "object",
+        "properties": {
+          "workspaceArtworkCredits": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "activeSubscription": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "entitlements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntitlementResponse"
+            }
+          }
+        }
+      },
       "BrandKitResponse": {
         "required": [
           "id",
@@ -999,6 +1966,116 @@
               "string"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "CampaignItemRequest": {
+        "required": [
+          "id",
+          "slot",
+          "template",
+          "hookId",
+          "backgroundAssetId",
+          "text",
+          "compositionJson"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slot": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "template": {
+            "type": "string"
+          },
+          "hookId": {
+            "type": "string"
+          },
+          "backgroundAssetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "text": {
+            "type": "string"
+          },
+          "compositionJson": {
+            "type": "string"
+          }
+        }
+      },
+      "CampaignResponse": {
+        "required": [
+          "revisionId",
+          "number",
+          "state",
+          "items",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RevisionState"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CampaignItemRequest"
+            }
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "CheckoutResponse": {
+        "required": [
+          "checkoutId",
+          "productCode",
+          "status",
+          "checkoutUrl"
+        ],
+        "type": "object",
+        "properties": {
+          "checkoutId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "productCode": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "checkoutUrl": {
+            "type": "string"
           }
         }
       },
@@ -1084,6 +2161,40 @@
           "jobId": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "CreateCheckoutRequest": {
+        "required": [
+          "productCode",
+          "projectId",
+          "itemIds",
+          "returnPath"
+        ],
+        "type": "object",
+        "properties": {
+          "productCode": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "itemIds": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "returnPath": {
+            "type": "string"
           }
         }
       },
@@ -1176,6 +2287,252 @@
             "format": "int64"
           },
           "replacesAssetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "DownloadGrantResponse": {
+        "required": [
+          "assetId",
+          "fileName",
+          "contentType",
+          "sizeBytes",
+          "width",
+          "height",
+          "url",
+          "expiresAt"
+        ],
+        "type": "object",
+        "properties": {
+          "assetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fileName": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "width": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "height": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "url": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EntitlementResponse": {
+        "required": [
+          "id",
+          "productCode",
+          "projectId",
+          "state",
+          "includedItemCount",
+          "itemIds",
+          "remainingContentRerenders",
+          "validUntil"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "productCode": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "includedItemCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "itemIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "remainingContentRerenders": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "validUntil": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "FlowKind": {
+        "enum": [
+          "legacy",
+          "mp3First"
+        ]
+      },
+      "GenerateArtworkRequest": {
+        "required": [
+          "prompt",
+          "style"
+        ],
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "style": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "HookRequest": {
+        "required": [
+          "id",
+          "kind",
+          "startMilliseconds",
+          "endMilliseconds",
+          "label"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "startMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "endMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "label": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "HookSetResponse": {
+        "required": [
+          "revisionId",
+          "number",
+          "transcriptRevisionId",
+          "hooks",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "transcriptRevisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hooks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HookRequest"
+            }
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "JobAcceptedResponse": {
+        "required": [
+          "jobId",
+          "revisionId"
+        ],
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revisionId": {
             "type": [
               "null",
               "string"
@@ -1277,7 +2634,29 @@
       "JobType": {
         "enum": [
           "mediaIngest",
-          "assetCleanup"
+          "assetCleanup",
+          "audioAnalysis",
+          "transcription",
+          "artworkGeneration",
+          "campaignGeneration",
+          "previewRender",
+          "finalRender",
+          "exportBundle",
+          "cleanCoverRender"
+        ]
+      },
+      "PipelineStageState": {
+        "enum": [
+          "notStarted",
+          "queued",
+          "running",
+          "waitingUser",
+          "retrying",
+          "succeeded",
+          "degraded",
+          "failed",
+          "cancelled",
+          "stale"
         ]
       },
       "ProjectState": {
@@ -1292,6 +2671,128 @@
           "partiallyReady",
           "archived"
         ]
+      },
+      "PutCampaignItemRequest": {
+        "required": [
+          "template",
+          "hookId",
+          "backgroundAssetId",
+          "text",
+          "compositionJson"
+        ],
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string"
+          },
+          "hookId": {
+            "type": "string"
+          },
+          "backgroundAssetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "text": {
+            "type": "string"
+          },
+          "compositionJson": {
+            "type": "string"
+          }
+        }
+      },
+      "PutHooksRequest": {
+        "required": [
+          "hooks"
+        ],
+        "type": "object",
+        "properties": {
+          "hooks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HookRequest"
+            }
+          }
+        }
+      },
+      "PutTranscriptRequest": {
+        "required": [
+          "source",
+          "language",
+          "isInstrumental",
+          "phrases"
+        ],
+        "type": "object",
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/TranscriptSource"
+          },
+          "language": {
+            "type": "string"
+          },
+          "isInstrumental": {
+            "type": "boolean"
+          },
+          "phrases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptPhraseRequest"
+            }
+          }
+        }
+      },
+      "QuickAudioUploadRequest": {
+        "required": [
+          "fileName",
+          "contentType",
+          "sizeBytes",
+          "confirmsContentRights",
+          "allowsExternalAiProcessing"
+        ],
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "sizeBytes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "confirmsContentRights": {
+            "type": "boolean"
+          },
+          "allowsExternalAiProcessing": {
+            "type": "boolean"
+          }
+        }
+      },
+      "QuickAudioUploadResponse": {
+        "required": [
+          "project",
+          "upload",
+          "workflow"
+        ],
+        "type": "object",
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/ReleaseResponse"
+          },
+          "upload": {
+            "$ref": "#/components/schemas/UploadSessionResponse"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowResponse"
+          }
+        }
       },
       "ReadinessResponse": {
         "required": [
@@ -1339,7 +2840,8 @@
       "ReleaseMode": {
         "enum": [
           "upcoming",
-          "released"
+          "released",
+          "unscheduled"
         ]
       },
       "ReleaseResponse": {
@@ -1352,6 +2854,7 @@
           "internalNotes",
           "lyricsText",
           "isInstrumental",
+          "isInstrumentalConfirmed",
           "mode",
           "releaseDate",
           "campaignStartDate",
@@ -1392,6 +2895,9 @@
             ]
           },
           "isInstrumental": {
+            "type": "boolean"
+          },
+          "isInstrumentalConfirmed": {
             "type": "boolean"
           },
           "mode": {
@@ -1437,6 +2943,131 @@
           }
         }
       },
+      "RenderBatchResponse": {
+        "required": [
+          "batchId",
+          "state",
+          "jobIds"
+        ],
+        "type": "object",
+        "properties": {
+          "batchId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "jobIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
+      "RenderBatchStatusResponse": {
+        "required": [
+          "batchId",
+          "entitlementId",
+          "state",
+          "kind",
+          "items",
+          "export",
+          "completedAt"
+        ],
+        "type": "object",
+        "properties": {
+          "batchId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entitlementId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RenderRequestKind"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenderItemStatusResponse"
+            }
+          },
+          "export": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DownloadGrantResponse"
+              }
+            ]
+          },
+          "completedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "RenderItemStatusResponse": {
+        "required": [
+          "campaignItemId",
+          "state",
+          "jobId",
+          "errorCode",
+          "download"
+        ],
+        "type": "object",
+        "properties": {
+          "campaignItemId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "jobId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "errorCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "download": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DownloadGrantResponse"
+              }
+            ]
+          }
+        }
+      },
+      "RenderRequestKind": {
+        "enum": [
+          "initial",
+          "contentChange",
+          "technicalRetry"
+        ],
+        "default": "initial"
+      },
       "ReorderAssetsRequest": {
         "required": [
           "assetIds"
@@ -1452,11 +3083,23 @@
           }
         }
       },
+      "RevisionState": {
+        "enum": [
+          "draft",
+          "processing",
+          "readyForReview",
+          "approved",
+          "failed",
+          "superseded"
+        ]
+      },
       "RightsAttestationRequest": {
         "required": [
           "ownsAudioRights",
           "ownsLyricsRights",
           "ownsVisualRights",
+          "allowsExternalAiArtwork",
+          "allowsExternalAiProcessing",
           "syntheticContentStatus",
           "policyVersion"
         ],
@@ -1469,6 +3112,12 @@
             "type": "boolean"
           },
           "ownsVisualRights": {
+            "type": "boolean"
+          },
+          "allowsExternalAiArtwork": {
+            "type": "boolean"
+          },
+          "allowsExternalAiProcessing": {
             "type": "boolean"
           },
           "syntheticContentStatus": {
@@ -1485,9 +3134,13 @@
           "ownsAudioRights",
           "ownsLyricsRights",
           "ownsVisualRights",
+          "allowsExternalAiArtwork",
+          "allowsExternalAiProcessing",
           "syntheticContentStatus",
           "policyVersion",
           "acceptedAt",
+          "audioAssetId",
+          "audioFingerprint",
           "projectVersion"
         ],
         "type": "object",
@@ -1505,6 +3158,12 @@
           "ownsVisualRights": {
             "type": "boolean"
           },
+          "allowsExternalAiArtwork": {
+            "type": "boolean"
+          },
+          "allowsExternalAiProcessing": {
+            "type": "boolean"
+          },
           "syntheticContentStatus": {
             "$ref": "#/components/schemas/SyntheticContentStatus"
           },
@@ -1514,6 +3173,19 @@
           "acceptedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "audioAssetId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "audioFingerprint": {
+            "type": [
+              "null",
+              "string"
+            ]
           },
           "projectVersion": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
@@ -1525,6 +3197,87 @@
           }
         }
       },
+      "SetupReleaseRequest": {
+        "required": [
+          "projectLabel",
+          "artistName",
+          "trackTitle",
+          "language",
+          "mode",
+          "releaseDate",
+          "campaignStartDate",
+          "isInstrumental",
+          "isInstrumentalConfirmed",
+          "internalNotes"
+        ],
+        "type": "object",
+        "properties": {
+          "projectLabel": {
+            "type": "string"
+          },
+          "artistName": {
+            "type": "string"
+          },
+          "trackTitle": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ReleaseMode"
+          },
+          "releaseDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "campaignStartDate": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date"
+          },
+          "isInstrumental": {
+            "type": "boolean"
+          },
+          "isInstrumentalConfirmed": {
+            "type": "boolean"
+          },
+          "internalNotes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "StartRenderRequest": {
+        "required": [
+          "entitlementId",
+          "itemIds"
+        ],
+        "type": "object",
+        "properties": {
+          "entitlementId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "itemIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RenderRequestKind"
+          }
+        }
+      },
       "SyntheticContentStatus": {
         "enum": [
           "none",
@@ -1532,6 +3285,199 @@
           "fullySynthetic",
           "unknown"
         ]
+      },
+      "TranscriptPhraseRequest": {
+        "required": [
+          "id",
+          "order",
+          "text",
+          "startMilliseconds",
+          "endMilliseconds",
+          "confidence",
+          "warningAcknowledged",
+          "words"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "order": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "text": {
+            "type": "string"
+          },
+          "startMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "endMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "confidence": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          },
+          "warningAcknowledged": {
+            "type": "boolean"
+          },
+          "words": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TranscriptWordResponse"
+            }
+          }
+        }
+      },
+      "TranscriptResponse": {
+        "required": [
+          "revisionId",
+          "number",
+          "source",
+          "state",
+          "language",
+          "isInstrumental",
+          "phrases",
+          "approvedAt",
+          "version"
+        ],
+        "type": "object",
+        "properties": {
+          "revisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "source": {
+            "$ref": "#/components/schemas/TranscriptSource"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RevisionState"
+          },
+          "language": {
+            "type": "string"
+          },
+          "isInstrumental": {
+            "type": "boolean"
+          },
+          "phrases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptPhraseRequest"
+            }
+          },
+          "approvedAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "TranscriptSource": {
+        "enum": [
+          "automatic",
+          "imported",
+          "manual",
+          "instrumental"
+        ]
+      },
+      "TranscriptWordResponse": {
+        "required": [
+          "text",
+          "startMilliseconds",
+          "endMilliseconds",
+          "confidence"
+        ],
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "startMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "endMilliseconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "confidence": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "UpdateArtworkSelectionRequest": {
+        "required": [
+          "packRevisionId",
+          "selectedAssetId",
+          "compositionJson"
+        ],
+        "type": "object",
+        "properties": {
+          "packRevisionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selectedAssetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "compositionJson": {
+            "type": "string"
+          }
+        }
       },
       "UpdateBrandKitRequest": {
         "required": [
@@ -1743,6 +3689,114 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "WorkflowLane": {
+        "enum": [
+          "audio",
+          "analysis",
+          "transcript",
+          "artwork",
+          "hooks",
+          "campaign",
+          "preview",
+          "finalRender"
+        ]
+      },
+      "WorkflowLaneResponse": {
+        "required": [
+          "lane",
+          "state",
+          "progressPercent",
+          "blockerCode",
+          "errorCode",
+          "currentJobId"
+        ],
+        "type": "object",
+        "properties": {
+          "lane": {
+            "$ref": "#/components/schemas/WorkflowLane"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PipelineStageState"
+          },
+          "progressPercent": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "blockerCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "errorCode": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "currentJobId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "WorkflowResponse": {
+        "required": [
+          "projectId",
+          "flowKind",
+          "projectVersion",
+          "blockers",
+          "nextAction",
+          "lanes"
+        ],
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flowKind": {
+            "$ref": "#/components/schemas/FlowKind"
+          },
+          "projectVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "nextAction": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lanes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowLaneResponse"
+            }
           }
         }
       }
@@ -1753,7 +3807,13 @@
       "name": "Hook2Stream.Api"
     },
     {
+      "name": "BillingEndpoints"
+    },
+    {
       "name": "Endpoints"
+    },
+    {
+      "name": "Mp3FirstEndpoints"
     }
   ]
 }
