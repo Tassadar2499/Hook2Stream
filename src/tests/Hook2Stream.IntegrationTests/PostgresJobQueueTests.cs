@@ -21,7 +21,7 @@ public sealed class PostgresJobQueueTests
             JobType.Transcription,
             "{\"revisionId\":\"00000000-0000-0000-0000-000000000001\"}",
             "transcription:project:1",
-            RequiredCapability: " Analysis ",
+            RequiredCapability: " Control ",
             HandlerVersion: "openrouter-stt-v1",
             InputFingerprint: "sha256:audio",
             PayloadSchemaVersion: 2,
@@ -33,7 +33,7 @@ public sealed class PostgresJobQueueTests
 
         Assert.Equal(first, second);
         var job = await dbContext.Jobs.SingleAsync();
-        Assert.Equal("analysis", job.RequiredCapability);
+        Assert.Equal(JobRoutingRegistry.Control, job.RequiredCapability);
         Assert.Equal("openrouter-stt-v1", job.HandlerVersion);
         Assert.Equal("sha256:audio", job.InputFingerprint);
         Assert.Equal(2, job.PayloadSchemaVersion);
@@ -98,6 +98,67 @@ public sealed class PostgresJobQueueTests
         Assert.Equal(JobState.Succeeded, job.State);
         Assert.Null(job.LeaseToken);
         Assert.Equal(100, job.ProgressPercent);
+    }
+
+    [Fact]
+    public async Task Expired_lease_fences_queue_and_handler_commits()
+    {
+        await using var dbContext = CreateDbContext();
+        var token = Guid.NewGuid();
+        var job = new Job
+        {
+            WorkspaceId = Guid.NewGuid(),
+            Type = JobType.MediaIngest,
+            PayloadJson = "{}",
+            RequiredCapability = JobRoutingRegistry.Media,
+            State = JobState.Running,
+            AttemptCount = 1,
+            LeaseOwner = "worker-a",
+            LeaseToken = token,
+            LeaseExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1)
+        };
+        dbContext.Jobs.Add(job);
+        dbContext.JobAttempts.Add(new JobAttempt
+        {
+            JobId = job.Id,
+            Number = 1,
+            WorkerId = "worker-a",
+            State = JobState.Running,
+            StartedAt = DateTimeOffset.UtcNow.AddMinutes(-1)
+        });
+        await dbContext.SaveChangesAsync();
+        var queue = new PostgresJobQueue(dbContext);
+        var leased = new LeasedJob(
+            job.Id,
+            job.WorkspaceId,
+            null,
+            null,
+            job.Type,
+            job.PayloadJson,
+            1,
+            job.MaxAttempts,
+            job.RequiredCapability,
+            job.HandlerVersion,
+            null,
+            job.PayloadSchemaVersion,
+            "worker-a",
+            job.LeaseExpiresAt.Value,
+            token);
+
+        var heartbeat = await queue.HeartbeatAsync(
+            job.Id,
+            "worker-a",
+            token,
+            TimeSpan.FromMinutes(1),
+            50,
+            "working",
+            CancellationToken.None);
+        await queue.CompleteAsync(job.Id, "worker-a", token, CancellationToken.None);
+
+        Assert.False(heartbeat);
+        Assert.Equal(JobState.Running, job.State);
+        await Assert.ThrowsAsync<JobLeaseFenceException>(() =>
+            JobLeaseFence.CommitAsync(dbContext, leased, CancellationToken.None));
     }
 
     [Fact]
@@ -180,6 +241,24 @@ public sealed class PostgresJobQueueTests
                 "{}",
                 null,
                 RequiredCapability: capability),
+            CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Enqueue_rejects_a_safe_but_incorrect_job_route()
+    {
+        await using var dbContext = CreateDbContext();
+        var queue = new PostgresJobQueue(dbContext);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => queue.EnqueueAsync(
+            new JobEnqueueRequest(
+                Guid.NewGuid(),
+                null,
+                null,
+                JobType.Transcription,
+                "{}",
+                null,
+                RequiredCapability: JobRoutingRegistry.Analysis),
             CancellationToken.None));
     }
 

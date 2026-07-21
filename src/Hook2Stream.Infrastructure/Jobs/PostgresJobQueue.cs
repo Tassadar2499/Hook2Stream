@@ -20,6 +20,7 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         ArgumentException.ThrowIfNullOrWhiteSpace(request.PayloadJson);
 
         var requiredCapability = NormalizeCapability(request.RequiredCapability);
+        JobRoutingRegistry.EnsureMatches(request.Type, requiredCapability);
         var idempotencyKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
             ? null
             : request.IdempotencyKey.Trim();
@@ -54,7 +55,7 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             PayloadJson = request.PayloadJson,
             IdempotencyKey = idempotencyKey,
             State = JobState.Queued,
-            AvailableAt = DateTimeOffset.UtcNow
+            AvailableAt = request.AvailableAt ?? DateTimeOffset.UtcNow
         };
 
         dbContext.Jobs.Add(job);
@@ -71,6 +72,14 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
                 job.PipelineStage,
                 job.AvailableAt
             }));
+        await SyncPipelineStageAsync(
+            job,
+            PipelineStageState.Queued,
+            progressPercent: 0,
+            blockerCode: null,
+            errorCode: null,
+            forceCurrentJob: true,
+            cancellationToken);
 
         try
         {
@@ -129,6 +138,44 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             IsolationLevel.ReadCommitted,
             cancellationToken);
 
+        var expiredLeases = await CloseExpiredLeasesAsync(
+            transaction,
+            now,
+            capabilities,
+            cancellationToken);
+        foreach (var expired in expiredLeases)
+        {
+            dbContext.JobEvents.Add(NewEvent(
+                expired.JobId,
+                expired.Exhausted ? "failed" : "lease_expired",
+                new
+                {
+                    errorCode = "job.lease_expired",
+                    exhausted = expired.Exhausted,
+                    expiredAt = now
+                }));
+            if (expired.ProjectId is { } projectId &&
+                expired.PipelineRunId is not null &&
+                string.Equals(expired.PipelineStage, "finalRender", StringComparison.OrdinalIgnoreCase))
+            {
+                dbContext.OutboxMessages.Add(new OutboxMessage
+                {
+                    WorkspaceId = expired.WorkspaceId,
+                    AggregateId = projectId,
+                    Destination = "pipeline",
+                    MessageType = "pipeline.reconcile",
+                    DedupeKey = $"pipeline.reconcile:{projectId:N}:job.lease_expired:{expired.JobId:N}:{expired.AttemptNumber}",
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        projectId,
+                        jobId = expired.JobId,
+                        attemptNumber = expired.AttemptNumber,
+                        reason = "job.lease_expired"
+                    })
+                });
+            }
+        }
+
         await using var command = dbContext.Database.GetDbConnection().CreateCommand();
         command.Transaction = transaction.GetDbTransaction();
         command.CommandText =
@@ -140,7 +187,14 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
                   AND required_capability = ANY(@capabilities)
                   AND (
                     (state = @queued AND available_at <= @now)
-                    OR (state = @running AND lease_expires_at <= @now)
+                    OR (state = @running AND lease_expires_at <= @now AND NOT EXISTS (
+                        SELECT 1
+                        FROM job_attempts AS active_attempt
+                        WHERE active_attempt.job_id = jobs.id
+                          AND active_attempt.number = jobs.attempt_count
+                          AND active_attempt.deleted_at IS NULL
+                          AND active_attempt.state = @running
+                    ))
                   )
                 ORDER BY available_at, created_at
                 FOR UPDATE SKIP LOCKED
@@ -153,6 +207,9 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
                 lease_token = @lease_token,
                 attempt_count = job.attempt_count + 1,
                 progress_stage = 'starting',
+                error_code = NULL,
+                error_message = NULL,
+                completed_at = NULL,
                 updated_at = @now,
                 version = job.version + 1
             FROM candidate
@@ -205,9 +262,40 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             }
         }
 
+        var stagesToSynchronize = expiredLeases
+            .Where(value => leasedJob is null || value.JobId != leasedJob.Id)
+            .ToArray();
+        if (stagesToSynchronize.Length > 0)
+        {
+            var expiredIds = stagesToSynchronize.Select(value => value.JobId).ToArray();
+            var expiredJobs = await dbContext.Jobs
+                .Where(value => expiredIds.Contains(value.Id))
+                .ToDictionaryAsync(value => value.Id, cancellationToken);
+            foreach (var expired in stagesToSynchronize)
+            {
+                if (!expiredJobs.TryGetValue(expired.JobId, out var expiredJob)) continue;
+                await SyncPipelineStageAsync(
+                    expiredJob,
+                    expired.Exhausted ? PipelineStageState.Failed : PipelineStageState.Retrying,
+                    expiredJob.ProgressPercent,
+                    blockerCode: null,
+                    errorCode: "job.lease_expired",
+                    forceCurrentJob: false,
+                    cancellationToken);
+            }
+        }
+
         if (leasedJob is null)
         {
-            await transaction.RollbackAsync(cancellationToken);
+            if (expiredLeases.Count > 0)
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+            }
+            else
+            {
+                await transaction.RollbackAsync(cancellationToken);
+            }
             return null;
         }
 
@@ -230,10 +318,128 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
                 workerId,
                 leaseExpiresAt
             }));
+        var trackedJob = await dbContext.Jobs.SingleAsync(value => value.Id == leasedJob.Id, cancellationToken);
+        await SyncPipelineStageAsync(
+            trackedJob,
+            PipelineStageState.Running,
+            trackedJob.ProgressPercent,
+            blockerCode: null,
+            errorCode: null,
+            forceCurrentJob: false,
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
 
         return leasedJob;
+    }
+
+    private async Task<List<ExpiredLease>> CloseExpiredLeasesAsync(
+        IDbContextTransaction transaction,
+        DateTimeOffset now,
+        IReadOnlyCollection<string> capabilities,
+        CancellationToken cancellationToken)
+    {
+        await using var command = dbContext.Database.GetDbConnection().CreateCommand();
+        command.Transaction = transaction.GetDbTransaction();
+        command.CommandText =
+            """
+            WITH expired AS MATERIALIZED (
+                SELECT job.id,
+                       job.workspace_id,
+                       job.project_id,
+                       job.pipeline_run_id,
+                       job.pipeline_stage,
+                       job.attempt_count,
+                       ((SELECT COUNT(*)
+                         FROM job_attempts AS failed_attempt
+                         WHERE failed_attempt.job_id = job.id
+                           AND failed_attempt.deleted_at IS NULL
+                           AND failed_attempt.state = @failed) + 1 >= job.max_attempts) AS exhausted
+                FROM jobs AS job
+                WHERE job.deleted_at IS NULL
+                  AND job.required_capability = ANY(@capabilities)
+                  AND job.state = @running
+                  AND job.lease_expires_at IS NOT NULL
+                  AND job.lease_expires_at <= @now
+                  AND EXISTS (
+                      SELECT 1
+                      FROM job_attempts AS current_attempt
+                      WHERE current_attempt.job_id = job.id
+                        AND current_attempt.number = job.attempt_count
+                        AND current_attempt.deleted_at IS NULL
+                        AND current_attempt.state = @running
+                  )
+                ORDER BY job.lease_expires_at, job.created_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT 100
+            ),
+            closed_attempts AS (
+                UPDATE job_attempts AS attempt
+                SET state = @failed,
+                    completed_at = @now,
+                    error_code = 'job.lease_expired',
+                    error_message = 'The worker lease expired before completion.',
+                    updated_at = @now,
+                    version = attempt.version + 1
+                FROM expired
+                WHERE attempt.job_id = expired.id
+                  AND attempt.number = expired.attempt_count
+                  AND attempt.deleted_at IS NULL
+                  AND attempt.state = @running
+                RETURNING attempt.job_id
+            ),
+            updated_jobs AS (
+                UPDATE jobs AS job
+                SET state = CASE WHEN expired.exhausted THEN @failed ELSE @queued END,
+                    available_at = CASE WHEN expired.exhausted THEN job.available_at ELSE @now END,
+                    completed_at = CASE WHEN expired.exhausted THEN @now ELSE NULL END,
+                    progress_stage = CASE WHEN expired.exhausted THEN 'failed' ELSE 'retry_scheduled' END,
+                    error_code = 'job.lease_expired',
+                    error_message = CASE
+                        WHEN expired.exhausted
+                            THEN 'The worker lease expired and exhausted its retry budget.'
+                        ELSE 'The worker lease expired before completion; a retry was scheduled.'
+                    END,
+                    lease_owner = NULL,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = @now,
+                    version = job.version + 1
+                FROM expired
+                JOIN closed_attempts ON closed_attempts.job_id = expired.id
+                WHERE job.id = expired.id
+                RETURNING job.id
+            )
+            SELECT expired.id,
+                   expired.exhausted,
+                   expired.workspace_id,
+                   expired.project_id,
+                   expired.pipeline_run_id,
+                   expired.pipeline_stage,
+                   expired.attempt_count
+            FROM expired
+            JOIN updated_jobs ON updated_jobs.id = expired.id
+            """;
+        AddParameter(command, "queued", (int)JobState.Queued);
+        AddParameter(command, "running", (int)JobState.Running);
+        AddParameter(command, "failed", (int)JobState.Failed);
+        AddParameter(command, "now", now);
+        AddParameter(command, "capabilities", capabilities.ToArray());
+
+        var expiredLeases = new List<ExpiredLease>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            expiredLeases.Add(new ExpiredLease(
+                reader.GetGuid(0),
+                reader.GetBoolean(1),
+                reader.GetGuid(2),
+                reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetInt32(6)));
+        }
+        return expiredLeases;
     }
 
     public async Task<bool> HeartbeatAsync(
@@ -245,11 +451,13 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         string stage,
         CancellationToken cancellationToken)
     {
+        var now = DateTimeOffset.UtcNow;
         var job = await dbContext.Jobs.SingleOrDefaultAsync(
             value => value.Id == jobId &&
                      value.State == JobState.Running &&
                      value.LeaseOwner == workerId &&
-                     value.LeaseToken == leaseToken,
+                     value.LeaseToken == leaseToken &&
+                     value.LeaseExpiresAt > now,
             cancellationToken);
 
         if (job is null)
@@ -257,7 +465,7 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             return false;
         }
 
-        job.LeaseExpiresAt = DateTimeOffset.UtcNow.Add(leaseDuration);
+        job.LeaseExpiresAt = now.Add(leaseDuration);
         if (progressPercent >= 0)
         {
             job.ProgressPercent = Math.Max(job.ProgressPercent, Math.Clamp(progressPercent, 0, 100));
@@ -269,6 +477,14 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             dbContext.JobEvents.Add(NewEvent(job.Id, "progress", new { job.ProgressPercent, stage }));
         }
 
+        await SyncPipelineStageAsync(
+            job,
+            PipelineStageState.Running,
+            job.ProgressPercent,
+            blockerCode: null,
+            errorCode: null,
+            forceCurrentJob: false,
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
         return true;
     }
@@ -279,11 +495,13 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         Guid leaseToken,
         CancellationToken cancellationToken)
     {
+        var now = DateTimeOffset.UtcNow;
         var job = await dbContext.Jobs.SingleOrDefaultAsync(
             value => value.Id == jobId &&
                      value.State == JobState.Running &&
                      value.LeaseOwner == workerId &&
-                     value.LeaseToken == leaseToken,
+                     value.LeaseToken == leaseToken &&
+                     value.LeaseExpiresAt > now,
             cancellationToken);
 
         if (job is null)
@@ -291,7 +509,6 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             return;
         }
 
-        var now = DateTimeOffset.UtcNow;
         job.State = JobState.Succeeded;
         job.ProgressPercent = 100;
         job.ProgressStage = "completed";
@@ -307,6 +524,15 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         attempt.State = JobState.Succeeded;
         attempt.CompletedAt = now;
         dbContext.JobEvents.Add(NewEvent(job.Id, "succeeded", new { completedAt = now }));
+        AddFinalRenderReconcile(job, "job.completed");
+        await SyncPipelineStageAsync(
+            job,
+            PipelineStageState.Succeeded,
+            progressPercent: 100,
+            blockerCode: null,
+            errorCode: null,
+            forceCurrentJob: false,
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
@@ -317,11 +543,13 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         bool retryable,
         CancellationToken cancellationToken)
     {
+        var now = DateTimeOffset.UtcNow;
         var job = await dbContext.Jobs.SingleOrDefaultAsync(
             value => value.Id == leasedJob.Id &&
                      value.State == JobState.Running &&
                      value.LeaseOwner == leasedJob.LeaseOwner &&
-                     value.LeaseToken == leasedJob.LeaseToken,
+                     value.LeaseToken == leasedJob.LeaseToken &&
+                     value.LeaseExpiresAt > now,
             cancellationToken);
 
         if (job is null)
@@ -329,7 +557,6 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             return;
         }
 
-        var now = DateTimeOffset.UtcNow;
         var priorFailedAttempts = await dbContext.JobAttempts.CountAsync(
             value => value.JobId == job.Id && value.State == JobState.Failed,
             cancellationToken);
@@ -363,6 +590,15 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
                 message = safeMessage,
                 retryAt = retry ? (DateTimeOffset?)job.AvailableAt : null
             }));
+        AddFinalRenderReconcile(job, retry ? "job.retry_scheduled" : "job.failed");
+        await SyncPipelineStageAsync(
+            job,
+            retry ? PipelineStageState.Retrying : PipelineStageState.Failed,
+            job.ProgressPercent,
+            blockerCode: null,
+            errorCode,
+            forceCurrentJob: false,
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
@@ -377,15 +613,16 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             throw new ArgumentOutOfRangeException(nameof(delay));
         }
 
+        var now = DateTimeOffset.UtcNow;
         var job = await dbContext.Jobs.SingleOrDefaultAsync(
             value => value.Id == leasedJob.Id &&
                      value.State == JobState.Running &&
                      value.LeaseOwner == leasedJob.LeaseOwner &&
-                     value.LeaseToken == leasedJob.LeaseToken,
+                     value.LeaseToken == leasedJob.LeaseToken &&
+                     value.LeaseExpiresAt > now,
             cancellationToken);
         if (job is null) return;
 
-        var now = DateTimeOffset.UtcNow;
         job.State = JobState.Queued;
         job.AvailableAt = now.Add(delay);
         job.ProgressStage = "dependency_wait";
@@ -405,6 +642,15 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             reasonCode,
             availableAt = job.AvailableAt
         }));
+        AddFinalRenderReconcile(job, "job.deferred");
+        await SyncPipelineStageAsync(
+            job,
+            PipelineStageState.Queued,
+            job.ProgressPercent,
+            blockerCode: null,
+            errorCode: null,
+            forceCurrentJob: false,
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
@@ -414,15 +660,16 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         string safeMessage,
         CancellationToken cancellationToken)
     {
+        var now = DateTimeOffset.UtcNow;
         var job = await dbContext.Jobs.SingleOrDefaultAsync(
             value => value.Id == leasedJob.Id &&
                      value.State == JobState.Running &&
                      value.LeaseOwner == leasedJob.LeaseOwner &&
-                     value.LeaseToken == leasedJob.LeaseToken,
+                     value.LeaseToken == leasedJob.LeaseToken &&
+                     value.LeaseExpiresAt > now,
             cancellationToken);
         if (job is null) return;
 
-        var now = DateTimeOffset.UtcNow;
         job.State = JobState.Cancelled;
         job.ProgressStage = "waiting_user";
         job.ErrorCode = reasonCode;
@@ -443,6 +690,15 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             reasonCode,
             message = safeMessage
         }));
+        AddFinalRenderReconcile(job, "job.blocked");
+        await SyncPipelineStageAsync(
+            job,
+            PipelineStageState.WaitingUser,
+            job.ProgressPercent,
+            blockerCode: reasonCode,
+            errorCode: null,
+            forceCurrentJob: false,
+            cancellationToken);
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
@@ -464,22 +720,110 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             DataJson = JsonSerializer.Serialize(data)
         };
 
+    private async Task SyncPipelineStageAsync(
+        Job job,
+        PipelineStageState state,
+        int progressPercent,
+        string? blockerCode,
+        string? errorCode,
+        bool forceCurrentJob,
+        CancellationToken cancellationToken)
+    {
+        if (job.PipelineRunId is not { } pipelineRunId ||
+            string.IsNullOrWhiteSpace(job.PipelineStage) ||
+            !Enum.TryParse<WorkflowLane>(job.PipelineStage, ignoreCase: true, out var lane))
+        {
+            return;
+        }
+
+        // Final render is a fan-out/fan-in lane. No individual child or export
+        // queue transition can authoritatively make the whole lane terminal;
+        // PipelineReconciler aggregates the linked RenderBatch instead.
+        if (lane == WorkflowLane.FinalRender)
+        {
+            return;
+        }
+
+        var stage = dbContext.ChangeTracker.Entries<PipelineStage>()
+            .Select(value => value.Entity)
+            .SingleOrDefault(value => value.PipelineRunId == pipelineRunId && value.Lane == lane)
+            ?? await dbContext.PipelineStages
+                .Include(value => value.PipelineRun)
+                .ThenInclude(value => value.Stages)
+                .SingleOrDefaultAsync(
+                    value => value.PipelineRunId == pipelineRunId && value.Lane == lane,
+                    cancellationToken);
+        if (stage is null || !forceCurrentJob && stage.CurrentJobId != job.Id)
+        {
+            return;
+        }
+
+        var progress = Math.Clamp(progressPercent, 0, 100);
+        if (stage.State == state &&
+            stage.ProgressPercent == progress &&
+            string.Equals(stage.BlockerCode, blockerCode, StringComparison.Ordinal) &&
+            string.Equals(stage.ErrorCode, errorCode, StringComparison.Ordinal) &&
+            stage.CurrentJobId == job.Id)
+        {
+            return;
+        }
+
+        stage.State = state;
+        stage.ProgressPercent = progress;
+        stage.BlockerCode = blockerCode;
+        stage.ErrorCode = errorCode;
+        stage.CurrentJobId = job.Id;
+        var run = stage.PipelineRun;
+        var states = run.Stages.Select(value => value.State).ToArray();
+        run.State = states.Any(value => value == PipelineStageState.Failed)
+            ? PipelineStageState.Failed
+            : states.Any(value => value == PipelineStageState.Degraded)
+                ? PipelineStageState.Degraded
+                : states.Any(value => value is PipelineStageState.Running or PipelineStageState.Queued or PipelineStageState.Retrying)
+                    ? PipelineStageState.Running
+                    : states.All(value => value == PipelineStageState.Succeeded)
+                        ? PipelineStageState.Succeeded
+                        : PipelineStageState.WaitingUser;
+        run.CompletedAt = run.State == PipelineStageState.Succeeded
+            ? run.CompletedAt ?? DateTimeOffset.UtcNow
+            : null;
+        run.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    private void AddFinalRenderReconcile(Job job, string reason)
+    {
+        if (job.ProjectId is not { } projectId ||
+            job.PipelineRunId is null ||
+            !string.Equals(job.PipelineStage, nameof(WorkflowLane.FinalRender), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        dbContext.OutboxMessages.Add(new OutboxMessage
+        {
+            WorkspaceId = job.WorkspaceId,
+            AggregateId = projectId,
+            Destination = "pipeline",
+            MessageType = "pipeline.reconcile",
+            DedupeKey = $"pipeline.reconcile:{projectId:N}:final-render:{job.Id:N}:{job.AttemptCount}:{reason}:{Guid.CreateVersion7():N}",
+            PayloadJson = JsonSerializer.Serialize(new { projectId, jobId = job.Id, reason })
+        });
+    }
+
     private static void AddParameter(System.Data.Common.DbCommand command, string name, object value) =>
         command.Parameters.Add(new NpgsqlParameter(name, value));
 
     internal static string NormalizeCapability(string capability)
-    {
-        var normalized = capability.Trim().ToLowerInvariant();
-        if (normalized.Length is 0 or > 64 ||
-            normalized.Any(value => !char.IsAsciiLetterOrDigit(value) && value is not '-' and not '_'))
-        {
-            throw new ArgumentException(
-                "Worker capabilities may contain only ASCII letters, digits, '-' and '_'.",
-                nameof(capability));
-        }
+        => JobRoutingRegistry.NormalizeCapability(capability);
 
-        return normalized;
-    }
+    private sealed record ExpiredLease(
+        Guid JobId,
+        bool Exhausted,
+        Guid WorkspaceId,
+        Guid? ProjectId,
+        Guid? PipelineRunId,
+        string? PipelineStage,
+        int AttemptNumber);
 
     private static bool IsIdempotencyConflict(DbUpdateException exception) =>
         exception.InnerException is PostgresException

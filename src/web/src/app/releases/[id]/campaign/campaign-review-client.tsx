@@ -59,6 +59,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
   const [miniSelection, setMiniSelection] = useState<string[]>([]);
   const [billing, setBilling] = useState<BillingSummary>();
   const [renderBatch, setRenderBatch] = useState<RenderBatchStatus>();
+  const [workflowBatchId, setWorkflowBatchId] = useState<string | null>();
   const [previewUrl, setPreviewUrl] = useState<string>();
   const [previewState, setPreviewState] = useState<string>();
   const [initialBatchId, setInitialBatchId] = useState<string>();
@@ -119,6 +120,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
     setPreviewState(
       workflowResult.data.lanes.find((lane) => lane.lane === "preview")?.state,
     );
+    setWorkflowBatchId(workflowResult.data.currentRenderBatchId ?? null);
     setPreviewUrl(previewResult?.data.url);
     setBackgroundAssetIds([
       ...(artworkResult?.data.backgroundAssetIds ?? []),
@@ -189,19 +191,28 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
     if (!isLoaded || !isSignedIn) return;
     const storedBatchId = window.localStorage.getItem(renderStorageKey(projectId));
     const storedInitialBatchId = window.localStorage.getItem(initialRenderStorageKey(projectId));
-    if (!storedBatchId) return;
+    // The persisted workflow pointer is authoritative. localStorage remains a
+    // compatibility fallback only until the first workflow snapshot arrives.
+    const batchId = workflowBatchId === undefined ? storedBatchId : workflowBatchId;
     const timer = window.setTimeout(() => {
       setInitialBatchId(storedInitialBatchId ?? undefined);
-      void loadRenderBatch(storedBatchId).catch((caught) => {
+      if (!batchId) {
+        setRenderBatch(undefined);
+        return;
+      }
+      window.localStorage.setItem(renderStorageKey(projectId), batchId);
+      void loadRenderBatch(batchId).catch((caught) => {
         if (caught instanceof ApiRequestError && caught.status === 404) {
-          window.localStorage.removeItem(renderStorageKey(projectId));
+          if (workflowBatchId === undefined) {
+            window.localStorage.removeItem(renderStorageKey(projectId));
+          }
           return;
         }
         setError(messageFor(caught, "Could not restore render progress."));
       });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [isLoaded, isSignedIn, loadRenderBatch, projectId]);
+  }, [isLoaded, isSignedIn, loadRenderBatch, projectId, workflowBatchId]);
 
   useEffect(() => {
     if (!renderBatch || !["queued", "running"].includes(renderBatch.state)) return;
@@ -340,7 +351,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       );
       setHooks(result.data);
       setHookDrafts(result.data.hooks);
-      setNotice("Hook revision saved. Only the twelve hook-driven variants are re-evaluated.");
+      setNotice("Hook revision saved. The campaign is being refreshed for the new timings.");
       await load();
     } catch (caught) {
       setError(messageFor(caught, "Could not save hooks."));
@@ -384,12 +395,27 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       );
       setCampaign(result.data);
       setCampaignEtag(result.etag ?? `"${result.data.version}"`);
+      // The server cancels an in-flight preview for the superseded revision or
+      // marks an already-consumed preview stale. Do not keep showing the old URL
+      // while the persisted workflow snapshot refreshes.
+      setPreviewUrl(undefined);
+      setPreviewState("notStarted");
       setSelectedItem(undefined);
       setItemDraft(undefined);
       setComposition(undefined);
       setNotice(`Item ${selectedItem.slot} updated without invalidating the other cards.`);
+      await load();
     } catch (caught) {
-      setError(messageFor(caught, "Could not update this campaign item."));
+      if (caught instanceof ApiRequestError && caught.code === "campaign.slot_assignment_immutable") {
+        setItemDraft((current) => current ? {
+          ...current,
+          template: selectedItem.template,
+          hookId: selectedItem.hookId,
+        } : current);
+        setError("Template and hook are fixed for this campaign slot. Your other composition edits are still open.");
+      } else {
+        setError(messageFor(caught, "Could not update this campaign item."));
+      }
     } finally {
       setBusy(false);
     }
@@ -610,8 +636,9 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
               <button className="button-quiet" type="button" onClick={() => setSelectedItem(undefined)}>Close</button>
             </div>
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              <label className="field"><span>Template</span><select value={itemDraft.template} onChange={(event) => setItemDraft({ ...itemDraft, template: event.target.value })}><option value="kinetic-lyrics">Kinetic Lyrics</option><option value="animated-cover">Animated Cover</option><option value="visual-loop-a">Visual Loop A</option><option value="visual-loop-b">Visual Loop B</option><option value="teaser">Teaser</option><option value="countdown">Countdown</option><option value="out-now">Out now</option><option value="post-release-cta">Post-release CTA</option><option value="momentum">Momentum</option></select></label>
-              <label className="field"><span>Hook</span><select value={itemDraft.hookId} onChange={(event) => setItemDraft({ ...itemDraft, hookId: event.target.value })}>{hookDrafts.map((hook) => <option key={hook.id} value={hook.id}>{titleCase(hook.kind)}</option>)}</select></label>
+              <label className="field"><span>Template · fixed for this slot</span><input value={titleCase(itemDraft.template)} readOnly /></label>
+              <label className="field"><span>Hook · fixed for this slot</span><input value={hookLabel(itemDraft.hookId, hookDrafts)} readOnly /></label>
+              <p className="sm:col-span-2 text-sm font-bold opacity-70">Edit the card content and composition below. Template and hook assignments stay stable so the 18-item campaign contract remains valid.</p>
               <label className="field sm:col-span-2"><span>On-screen text</span><textarea value={itemDraft.text} onChange={(event) => setItemDraft({ ...itemDraft, text: event.target.value })} /></label>
               <label className="field"><span>Opening</span><select value={composition.opening} onChange={(event) => setComposition({ ...composition, opening: event.target.value })}><option value="fade">Fade</option><option value="punch">Punch</option><option value="reveal">Reveal</option></select></label>
               <label className="field"><span>Text layout</span><select value={composition.textLayout} onChange={(event) => setComposition({ ...composition, textLayout: event.target.value })}><option value="center">Center</option><option value="lowerThird">Lower third</option><option value="stacked">Stacked</option></select></label>
@@ -635,6 +662,11 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
 
 function PlanCard({ title, price, description, action, disabled, onClick }: { title: string; price: string; description: string; action: string; disabled: boolean; onClick: () => void }) {
   return <article className="rounded-2xl border border-[var(--line)] bg-white/55 p-5"><p className="eyebrow">{title}</p><p className="display mt-2 text-4xl">{price}</p><p className="mt-3 min-h-12 text-sm leading-6 opacity-70">{description}</p><button className="button-secondary mt-4 w-full" type="button" disabled={disabled} onClick={onClick}>{action}</button></article>;
+}
+
+function hookLabel(hookId: string, hooks: HookCandidate[]) {
+  const hook = hooks.find((candidate) => candidate.id === hookId);
+  return hook ? titleCase(hook.kind) : "Campaign hook";
 }
 
 function RenderProgress({

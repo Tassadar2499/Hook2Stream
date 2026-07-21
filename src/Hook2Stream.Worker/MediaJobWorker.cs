@@ -64,29 +64,9 @@ public sealed class MediaJobWorker(
     private async Task<string[]> ResolveCapabilitiesAsync(CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
-        var registered = scope.ServiceProvider
-            .GetServices<IJobHandler>()
-            .Select(value => value.Capability)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var requested = _options.Capabilities
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value.Trim().ToLowerInvariant())
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-        var unsupported = requested.Where(value => !registered.Contains(value)).ToArray();
-        if (unsupported.Length > 0)
-        {
-            throw new InvalidOperationException(
-                $"No job handler is registered for worker capabilities: {string.Join(", ", unsupported)}.");
-        }
-
-        if (requested.Length == 0)
-        {
-            throw new InvalidOperationException("At least one Worker:Capabilities value is required.");
-        }
-
+        var requested = WorkerRoutingValidation.Validate(
+            _options.Capabilities,
+            scope.ServiceProvider.GetServices<IJobHandler>());
         cancellationToken.ThrowIfCancellationRequested();
         return requested;
     }
@@ -106,6 +86,19 @@ public sealed class MediaJobWorker(
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
+            try
+            {
+                JobRoutingRegistry.EnsureMatches(job.Type, job.RequiredCapability);
+            }
+            catch (InvalidOperationException exception)
+            {
+                throw new JobHandlerException(
+                    "job.capability_mismatch",
+                    "The queued operation was assigned to the wrong worker pool.",
+                    retryable: false,
+                    exception);
+            }
+
             var handler = scope.ServiceProvider
                 .GetServices<IJobHandler>()
                 .SingleOrDefault(value =>

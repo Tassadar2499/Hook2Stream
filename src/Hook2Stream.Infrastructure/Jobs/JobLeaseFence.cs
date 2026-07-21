@@ -7,11 +7,34 @@ namespace Hook2Stream.Infrastructure.Jobs;
 
 public static class JobLeaseFence
 {
-    public static Task CommitAsync(
+    public static async Task CommitAsync(
         Hook2StreamDbContext db,
         LeasedJob job,
-        CancellationToken cancellationToken) =>
-        db.Database.CreateExecutionStrategy().ExecuteAsync(
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (!db.Database.IsRelational())
+        {
+            // The in-memory provider cannot execute the relational no-op
+            // update. Preserve identical lease-fence semantics so handlers can
+            // be exercised end-to-end in tests.
+            var ownsLease = await db.Jobs.AnyAsync(
+                value => value.Id == job.Id &&
+                         value.State == JobState.Running &&
+                         value.LeaseOwner == job.LeaseOwner &&
+                         value.LeaseToken == job.LeaseToken &&
+                         value.LeaseExpiresAt > now,
+                cancellationToken);
+            if (!ownsLease)
+            {
+                throw new JobLeaseFenceException(job.Id);
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        await db.Database.CreateExecutionStrategy().ExecuteAsync(
             async token =>
             {
                 await using var transaction = await db.Database.BeginTransactionAsync(token);
@@ -19,7 +42,8 @@ public static class JobLeaseFence
                     .Where(value => value.Id == job.Id &&
                                     value.State == JobState.Running &&
                                     value.LeaseOwner == job.LeaseOwner &&
-                                    value.LeaseToken == job.LeaseToken)
+                                    value.LeaseToken == job.LeaseToken &&
+                                    value.LeaseExpiresAt > now)
                     .ExecuteUpdateAsync(
                         setters => setters.SetProperty(value => value.UpdatedAt, value => value.UpdatedAt),
                         token);
@@ -32,6 +56,7 @@ public static class JobLeaseFence
                 await transaction.CommitAsync(token);
             },
             cancellationToken);
+    }
 }
 
 public sealed class JobLeaseFenceException(Guid jobId)

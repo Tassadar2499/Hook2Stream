@@ -36,6 +36,7 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
     public DbSet<ArtworkCreditTransaction> ArtworkCreditTransactions => Set<ArtworkCreditTransaction>();
     public DbSet<RenderBatch> RenderBatches => Set<RenderBatch>();
     public DbSet<RenderItemUsage> RenderItemUsages => Set<RenderItemUsage>();
+    public DbSet<ProjectDeletionTombstone> ProjectDeletionTombstones => Set<ProjectDeletionTombstone>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -72,6 +73,7 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
         ConfigureEntity<ArtworkCreditTransaction>(modelBuilder, "artwork_credit_transactions");
         ConfigureEntity<RenderBatch>(modelBuilder, "render_batches");
         ConfigureEntity<RenderItemUsage>(modelBuilder, "render_item_usages");
+        ConfigureEntity<ProjectDeletionTombstone>(modelBuilder, "project_deletion_tombstones");
 
         modelBuilder.Entity<AppUser>(entity =>
         {
@@ -262,6 +264,8 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
         modelBuilder.Entity<PipelineStage>(entity =>
         {
             entity.HasIndex(value => new { value.PipelineRunId, value.Lane }).IsUnique();
+            entity.HasIndex(value => value.CurrentRenderBatchId)
+                .HasFilter("current_render_batch_id IS NOT NULL");
             entity.Property(value => value.BlockerCode).HasMaxLength(128);
             entity.Property(value => value.ErrorCode).HasMaxLength(128);
             entity.HasQueryFilter(value => value.DeletedAt == null);
@@ -426,6 +430,8 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
         {
             entity.HasIndex(value => new { value.WorkspaceId, value.IdempotencyKey }).IsUnique();
             entity.HasIndex(value => new { value.ProjectId, value.CreatedAt });
+            entity.HasIndex(value => value.PipelineRunId)
+                .HasFilter("pipeline_run_id IS NOT NULL");
             entity.Property(value => value.ItemIdsJson).HasColumnType("jsonb");
             entity.Property(value => value.JobIdsJson).HasColumnType("jsonb");
             entity.Property(value => value.IdempotencyKey).HasMaxLength(255);
@@ -439,6 +445,19 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
             entity.HasIndex(value => new { value.WorkspaceId, value.ProjectId });
             entity.HasQueryFilter(value => value.DeletedAt == null);
         });
+
+        modelBuilder.Entity<ProjectDeletionTombstone>(entity =>
+        {
+            entity.HasIndex(value => new { value.WorkspaceId, value.ProjectId }).IsUnique();
+            entity.HasIndex(value => new { value.State, value.PurgeDueAt });
+            entity.Property(value => value.ActorSubject).HasMaxLength(255);
+            entity.Property(value => value.PolicyVersion).HasMaxLength(64);
+            entity.Property(value => value.State).HasMaxLength(32);
+            entity.Property(value => value.LastError).HasMaxLength(1_000);
+            entity.HasQueryFilter(value => value.DeletedAt == null);
+        });
+
+        AuthPersistenceModelConfiguration.Configure(modelBuilder);
     }
 
     public override int SaveChanges(bool acceptAllChangesOnSuccess)

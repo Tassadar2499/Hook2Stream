@@ -70,6 +70,140 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AuthSessionResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/account/me": {
         parameters: {
             query?: never;
@@ -338,12 +472,14 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description No Content */
-                204: {
+                /** @description Accepted */
+                202: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["DeletionStatusResponse"];
+                    };
                 };
             };
         };
@@ -673,12 +809,14 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description No Content */
-                204: {
+                /** @description Accepted */
+                202: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["AssetDeletionResponse"];
+                    };
                 };
             };
         };
@@ -1758,6 +1896,12 @@ export interface components {
             /** Format: int64 */
             version: number | string;
         };
+        AssetDeletionResponse: {
+            /** Format: uuid */
+            assetId: string;
+            /** Format: uuid */
+            cleanupJobId: string;
+        };
         /** @enum {unknown} */
         AssetKind: "audio" | "cover" | "visual" | "brandCharacter";
         /** @enum {unknown} */
@@ -1802,6 +1946,15 @@ export interface components {
         };
         /** @enum {unknown} */
         AssetState: "reserved" | "uploading" | "uploaded" | "processing" | "ready" | "rejected" | "deleted";
+        AuthSessionResponse: {
+            authenticated: boolean;
+            subject: null | string;
+            email: null | string;
+            displayName: null | string;
+            /** Format: date-time */
+            expiresAt: null | string;
+            csrfToken: null | string;
+        };
         BillingSummaryResponse: {
             /** Format: int32 */
             workspaceArtworkCredits: number | string;
@@ -1904,6 +2057,17 @@ export interface components {
             sizeBytes: number | string;
             /** Format: uuid */
             replacesAssetId: null | string;
+        };
+        DeletionStatusResponse: {
+            /** Format: uuid */
+            deletionId: string;
+            /** Format: uuid */
+            projectId: string;
+            /** Format: date-time */
+            deletedAt: string;
+            /** Format: date-time */
+            purgeDueAt: string;
+            state: string;
         };
         DownloadGrantResponse: {
             /** Format: uuid */
@@ -2228,7 +2392,9 @@ export interface components {
             partNumber: number | string;
             uploadUrl: string;
             /** Format: date-time */
-            expiresAt: string;
+            urlExpiresAt: string;
+            /** Format: date-time */
+            expiresAt?: string;
         };
         UploadSessionResponse: {
             /** Format: uuid */
@@ -2243,9 +2409,13 @@ export interface components {
             /** Format: int32 */
             partCount: number | string;
             /** Format: date-time */
-            expiresAt: string;
+            urlExpiresAt: string;
+            /** Format: date-time */
+            sessionExpiresAt: string;
             /** Format: uuid */
             id?: string;
+            /** Format: date-time */
+            expiresAt?: string;
         };
         /** @enum {unknown} */
         WorkflowLane: "audio" | "analysis" | "transcript" | "artwork" | "hooks" | "campaign" | "preview" | "finalRender";
@@ -2259,15 +2429,21 @@ export interface components {
             /** Format: uuid */
             currentJobId: null | string;
         };
+        /** @enum {unknown} */
+        WorkflowNextAction: "uploadAudio" | "completeSetup" | "confirmRights" | "reviewTranscript" | "reviewArtwork" | "reviewHooks" | "waitForCampaign" | "waitForPreview" | "purchaseRender" | "startFinalRender" | "waitForFinalRender" | "downloadExport" | "retryFailedRenders" | null;
         WorkflowResponse: {
             /** Format: uuid */
             projectId: string;
             flowKind: components["schemas"]["FlowKind"];
             /** Format: int64 */
             projectVersion: number | string;
+            /** Format: int64 */
+            workflowVersion: number | string;
             blockers: string[];
-            nextAction: null | string;
+            nextAction: null | components["schemas"]["WorkflowNextAction"];
             lanes: components["schemas"]["WorkflowLaneResponse"][];
+            /** Format: uuid */
+            currentRenderBatchId?: null | string;
         };
     };
     responses: never;

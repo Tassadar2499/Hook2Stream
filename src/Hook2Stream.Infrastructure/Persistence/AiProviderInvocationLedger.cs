@@ -17,6 +17,7 @@ public static class AiProviderInvocationLedger
     public const string Failed = "failed";
     public const string Rejected = "rejected";
     public const string DiscardedConsentRevoked = "discarded_consent_revoked";
+    public const string DiscardedStaleInput = "discarded_stale_input";
 
     public static AiProviderInvocation Record(
         Hook2StreamDbContext db,

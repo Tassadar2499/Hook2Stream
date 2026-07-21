@@ -8,9 +8,11 @@ namespace Hook2Stream.Infrastructure.Storage;
 
 public sealed class S3ObjectStorage(
     IAmazonS3 client,
-    IOptions<StorageOptions> options) : IObjectStorage
+    IOptions<StorageOptions> options,
+    IOptions<OperationalPolicyOptions> policyOptions) : IObjectStorage
 {
     private readonly StorageOptions _options = options.Value;
+    private readonly OperationalPolicyOptions _policy = policyOptions.Value;
 
     public async Task EnsureBucketAsync(CancellationToken cancellationToken)
     {
@@ -24,6 +26,11 @@ public sealed class S3ObjectStorage(
 
         if (!_options.ConfigureBucketCors)
         {
+            if (_options.ConfigureBucketLifecycle)
+            {
+                await ConfigureLifecycleAsync(cancellationToken);
+            }
+
             return;
         }
 
@@ -36,7 +43,10 @@ public sealed class S3ObjectStorage(
                     Id = "hook2stream-browser-upload",
                     AllowedHeaders = ["*"],
                     AllowedMethods = ["PUT", "POST", "HEAD"],
-                    AllowedOrigins = ["http://localhost:3000", "http://127.0.0.1:3000"],
+                    AllowedOrigins = _options.BrowserUploadOrigins
+                        .Select(value => new Uri(value.Trim()).GetLeftPart(UriPartial.Authority))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
                     ExposeHeaders = ["ETag"],
                     MaxAgeSeconds = 3600
                 }
@@ -50,6 +60,11 @@ public sealed class S3ObjectStorage(
                 Configuration = cors
             },
             cancellationToken);
+
+        if (_options.ConfigureBucketLifecycle)
+        {
+            await ConfigureLifecycleAsync(cancellationToken);
+        }
     }
 
     public Task<Uri> CreateUploadUrlAsync(
@@ -146,18 +161,29 @@ public sealed class S3ObjectStorage(
         await client.CompleteMultipartUploadAsync(request, cancellationToken);
     }
 
-    public Task AbortMultipartUploadAsync(
+    public async Task AbortMultipartUploadAsync(
         string objectKey,
         string uploadId,
-        CancellationToken cancellationToken) =>
-        client.AbortMultipartUploadAsync(
-            new AbortMultipartUploadRequest
-            {
-                BucketName = _options.Bucket,
-                Key = objectKey,
-                UploadId = uploadId
-            },
-            cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.AbortMultipartUploadAsync(
+                new AbortMultipartUploadRequest
+                {
+                    BucketName = _options.Bucket,
+                    Key = objectKey,
+                    UploadId = uploadId
+                },
+                cancellationToken);
+        }
+        catch (AmazonS3Exception exception) when (
+            exception.StatusCode == HttpStatusCode.NotFound ||
+            string.Equals(exception.ErrorCode, "NoSuchUpload", StringComparison.Ordinal))
+        {
+            // Retention and deletion jobs are intentionally retryable.
+        }
+    }
 
     public async Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken)
     {
@@ -226,6 +252,123 @@ public sealed class S3ObjectStorage(
             {
                 BucketName = _options.Bucket,
                 Key = objectKey
+            },
+            cancellationToken);
+
+    public async Task DeleteProjectObjectsAsync(
+        ProjectStorageScope scope,
+        CancellationToken cancellationToken)
+    {
+        var prefixes = new[]
+        {
+            $"w/{scope.WorkspaceId:N}/p/{scope.ProjectId:N}/",
+            $"workspaces/{scope.WorkspaceId:N}/projects/{scope.ProjectId:N}/",
+            $"staging/{scope.WorkspaceId:N}/{scope.ProjectId:N}/"
+        };
+
+        foreach (var prefix in prefixes)
+        {
+            await DeletePrefixAsync(prefix, cancellationToken);
+        }
+    }
+
+    public Task DeleteAssetObjectsAsync(
+        AssetStorageScope scope,
+        CancellationToken cancellationToken) =>
+        DeletePrefixAsync(
+            $"w/{scope.WorkspaceId:N}/p/{scope.ProjectId:N}/assets/{scope.AssetId:N}/",
+            cancellationToken);
+
+    private async Task DeletePrefixAsync(string prefix, CancellationToken cancellationToken)
+    {
+        string? continuationToken = null;
+        do
+        {
+            var page = await client.ListObjectsV2Async(
+                new ListObjectsV2Request
+                {
+                    BucketName = _options.Bucket,
+                    Prefix = prefix,
+                    ContinuationToken = continuationToken
+                },
+                cancellationToken);
+
+            var keys = page.S3Objects?
+                .Where(value => !string.IsNullOrWhiteSpace(value.Key))
+                .Select(value => new KeyVersion { Key = value.Key })
+                .ToList() ?? [];
+            if (keys.Count > 0)
+            {
+                var deleteResponse = await client.DeleteObjectsAsync(
+                    new DeleteObjectsRequest
+                    {
+                        BucketName = _options.Bucket,
+                        Objects = keys,
+                        Quiet = true
+                    },
+                    cancellationToken);
+                if (deleteResponse.DeleteErrors?.Count > 0)
+                {
+                    var failures = string.Join(
+                        ", ",
+                        deleteResponse.DeleteErrors.Take(10).Select(value => $"{value.Key}:{value.Code}"));
+                    throw new InvalidOperationException(
+                        $"Object storage rejected one or more project deletions: {failures}");
+                }
+            }
+
+            continuationToken = page.IsTruncated == true
+                ? page.NextContinuationToken
+                : null;
+        }
+        while (!string.IsNullOrWhiteSpace(continuationToken));
+    }
+
+    private Task ConfigureLifecycleAsync(CancellationToken cancellationToken) =>
+        client.PutLifecycleConfigurationAsync(
+            new PutLifecycleConfigurationRequest
+            {
+                BucketName = _options.Bucket,
+                Configuration = new LifecycleConfiguration
+                {
+                    Rules =
+                    [
+                        new LifecycleRule
+                        {
+                            Id = "hook2stream-staging-expiry",
+                            Status = LifecycleRuleStatus.Enabled,
+                            Filter = new LifecycleFilter
+                            {
+                                LifecycleFilterPredicate = new LifecyclePrefixPredicate
+                                {
+                                    Prefix = "staging/"
+                                }
+                            },
+                            Expiration = new LifecycleRuleExpiration
+                            {
+                                Days = Math.Max(1, (int)Math.Ceiling(_policy.StagingHours / 24d))
+                            }
+                        },
+                        new LifecycleRule
+                        {
+                            Id = "hook2stream-abort-incomplete-multipart",
+                            Status = LifecycleRuleStatus.Enabled,
+                            Filter = new LifecycleFilter
+                            {
+                                LifecycleFilterPredicate = new LifecyclePrefixPredicate
+                                {
+                                    Prefix = string.Empty
+                                }
+                            },
+                            AbortIncompleteMultipartUpload = new LifecycleRuleAbortIncompleteMultipartUpload
+                            {
+                                DaysAfterInitiation = Math.Max(
+                                    1,
+                                    (int)Math.Ceiling(_policy.UploadSessionHours / 24d))
+                            }
+                        }
+                    ]
+                }
             },
             cancellationToken);
 

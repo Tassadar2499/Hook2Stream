@@ -1,6 +1,7 @@
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
+using Hook2Stream.Application;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Hook2Stream.AppHostTests;
@@ -20,7 +21,11 @@ public sealed class AppHostTopologyTests
         Assert.Contains("minio", resources.Keys);
         Assert.Contains("bootstrapper", resources.Keys);
         Assert.Contains("api", resources.Keys);
-        Assert.Contains("worker", resources.Keys);
+        var workerNames = JobRoutingRegistry.Capabilities
+            .Select(capability => $"worker-{capability}")
+            .ToArray();
+        Assert.All(workerNames, workerName => Assert.Contains(workerName, resources.Keys));
+        Assert.DoesNotContain("worker", resources.Keys);
         Assert.Contains("web", resources.Keys);
 
         var postgresPassword = Assert.IsType<ParameterResource>(resources["postgres-password"]);
@@ -43,14 +48,38 @@ public sealed class AppHostTopologyTests
             .Create(resources["web"])
             .WithEnvironmentVariablesConfig()
             .BuildAsync(executionContext, NullLogger.Instance, CancellationToken.None);
+        var bootstrapperConfiguration = await ExecutionConfigurationBuilder
+            .Create(resources["bootstrapper"])
+            .WithEnvironmentVariablesConfig()
+            .BuildAsync(executionContext, NullLogger.Instance, CancellationToken.None);
+        var bootstrapperEnvironment = bootstrapperConfiguration.EnvironmentVariables.ToDictionary();
         var apiEnvironment = apiConfiguration.EnvironmentVariables.ToDictionary();
         var webEnvironment = webConfiguration.EnvironmentVariables.ToDictionary();
 
         Assert.Equal("Local", apiEnvironment["Auth__Mode"]);
+        Assert.Equal("true", bootstrapperEnvironment["Storage__ConfigureBucketCors"]);
+        Assert.Equal("true", bootstrapperEnvironment["Storage__ConfigureBucketLifecycle"]);
+        Assert.Equal(
+            "http://localhost:3000",
+            bootstrapperEnvironment["Storage__BrowserUploadOrigins__0"]);
+        Assert.Equal(
+            "http://localhost:3000",
+            apiEnvironment["Google__PublicWebReturnBaseUrl"]);
+        Assert.Equal("http://localhost:3000", apiEnvironment["Cors__Origins__0"]);
         Assert.Equal("local", webEnvironment["NEXT_PUBLIC_AUTH_MODE"]);
         Assert.Equal(
             apiEnvironment["Auth__LocalToken"],
             webEnvironment["NEXT_PUBLIC_LOCAL_AUTH_TOKEN"]);
+
+        foreach (var capability in JobRoutingRegistry.Capabilities)
+        {
+            var workerConfiguration = await ExecutionConfigurationBuilder
+                .Create(resources[$"worker-{capability}"])
+                .WithEnvironmentVariablesConfig()
+                .BuildAsync(executionContext, NullLogger.Instance, CancellationToken.None);
+            var workerEnvironment = workerConfiguration.EnvironmentVariables.ToDictionary();
+            Assert.Equal(capability, workerEnvironment["Worker__Capabilities__0"]);
+        }
 
         var postgresVolume = GetDataVolume(resources["postgres"]);
         var minioVolume = GetDataVolume(resources["minio"]);

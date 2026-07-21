@@ -1,4 +1,5 @@
 @Hook2Stream.Api_HostAddress = http://localhost:5248
+@LocalAuthToken = replace-with-local-development-token
 
 GET {{Hook2Stream.Api_HostAddress}}/
 Accept: application/json
@@ -15,9 +16,9 @@ Accept: application/json
 
 ###
 
-# Protected endpoints require a Clerk session token.
+# Local Auth accepts the configured loopback-only development token.
 GET {{Hook2Stream.Api_HostAddress}}/api/v1/account/me
-Authorization: Bearer {{ClerkToken}}
+Authorization: Bearer {{LocalAuthToken}}
 Accept: application/json
 
 ###

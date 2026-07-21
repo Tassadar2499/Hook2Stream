@@ -8,7 +8,10 @@ using Microsoft.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
 builder.AddServiceDefaults();
-builder.Services.AddHook2StreamInfrastructure(builder.Configuration, builder.Environment);
+builder.Services.AddHook2StreamInfrastructure(
+    builder.Configuration,
+    builder.Environment,
+    includeBilling: false);
 
 using var host = builder.Build();
 await using var scope = host.Services.CreateAsyncScope();

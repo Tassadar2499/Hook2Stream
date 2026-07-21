@@ -29,6 +29,61 @@
         }
       }
     },
+    "/api/v1/auth/login": {
+      "get": {
+        "tags": [
+          "AuthEndpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/callback": {
+      "get": {
+        "tags": [
+          "AuthEndpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "tags": [
+          "AuthEndpoints"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSessionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "AuthEndpoints"
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
+      }
+    },
     "/api/v1/account/me": {
       "get": {
         "tags": [
@@ -45,7 +100,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/account/onboarding": {
@@ -84,7 +147,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/brand-kit": {
@@ -103,7 +175,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "put": {
         "tags": [
@@ -130,7 +210,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases": {
@@ -161,7 +250,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "post": {
         "tags": [
@@ -188,7 +285,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}": {
@@ -218,7 +324,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "put": {
         "tags": [
@@ -256,7 +370,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "delete": {
         "tags": [
@@ -274,10 +397,26 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "No Content"
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletionStatusResponse"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/archive": {
@@ -307,7 +446,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/restore": {
@@ -337,7 +485,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/readiness": {
@@ -367,7 +524,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/rights": {
@@ -400,7 +565,15 @@
           "404": {
             "description": "Not Found"
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "put": {
         "tags": [
@@ -438,7 +611,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/assets": {
@@ -471,7 +653,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/uploads": {
@@ -511,7 +701,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/assets/reorder": {
@@ -554,7 +753,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/assets/{assetId}": {
@@ -583,10 +791,26 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "No Content"
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetDeletionResponse"
+                }
+              }
+            }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/audio-uploads": {
@@ -615,7 +839,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/setup": {
@@ -655,7 +888,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/workflow": {
@@ -685,7 +927,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/events": {
@@ -708,7 +958,15 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/transcript": {
@@ -738,7 +996,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "put": {
         "tags": [
@@ -776,7 +1042,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/transcript/approve": {
@@ -816,7 +1091,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/transcript/regenerations": {
@@ -846,7 +1130,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/artwork": {
@@ -876,7 +1169,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "post": {
         "tags": [
@@ -914,7 +1215,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/artwork/selection": {
@@ -954,7 +1264,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/artwork/cover-approval": {
@@ -994,7 +1313,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/hooks": {
@@ -1024,7 +1352,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       },
       "put": {
         "tags": [
@@ -1062,7 +1398,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/campaign": {
@@ -1092,7 +1437,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/campaign/items/{itemId}": {
@@ -1141,7 +1494,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/assets/{assetId}/view-url": {
@@ -1180,7 +1542,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/billing/summary": {
@@ -1199,7 +1569,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/billing/checkouts": {
@@ -1228,7 +1606,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/renders": {
@@ -1268,7 +1655,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/renders/{batchId}": {
@@ -1307,7 +1703,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/releases/{projectId}/artwork/clean-cover/download-url": {
@@ -1337,7 +1741,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/uploads/{sessionId}": {
@@ -1367,7 +1779,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/uploads/{sessionId}/parts": {
@@ -1407,7 +1827,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/uploads/{sessionId}/complete": {
@@ -1447,7 +1876,16 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/uploads/{sessionId}/abort": {
@@ -1470,7 +1908,16 @@
           "204": {
             "description": "No Content"
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/jobs/{jobId}": {
@@ -1500,7 +1947,15 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     },
     "/api/v1/jobs/{jobId}/events": {
@@ -1523,7 +1978,15 @@
           "200": {
             "description": "OK"
           }
-        }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
       }
     }
   },
@@ -1680,6 +2143,23 @@
               "string"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "AssetDeletionResponse": {
+        "required": [
+          "assetId",
+          "cleanupJobId"
+        ],
+        "type": "object",
+        "properties": {
+          "assetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cleanupJobId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -1871,6 +2351,53 @@
           "rejected",
           "deleted"
         ]
+      },
+      "AuthSessionResponse": {
+        "required": [
+          "authenticated",
+          "subject",
+          "email",
+          "displayName",
+          "expiresAt",
+          "csrfToken"
+        ],
+        "type": "object",
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "subject": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "email": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "displayName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "expiresAt": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
+          },
+          "csrfToken": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
       },
       "BillingSummaryResponse": {
         "required": [
@@ -2292,6 +2819,37 @@
               "string"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "DeletionStatusResponse": {
+        "required": [
+          "deletionId",
+          "projectId",
+          "deletedAt",
+          "purgeDueAt",
+          "state"
+        ],
+        "type": "object",
+        "properties": {
+          "deletionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deletedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "purgeDueAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string"
           }
         }
       },
@@ -3613,7 +4171,7 @@
         "required": [
           "partNumber",
           "uploadUrl",
-          "expiresAt"
+          "urlExpiresAt"
         ],
         "type": "object",
         "properties": {
@@ -3627,6 +4185,10 @@
           },
           "uploadUrl": {
             "type": "string"
+          },
+          "urlExpiresAt": {
+            "type": "string",
+            "format": "date-time"
           },
           "expiresAt": {
             "type": "string",
@@ -3643,7 +4205,8 @@
           "multipartUploadId",
           "partSizeBytes",
           "partCount",
-          "expiresAt"
+          "urlExpiresAt",
+          "sessionExpiresAt"
         ],
         "type": "object",
         "properties": {
@@ -3686,13 +4249,21 @@
             ],
             "format": "int32"
           },
-          "expiresAt": {
+          "urlExpiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sessionExpiresAt": {
             "type": "string",
             "format": "date-time"
           },
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -3754,11 +4325,30 @@
           }
         }
       },
+      "WorkflowNextAction": {
+        "enum": [
+          "uploadAudio",
+          "completeSetup",
+          "confirmRights",
+          "reviewTranscript",
+          "reviewArtwork",
+          "reviewHooks",
+          "waitForCampaign",
+          "waitForPreview",
+          "purchaseRender",
+          "startFinalRender",
+          "waitForFinalRender",
+          "downloadExport",
+          "retryFailedRenders",
+          null
+        ]
+      },
       "WorkflowResponse": {
         "required": [
           "projectId",
           "flowKind",
           "projectVersion",
+          "workflowVersion",
           "blockers",
           "nextAction",
           "lanes"
@@ -3780,6 +4370,14 @@
             ],
             "format": "int64"
           },
+          "workflowVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
           "blockers": {
             "type": "array",
             "items": {
@@ -3787,9 +4385,13 @@
             }
           },
           "nextAction": {
-            "type": [
-              "null",
-              "string"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WorkflowNextAction"
+              }
             ]
           },
           "lanes": {
@@ -3797,8 +4399,35 @@
             "items": {
               "$ref": "#/components/schemas/WorkflowLaneResponse"
             }
+          },
+          "currentRenderBatchId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "oauthSession": {
+        "type": "apiKey",
+        "description": "Opaque HttpOnly browser session cookie (h2s_session in Development/Testing).",
+        "name": "__Host-h2s_session",
+        "in": "cookie"
+      },
+      "csrf": {
+        "type": "apiKey",
+        "description": "Double-submit CSRF token required with an OAuth session on unsafe methods.",
+        "name": "X-CSRF-Token",
+        "in": "header"
+      },
+      "localDevelopmentBearer": {
+        "type": "http",
+        "description": "Loopback-only Development/Testing authentication.",
+        "scheme": "bearer",
+        "bearerFormat": "opaque development token"
       }
     }
   },
@@ -3808,6 +4437,9 @@
     },
     {
       "name": "BillingEndpoints"
+    },
+    {
+      "name": "AuthEndpoints"
     },
     {
       "name": "Endpoints"

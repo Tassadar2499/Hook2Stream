@@ -204,10 +204,12 @@ public sealed class PipelineReconciler(
         if (audio is null || string.IsNullOrWhiteSpace(audio.Sha256))
         {
             SetStage(run, WorkflowLane.Audio, PipelineStageState.WaitingUser, "audio.upload_required");
+            AggregateRun(run);
             return;
         }
 
         SetStage(run, WorkflowLane.Audio, PipelineStageState.Succeeded);
+        await EnsureFinalRenderAsync(db, project, run, cancellationToken);
         run.InputFingerprint = audio.Sha256;
         var queue = services.GetRequiredService<IJobQueue>();
         var analysis = await db.TrackAnalysisRevisions
@@ -243,7 +245,7 @@ public sealed class PipelineReconciler(
                     analysisRevisionId = analysis.Id
                 }, StoredJson),
                 $"audio-analysis:{audio.Id:N}:r{audio.Revision}:{audio.Sha256}",
-                "analysis",
+                JobRoutingRegistry.Analysis,
                 "deterministic-audio-v1",
                 audio.Sha256,
                 PipelineRunId: run.Id,
@@ -265,6 +267,7 @@ public sealed class PipelineReconciler(
                 ToStageState(job?.State, analysis.State),
                 errorCode: job?.ErrorCode,
                 currentJobId: job?.Id);
+            AggregateRun(run);
             return;
         }
 
@@ -286,11 +289,154 @@ public sealed class PipelineReconciler(
             SetStage(run, WorkflowLane.Preview, PipelineStageState.WaitingUser, contentRights.BlockerCode);
         }
 
-        run.State = run.Stages.All(value => value.State == PipelineStageState.Succeeded)
-            ? PipelineStageState.Succeeded
-            : run.Stages.Any(value => value.State is PipelineStageState.Queued or PipelineStageState.Running)
-                ? PipelineStageState.Running
-                : PipelineStageState.WaitingUser;
+        AggregateRun(run);
+    }
+
+    internal static async Task EnsureFinalRenderAsync(
+        Hook2StreamDbContext db,
+        ReleaseProject project,
+        PipelineRun run,
+        CancellationToken cancellationToken)
+    {
+        var batches = await db.RenderBatches
+            .Where(value => value.ProjectId == project.Id &&
+                            value.WorkspaceId == project.WorkspaceId &&
+                            value.PipelineRunId == run.Id)
+            .OrderByDescending(value => value.CreatedAt)
+            .ToListAsync(cancellationToken);
+        var batch = batches.FirstOrDefault(value => value.State is RenderBatchState.Queued or RenderBatchState.Running)
+                    ?? batches.FirstOrDefault();
+        if (batch is null)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var hasEntitlement = await db.Entitlements.AsNoTracking().AnyAsync(
+                value => value.ProjectId == project.Id &&
+                         value.WorkspaceId == project.WorkspaceId &&
+                         value.State == EntitlementState.Active &&
+                         value.RevokedAt == null &&
+                         (value.ValidUntil == null || value.ValidUntil > now),
+                cancellationToken);
+            SetStage(
+                run,
+                WorkflowLane.FinalRender,
+                PipelineStageState.WaitingUser,
+                hasEntitlement ? "render.start_required" : "purchase.required");
+            SetCurrentRenderBatch(run, null);
+            return;
+        }
+
+        SetCurrentRenderBatch(run, batch.Id);
+
+        var entitlement = await db.Entitlements.AsNoTracking().SingleOrDefaultAsync(
+            value => value.Id == batch.EntitlementId && value.WorkspaceId == project.WorkspaceId,
+            cancellationToken);
+        if (entitlement is null || entitlement.State == EntitlementState.Revoked || entitlement.RevokedAt is not null)
+        {
+            SetStage(
+                run,
+                WorkflowLane.FinalRender,
+                PipelineStageState.Cancelled,
+                "entitlement.revoked",
+                currentRenderBatchId: batch.Id);
+            return;
+        }
+
+        var jobIds = Deserialize<List<Guid>>(batch.JobIdsJson) ?? [];
+        var jobs = await db.Jobs.AsNoTracking()
+            .Where(value => jobIds.Contains(value.Id))
+            .ToListAsync(cancellationToken);
+        var exportJob = jobs.FirstOrDefault(value => value.Type == JobType.ExportBundle);
+        var currentJob = jobs
+            .OrderBy(value => value.Type == JobType.ExportBundle ? 1 : 0)
+            .FirstOrDefault(value => value.State is JobState.Running or JobState.Queued)
+            ?? jobs.FirstOrDefault(value => value.Type == JobType.ExportBundle)
+            ?? jobs.OrderByDescending(value => value.UpdatedAt).FirstOrDefault();
+        var progress = jobs.Count == 0
+            ? 0
+            : (int)Math.Round(jobs.Average(value => value.ProgressPercent));
+        var errorCode = jobs
+            .Where(value => !string.IsNullOrWhiteSpace(value.ErrorCode))
+            .OrderByDescending(value => value.UpdatedAt)
+            .Select(value => value.ErrorCode)
+            .FirstOrDefault();
+
+        if (batch.State is RenderBatchState.Queued or RenderBatchState.Running && exportJob is not null)
+        {
+            if (exportJob.State == JobState.Cancelled &&
+                string.Equals(exportJob.ProgressStage, "waiting_user", StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(exportJob.ErrorCode))
+            {
+                SetStage(
+                    run,
+                    WorkflowLane.FinalRender,
+                    PipelineStageState.WaitingUser,
+                    exportJob.ErrorCode,
+                    currentJobId: exportJob.Id,
+                    progressPercent: progress,
+                    currentRenderBatchId: batch.Id);
+                return;
+            }
+
+            if (exportJob.State == JobState.Failed)
+            {
+                SetStage(
+                    run,
+                    WorkflowLane.FinalRender,
+                    PipelineStageState.Failed,
+                    errorCode: exportJob.ErrorCode ?? "export.failed",
+                    currentJobId: exportJob.Id,
+                    progressPercent: progress,
+                    currentRenderBatchId: batch.Id);
+                return;
+            }
+
+            if (exportJob.State == JobState.Cancelled)
+            {
+                SetStage(
+                    run,
+                    WorkflowLane.FinalRender,
+                    PipelineStageState.Cancelled,
+                    "render.export_cancelled",
+                    exportJob.ErrorCode,
+                    exportJob.Id,
+                    progress,
+                    batch.Id);
+                return;
+            }
+        }
+
+        switch (batch.State)
+        {
+            case RenderBatchState.Queued:
+                SetStage(run, WorkflowLane.FinalRender, PipelineStageState.Queued,
+                    errorCode: errorCode, currentJobId: currentJob?.Id, progressPercent: progress,
+                    currentRenderBatchId: batch.Id);
+                break;
+            case RenderBatchState.Running:
+                SetStage(run, WorkflowLane.FinalRender, PipelineStageState.Running,
+                    errorCode: errorCode, currentJobId: currentJob?.Id, progressPercent: progress,
+                    currentRenderBatchId: batch.Id);
+                break;
+            case RenderBatchState.Succeeded:
+                SetStage(run, WorkflowLane.FinalRender, PipelineStageState.Succeeded,
+                    currentJobId: currentJob?.Id, progressPercent: 100,
+                    currentRenderBatchId: batch.Id);
+                break;
+            case RenderBatchState.PartiallySucceeded:
+                SetStage(run, WorkflowLane.FinalRender, PipelineStageState.Degraded,
+                    "render.partial_failure", errorCode, currentJob?.Id, 100, batch.Id);
+                break;
+            case RenderBatchState.Failed:
+                SetStage(run, WorkflowLane.FinalRender, PipelineStageState.Failed,
+                    errorCode: errorCode ?? "render.batch_failed", currentJobId: currentJob?.Id, progressPercent: 100,
+                    currentRenderBatchId: batch.Id);
+                break;
+            case RenderBatchState.Cancelled:
+                SetStage(run, WorkflowLane.FinalRender, PipelineStageState.Cancelled,
+                    "render.batch_cancelled", errorCode, currentJob?.Id, progress, batch.Id);
+                break;
+        }
+
     }
 
     private static async Task EnsureTranscriptAsync(
@@ -385,7 +531,7 @@ public sealed class PipelineReconciler(
                 transcriptRevisionId = revision.Id
             }, StoredJson),
             $"transcription:{revision.Id:N}:{audio.Sha256}",
-            "analysis",
+            JobRoutingRegistry.Control,
             "openrouter-stt-v1",
             audio.Sha256,
             PipelineRunId: run.Id,
@@ -526,7 +672,7 @@ public sealed class PipelineReconciler(
                 style = "track-derived"
             }, StoredJson),
             $"artwork:auto:{revision.Id:N}:{sourceFingerprint}",
-            "artwork",
+            JobRoutingRegistry.Control,
             "openrouter-image-v1",
             sourceFingerprint,
             PipelineRunId: run.Id,
@@ -696,7 +842,7 @@ public sealed class PipelineReconciler(
                 brandKitVersion = brand.Version
             }, StoredJson),
             $"campaign:{revision.Id:N}:{fingerprint}",
-            "campaign",
+            JobRoutingRegistry.Control,
             "openrouter-campaign-v1",
             fingerprint,
             PipelineRunId: run.Id,
@@ -725,28 +871,48 @@ public sealed class PipelineReconciler(
             return;
         }
 
-        // A successful preview is a project-level allowance, not a campaign
-        // revision allowance. A queued/running preview also reserves it so two
-        // reconcile messages cannot create competing free renders.
-        var existing = await db.Jobs
+        // A successful preview consumes the one project-level allowance. Active
+        // work reserves it only for the exact immutable campaign revision.
+        var successful = await db.Jobs
             .Where(value => value.ProjectId == project.Id &&
                             value.Type == JobType.PreviewRender &&
-                            (value.State == JobState.Queued ||
-                             value.State == JobState.Running ||
-                             value.State == JobState.Succeeded))
+                            value.State == JobState.Succeeded)
             .OrderBy(value => value.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);
-        if (existing is not null)
+        var active = await db.Jobs
+            .Where(value => value.ProjectId == project.Id &&
+                            value.Type == JobType.PreviewRender &&
+                            (value.State == JobState.Queued || value.State == JobState.Running))
+            .OrderByDescending(value => value.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+        var activeCampaignId = active is null ? null : PayloadGuid(active.PayloadJson, "campaignRevisionId");
+        if (active is not null && activeCampaignId != campaign.Id)
         {
-            var stale = existing.State == JobState.Succeeded &&
-                        !string.Equals(existing.InputFingerprint, campaign.SourceFingerprint, StringComparison.Ordinal);
+            await CancelJobAsync(db, active, "preview.revision_superseded", cancellationToken);
+            active = null;
+        }
+
+        if (successful is not null)
+        {
+            var stale = PayloadGuid(successful.PayloadJson, "campaignRevisionId") != campaign.Id;
             SetStage(
                 run,
                 WorkflowLane.Preview,
-                stale ? PipelineStageState.Stale : ToStageState(existing.State, null),
+                stale ? PipelineStageState.Stale : PipelineStageState.Succeeded,
                 stale ? "preview.allowance_consumed" : null,
-                errorCode: existing.ErrorCode,
-                currentJobId: existing.Id);
+                errorCode: successful.ErrorCode,
+                currentJobId: successful.Id);
+            return;
+        }
+
+        if (active is not null)
+        {
+            SetStage(
+                run,
+                WorkflowLane.Preview,
+                ToStageState(active.State, null),
+                errorCode: active.ErrorCode,
+                currentJobId: active.Id);
             return;
         }
 
@@ -792,10 +958,10 @@ public sealed class PipelineReconciler(
                 audioAssetId = audio.Id,
                 audioFingerprint = audio.Sha256
             }, StoredJson),
-            $"preview:{campaign.Id:N}:{campaign.SourceFingerprint}",
-            "render",
+            $"preview:{campaign.Id:N}",
+            JobRoutingRegistry.Render,
             "deterministic-render-v1",
-            campaign.SourceFingerprint,
+            campaign.Id.ToString("N"),
             PipelineRunId: run.Id,
             PipelineStage: "preview"), cancellationToken);
         SetStage(run, WorkflowLane.Preview, PipelineStageState.Queued, currentJobId: jobId);
@@ -825,6 +991,55 @@ public sealed class PipelineReconciler(
         catch (JsonException)
         {
             return false;
+        }
+    }
+
+    private static async Task CancelJobAsync(
+        Hook2StreamDbContext db,
+        Job job,
+        string reasonCode,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        job.State = JobState.Cancelled;
+        job.CompletedAt = now;
+        job.ProgressStage = "cancelled";
+        job.ErrorCode = reasonCode;
+        job.ErrorMessage = "The queued preview no longer matches the current campaign revision.";
+        job.LeaseOwner = null;
+        job.LeaseExpiresAt = null;
+        job.LeaseToken = null;
+        var activeAttempts = await db.JobAttempts
+            .Where(value => value.JobId == job.Id && value.State == JobState.Running)
+            .ToListAsync(cancellationToken);
+        foreach (var attempt in activeAttempts)
+        {
+            attempt.State = JobState.Cancelled;
+            attempt.CompletedAt = now;
+            attempt.ErrorCode = reasonCode;
+        }
+
+        db.JobEvents.Add(new JobEvent
+        {
+            JobId = job.Id,
+            EventType = "cancelled",
+            DataJson = JsonSerializer.Serialize(new { reasonCode })
+        });
+    }
+
+    private static Guid? PayloadGuid(string json, string propertyName)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty(propertyName, out var value) &&
+                   value.TryGetGuid(out var parsed)
+                ? parsed
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
@@ -861,7 +1076,9 @@ public sealed class PipelineReconciler(
         PipelineStageState state,
         string? blockerCode = null,
         string? errorCode = null,
-        Guid? currentJobId = null)
+        Guid? currentJobId = null,
+        int? progressPercent = null,
+        Guid? currentRenderBatchId = null)
     {
         var stage = run.Stages.SingleOrDefault(value => value.Lane == lane);
         if (stage is null)
@@ -875,11 +1092,62 @@ public sealed class PipelineReconciler(
             run.Stages.Add(stage);
         }
 
+        var progress = progressPercent is { } provided
+            ? Math.Clamp(provided, 0, 100)
+            : state == PipelineStageState.Succeeded
+                ? 100
+                : state is PipelineStageState.NotStarted or PipelineStageState.WaitingUser
+                    ? 0
+                    : stage.ProgressPercent;
+        var changed = stage.State != state ||
+                      stage.ProgressPercent != progress ||
+                      !string.Equals(stage.BlockerCode, blockerCode, StringComparison.Ordinal) ||
+                      !string.Equals(stage.ErrorCode, errorCode, StringComparison.Ordinal) ||
+                      stage.CurrentJobId != currentJobId ||
+                      stage.CurrentRenderBatchId != currentRenderBatchId;
         stage.State = state;
-        stage.ProgressPercent = state == PipelineStageState.Succeeded ? 100 : stage.ProgressPercent;
+        stage.ProgressPercent = progress;
         stage.BlockerCode = blockerCode;
         stage.ErrorCode = errorCode;
         stage.CurrentJobId = currentJobId;
+        stage.CurrentRenderBatchId = currentRenderBatchId;
+        if (changed)
+        {
+            // PipelineRun.Version is the workflow snapshot version exposed by
+            // the API, so any child-stage mutation must also touch the run.
+            run.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+    }
+
+    private static void SetCurrentRenderBatch(PipelineRun run, Guid? renderBatchId)
+    {
+        var stage = run.Stages.Single(value => value.Lane == WorkflowLane.FinalRender);
+        if (stage.CurrentRenderBatchId == renderBatchId) return;
+        stage.CurrentRenderBatchId = renderBatchId;
+        run.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    private static void AggregateRun(PipelineRun run)
+    {
+        var states = run.Stages.Select(value => value.State).ToArray();
+        var state = states.Any(value => value == PipelineStageState.Failed)
+            ? PipelineStageState.Failed
+            : states.Any(value => value == PipelineStageState.Degraded)
+                ? PipelineStageState.Degraded
+                : states.Any(value => value is PipelineStageState.Running or PipelineStageState.Queued or PipelineStageState.Retrying)
+                    ? PipelineStageState.Running
+                    : states.All(value => value == PipelineStageState.Succeeded)
+                        ? PipelineStageState.Succeeded
+                        : PipelineStageState.WaitingUser;
+        if (run.State != state)
+        {
+            run.State = state;
+            run.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        run.CompletedAt = state == PipelineStageState.Succeeded
+            ? run.CompletedAt ?? DateTimeOffset.UtcNow
+            : null;
     }
 
     private static PipelineStageState ToStageState(JobState? job, RevisionState? revision) =>

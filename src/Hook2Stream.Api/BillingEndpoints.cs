@@ -347,6 +347,30 @@ public static class BillingEndpoints
         checkout.ExternalCustomerId ??= paymentEvent.ExternalCustomerId;
         checkout.ExternalSubscriptionId ??= paymentEvent.ExternalSubscriptionId;
         checkout.ExternalPaymentIntentId ??= paymentEvent.ExternalPaymentIntentId;
+        if (paymentEvent.Paid && checkout.ProjectId is { } paidProjectId &&
+            await db.Projects.IgnoreQueryFilters().AnyAsync(
+                value => value.Id == paidProjectId && value.DeletedAt != null,
+                cancellationToken))
+        {
+            inbox.State = "manual_review";
+            inbox.ProcessedAt = timeProvider.GetUtcNow();
+            inbox.LastError = "billing.paid_project_deleted";
+            db.AuditEvents.Add(new AuditEvent
+            {
+                WorkspaceId = checkout.WorkspaceId,
+                Action = "billing.payment_received_for_deleted_project",
+                ResourceType = "billing_checkout",
+                ResourceId = checkout.Id,
+                DataJson = JsonSerializer.Serialize(new
+                {
+                    projectId = paidProjectId,
+                    paymentEvent.EventId,
+                    paymentEvent.ExternalPaymentIntentId
+                })
+            });
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Ok(new { received = true, manualReview = true });
+        }
         var checkoutFailed = paymentEvent.Type is
             "checkout.session.expired" or
             "checkout.session.async_payment_failed";
@@ -646,10 +670,17 @@ public static class BillingEndpoints
             }
         }
 
+        var pipelineRun = await db.PipelineRuns
+            .Include(value => value.Stages)
+            .Where(value => value.ProjectId == project.Id)
+            .OrderByDescending(value => value.Number)
+            .FirstOrDefaultAsync(cancellationToken);
+        var pipelineRunId = pipelineRun?.Id;
         var batch = new RenderBatch
         {
             WorkspaceId = context.Workspace.Id,
             ProjectId = project.Id,
+            PipelineRunId = pipelineRunId,
             EntitlementId = entitlement.Id,
             Kind = request.Kind,
             ItemIdsJson = JsonSerializer.Serialize(request.ItemIds, StoredJson),
@@ -659,11 +690,11 @@ public static class BillingEndpoints
         var jobs = request.ItemIds.Select(itemId =>
         {
             var retrySource = retrySources.GetValueOrDefault(itemId);
-            return NewJob(
+            var renderJob = NewJob(
                 context.Workspace.Id,
                 project.Id,
                 JobType.FinalRender,
-                "render",
+                JobRoutingRegistry.Render,
                 "deterministic-render-v1",
                 $"final-render:{batch.Id:N}:{itemId:N}",
                 new
@@ -677,12 +708,15 @@ public static class BillingEndpoints
                     request.Kind,
                     retryOfJobId = retrySource?.JobId
                 });
+            renderJob.PipelineRunId = pipelineRunId;
+            renderJob.PipelineStage = "finalRender";
+            return renderJob;
         }).ToList();
         var exportJob = NewJob(
             context.Workspace.Id,
             project.Id,
             JobType.ExportBundle,
-            "render",
+            JobRoutingRegistry.Export,
             "export-v1",
             $"export:{batch.Id:N}",
             new
@@ -701,12 +735,30 @@ public static class BillingEndpoints
                 releaseMode = entitlement.ReleaseModeSnapshot ?? project.Mode
             });
         exportJob.MaxAttempts = 100;
+        exportJob.PipelineRunId = pipelineRunId;
+        exportJob.PipelineStage = "finalRender";
         jobs.Add(exportJob);
         batch.JobIdsJson = JsonSerializer.Serialize(jobs.Select(value => value.Id), StoredJson);
         db.RenderBatches.Add(batch);
         db.Jobs.AddRange(jobs);
         db.JobEvents.AddRange(jobs.Select(value => NewQueuedEvent(value)));
         project.State = ProjectState.Rendering;
+        if (pipelineRun is not null)
+        {
+            var finalStage = pipelineRun.Stages.SingleOrDefault(value => value.Lane == WorkflowLane.FinalRender);
+            if (finalStage is not null)
+            {
+                finalStage.State = PipelineStageState.Queued;
+                finalStage.ProgressPercent = 0;
+                finalStage.BlockerCode = null;
+                finalStage.ErrorCode = null;
+                finalStage.CurrentJobId = jobs[0].Id;
+                finalStage.CurrentRenderBatchId = batch.Id;
+                pipelineRun.State = PipelineStageState.Running;
+                pipelineRun.CompletedAt = null;
+                pipelineRun.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+        }
         db.ProjectEvents.Add(new ProjectEvent
         {
             WorkspaceId = context.Workspace.Id,
@@ -714,6 +766,7 @@ public static class BillingEndpoints
             EventType = "render.queued",
             DataJson = JsonSerializer.Serialize(new { projectId, renderBatchId = batch.Id, request.Kind })
         });
+        AddPipelineReconcile(db, context.Workspace.Id, project.Id, "render.queued", batch.Id);
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -1004,6 +1057,15 @@ public static class BillingEndpoints
                 : null
         };
         db.Entitlements.Add(entitlement);
+        if (included > 0 && checkout.ProjectId is { } entitledProjectId)
+        {
+            AddPipelineReconcile(
+                db,
+                checkout.WorkspaceId,
+                entitledProjectId,
+                "entitlement.granted",
+                entitlement.Id);
+        }
         if (checkout.ProductCode == BillingProducts.CleanCover && checkout.ProjectId is { } projectId)
         {
             var selectedAssetId = (Deserialize<List<Guid>>(checkout.ItemIdsJson) ?? []).SingleOrDefault();
@@ -1021,7 +1083,7 @@ public static class BillingEndpoints
                 checkout.WorkspaceId,
                 projectId,
                 JobType.CleanCoverRender,
-                "render",
+                JobRoutingRegistry.Render,
                 "local-cover-v1",
                 $"clean-cover:{entitlement.Id:N}",
                 new
@@ -1062,6 +1124,15 @@ public static class BillingEndpoints
         {
             entitlement.State = EntitlementState.Revoked;
             entitlement.RevokedAt = checkout.RefundedAt;
+            if (entitlement.ProjectId is { } projectId)
+            {
+                AddPipelineReconcile(
+                    db,
+                    checkout.WorkspaceId,
+                    projectId,
+                    "entitlement.revoked",
+                    entitlement.Id);
+            }
         }
         var grant = await db.ArtworkCreditGrants.SingleOrDefaultAsync(value => value.CheckoutId == checkout.Id, cancellationToken);
         if (grant is null) return;
@@ -1185,7 +1256,10 @@ public static class BillingEndpoints
         string capability,
         string handlerVersion,
         string idempotencyKey,
-        object payload) => new()
+        object payload)
+    {
+        JobRoutingRegistry.EnsureMatches(type, capability);
+        return new Job
         {
             WorkspaceId = workspaceId,
             ProjectId = projectId,
@@ -1197,6 +1271,7 @@ public static class BillingEndpoints
             State = JobState.Queued,
             AvailableAt = DateTimeOffset.UtcNow
         };
+    }
 
     private static JobEvent NewQueuedEvent(Job job) => new()
     {
@@ -1204,6 +1279,24 @@ public static class BillingEndpoints
         EventType = "queued",
         DataJson = JsonSerializer.Serialize(new { job.Type, job.RequiredCapability, job.HandlerVersion })
     };
+
+    private static void AddPipelineReconcile(
+        Hook2StreamDbContext db,
+        Guid workspaceId,
+        Guid projectId,
+        string reason,
+        Guid causationId)
+    {
+        db.OutboxMessages.Add(new OutboxMessage
+        {
+            WorkspaceId = workspaceId,
+            AggregateId = projectId,
+            Destination = "pipeline",
+            MessageType = "pipeline.reconcile",
+            DedupeKey = $"pipeline.reconcile:{projectId:N}:{reason}:{causationId:N}",
+            PayloadJson = JsonSerializer.Serialize(new { projectId, reason, causationId })
+        });
+    }
 
     private static CheckoutResponse ToCheckout(BillingCheckout value) => new(
         value.Id,

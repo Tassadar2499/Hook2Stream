@@ -2,14 +2,15 @@ using System.Text.Json;
 using Hook2Stream.Api.Authentication;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
+using Hook2Stream.Infrastructure;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Api;
 
 public static class Endpoints
 {
-    private static readonly TimeSpan UploadUrlLifetime = TimeSpan.FromMinutes(60);
     private const string ExternalAiPolicyVersion = "external-ai-zdr-v1";
 
     public static IEndpointRouteBuilder MapHook2StreamApi(this IEndpointRouteBuilder endpoints)
@@ -48,7 +49,7 @@ public static class Endpoints
         releases.MapPost("/{projectId:guid}/restore", RestoreRelease)
             .Produces<ReleaseResponse>();
         releases.MapDelete("/{projectId:guid}", DeleteRelease)
-            .Produces(StatusCodes.Status204NoContent);
+            .Produces<DeletionStatusResponse>(StatusCodes.Status202Accepted);
         releases.MapGet("/{projectId:guid}/readiness", GetReadiness)
             .Produces<ReadinessResponse>();
         releases.MapGet("/{projectId:guid}/rights", GetRights)
@@ -64,7 +65,7 @@ public static class Endpoints
         releases.MapPut("/{projectId:guid}/assets/reorder", ReorderAssets)
             .Produces<IReadOnlyList<AssetResponse>>();
         releases.MapDelete("/{projectId:guid}/assets/{assetId:guid}", DeleteAsset)
-            .Produces(StatusCodes.Status204NoContent);
+            .Produces<AssetDeletionResponse>(StatusCodes.Status202Accepted);
 
         var uploads = api.MapGroup("/uploads");
         uploads.MapGet("/{sessionId:guid}", ResumeUpload)
@@ -445,6 +446,7 @@ public static class Endpoints
         Hook2StreamDbContext dbContext,
         HttpRequest request,
         HttpResponse response,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var expectedVersion = ApiEndpointHelpers.RequireIfMatch(request);
@@ -452,7 +454,16 @@ public static class Endpoints
         var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
         ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
 
+        var now = timeProvider.GetUtcNow();
         project.Archive();
+        await ProjectArchiveCoordinator.PauseAsync(dbContext, project, now, cancellationToken);
+        dbContext.ProjectEvents.Add(new ProjectEvent
+        {
+            WorkspaceId = project.WorkspaceId,
+            ProjectId = project.Id,
+            EventType = "release.archived",
+            DataJson = JsonSerializer.Serialize(new { projectId = project.Id })
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, project.Version);
         return Results.Ok(ToResponse(project, Array.Empty<MediaAsset>()));
@@ -464,13 +475,38 @@ public static class Endpoints
         Hook2StreamDbContext dbContext,
         HttpRequest request,
         HttpResponse response,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var expectedVersion = ApiEndpointHelpers.RequireIfMatch(request);
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
         ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
+        var now = timeProvider.GetUtcNow();
         project.Restore();
+        await ProjectArchiveCoordinator.ResumeAsync(
+            dbContext,
+            project,
+            now,
+            TimeSpan.FromMinutes(policyOptions.Value.DeletionFenceMinutes),
+            cancellationToken);
+        dbContext.OutboxMessages.Add(new OutboxMessage
+        {
+            WorkspaceId = project.WorkspaceId,
+            AggregateId = project.Id,
+            Destination = "pipeline",
+            MessageType = "pipeline.reconcile",
+            DedupeKey = $"pipeline.reconcile:{project.Id:N}:restored:{Guid.CreateVersion7():N}",
+            PayloadJson = JsonSerializer.Serialize(new { projectId = project.Id, reason = "release.restored" })
+        });
+        dbContext.ProjectEvents.Add(new ProjectEvent
+        {
+            WorkspaceId = project.WorkspaceId,
+            ProjectId = project.Id,
+            EventType = "release.restored",
+            DataJson = JsonSerializer.Serialize(new { projectId = project.Id })
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, project.Version);
         return Results.Ok(ToResponse(project, Array.Empty<MediaAsset>()));
@@ -481,6 +517,8 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         HttpRequest request,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var expectedVersion = ApiEndpointHelpers.RequireIfMatch(request);
@@ -488,14 +526,71 @@ public static class Endpoints
         var project = await FindProject(dbContext, context.Workspace.Id, projectId, true, cancellationToken);
         ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
 
-        var now = DateTimeOffset.UtcNow;
-        project.DeletedAt = now;
-        foreach (var asset in project.Assets)
+        var now = timeProvider.GetUtcNow();
+        var pendingCheckouts = await dbContext.BillingCheckouts
+            .Where(value => value.ProjectId == project.Id && value.State == CheckoutState.Pending)
+            .ToListAsync(cancellationToken);
+        if (pendingCheckouts.Count > 0)
         {
-            asset.DeletedAt = now;
-            asset.State = AssetState.Deleted;
-            asset.IsActive = false;
+            throw new ApiProblemException(
+                StatusCodes.Status409Conflict,
+                "billing.checkout_pending",
+                "Wait for the open payment session to complete or expire before deleting this project.");
         }
+
+        await ProjectDeletionCoordinator.FenceAsync(
+            dbContext,
+            project,
+            now,
+            "project.deleted",
+            cancellationToken);
+
+        var cleanupAvailableAt = now.AddMinutes(policyOptions.Value.DeletionFenceMinutes);
+        var configuredPurgeDueAt = now.AddDays(policyOptions.Value.ExplicitDeletionDays);
+
+        var tombstone = new ProjectDeletionTombstone
+        {
+            WorkspaceId = project.WorkspaceId,
+            ProjectId = project.Id,
+            ActorSubject = currentUser.Subject,
+            PolicyVersion = "retention-v1",
+            RequestedAt = now,
+            PurgeDueAt = configuredPurgeDueAt > cleanupAvailableAt
+                ? configuredPurgeDueAt
+                : cleanupAvailableAt,
+            State = "queued"
+        };
+        dbContext.ProjectDeletionTombstones.Add(tombstone);
+        var cleanupJob = new Job
+        {
+            WorkspaceId = project.WorkspaceId,
+            ProjectId = project.Id,
+            Type = JobType.AssetCleanup,
+            RequiredCapability = JobRoutingRegistry.GetRequiredCapability(JobType.AssetCleanup),
+            HandlerVersion = "v1",
+            PayloadSchemaVersion = 1,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                projectId = project.Id,
+                deletionId = tombstone.Id
+            }),
+            IdempotencyKey = $"retention:project:{tombstone.Id:N}",
+            State = JobState.Queued,
+            AvailableAt = cleanupAvailableAt
+        };
+        dbContext.Jobs.Add(cleanupJob);
+        dbContext.JobEvents.Add(new JobEvent
+        {
+            JobId = cleanupJob.Id,
+            EventType = "queued",
+            DataJson = JsonSerializer.Serialize(new
+            {
+                cleanupJob.Type,
+                cleanupJob.RequiredCapability,
+                deletionId = tombstone.Id,
+                purgeDueAt = tombstone.PurgeDueAt
+            })
+        });
 
         dbContext.AuditEvents.Add(new AuditEvent
         {
@@ -507,7 +602,14 @@ public static class Endpoints
             DataJson = "{}"
         });
         await dbContext.SaveChangesAsync(cancellationToken);
-        return Results.NoContent();
+        return Results.Accepted(
+            $"/api/v1/jobs/{cleanupJob.Id}",
+            new DeletionStatusResponse(
+                tombstone.Id,
+                project.Id,
+                now,
+                tombstone.PurgeDueAt,
+                tombstone.State));
     }
 
     private static async Task<IResult> GetRights(
@@ -868,6 +970,8 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         IObjectStorage objectStorage,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
@@ -920,6 +1024,11 @@ public static class Endpoints
             asset.Id,
             asset.Revision);
 
+        var now = timeProvider.GetUtcNow();
+        var uploadPolicy = policyOptions.Value;
+        var sessionExpiresAt = now.AddHours(uploadPolicy.UploadSessionHours);
+        var urlLifetime = GetUploadUrlLifetime(now, sessionExpiresAt, uploadPolicy);
+        var urlExpiresAt = now.Add(urlLifetime);
         var multipart = request.SizeBytes >= MediaPolicy.MultipartThresholdBytes;
         MultipartUpload? multipartUpload = null;
         Uri? uploadUrl = null;
@@ -935,7 +1044,7 @@ public static class Endpoints
             uploadUrl = await objectStorage.CreateUploadUrlAsync(
                 asset.ObjectKey,
                 asset.DeclaredContentType,
-                UploadUrlLifetime,
+                urlLifetime,
                 cancellationToken);
         }
 
@@ -949,10 +1058,33 @@ public static class Endpoints
             IsMultipart = multipart,
             MultipartUploadId = multipartUpload?.UploadId,
             PartSizeBytes = multipart ? MediaPolicy.MultipartPartSizeBytes : request.SizeBytes,
-            ExpiresAt = DateTimeOffset.UtcNow.Add(UploadUrlLifetime)
+            ExpiresAt = sessionExpiresAt
         };
         dbContext.UploadSessions.Add(session);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch
+        {
+            if (multipartUpload is not null)
+            {
+                try
+                {
+                    await objectStorage.AbortMultipartUploadAsync(
+                        asset.ObjectKey,
+                        multipartUpload.UploadId,
+                        CancellationToken.None);
+                }
+                catch
+                {
+                    // The bucket lifecycle rule is the final safety net if the
+                    // best-effort compensation cannot reach object storage.
+                }
+            }
+
+            throw;
+        }
 
         var partCount = multipart
             ? (int)Math.Ceiling(request.SizeBytes / (double)MediaPolicy.MultipartPartSizeBytes)
@@ -967,6 +1099,7 @@ public static class Endpoints
                 multipartUpload?.UploadId,
                 session.PartSizeBytes,
                 partCount,
+                urlExpiresAt,
                 session.ExpiresAt));
     }
 
@@ -975,10 +1108,14 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         IObjectStorage objectStorage,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var session = await FindUpload(dbContext, context.Workspace.Id, sessionId, cancellationToken);
+
+        await RejectExpiredUploadAsync(session, dbContext, timeProvider, cancellationToken);
 
         if (session.State is UploadState.Completed or UploadState.Aborted or UploadState.Expired)
         {
@@ -988,18 +1125,19 @@ public static class Endpoints
                 "This upload session cannot be resumed.");
         }
 
-        session.ExpiresAt = DateTimeOffset.UtcNow.Add(UploadUrlLifetime);
+        var now = timeProvider.GetUtcNow();
+        var urlLifetime = GetUploadUrlLifetime(now, session.ExpiresAt, policyOptions.Value);
+        var urlExpiresAt = now.Add(urlLifetime);
         Uri? uploadUrl = null;
         if (!session.IsMultipart)
         {
             uploadUrl = await objectStorage.CreateUploadUrlAsync(
                 session.ObjectKey,
                 session.Asset.DeclaredContentType,
-                UploadUrlLifetime,
+                urlLifetime,
                 cancellationToken);
         }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
         var partCount = session.IsMultipart
             ? (int)Math.Ceiling(session.Asset.DeclaredBytes / (double)session.PartSizeBytes)
             : 1;
@@ -1011,6 +1149,7 @@ public static class Endpoints
             session.MultipartUploadId,
             session.PartSizeBytes,
             partCount,
+            urlExpiresAt,
             session.ExpiresAt));
     }
 
@@ -1020,10 +1159,21 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         IObjectStorage objectStorage,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var session = await FindUpload(dbContext, context.Workspace.Id, sessionId, cancellationToken);
+        await RejectExpiredUploadAsync(session, dbContext, timeProvider, cancellationToken);
+        if (session.State is UploadState.Completed or UploadState.Aborted or UploadState.Expired)
+        {
+            throw new ApiProblemException(
+                StatusCodes.Status409Conflict,
+                "upload.not_resumable",
+                "This upload session cannot accept more parts.");
+        }
+
         if (!session.IsMultipart || string.IsNullOrWhiteSpace(session.MultipartUploadId))
         {
             throw new ApiProblemException(
@@ -1041,15 +1191,16 @@ public static class Endpoints
                 "Part number is outside this upload.");
         }
 
-        var expiresAt = DateTimeOffset.UtcNow.Add(UploadUrlLifetime);
+        var now = timeProvider.GetUtcNow();
+        var urlLifetime = GetUploadUrlLifetime(now, session.ExpiresAt, policyOptions.Value);
+        var expiresAt = now.Add(urlLifetime);
         var url = await objectStorage.CreateMultipartPartUploadUrlAsync(
             session.ObjectKey,
             session.MultipartUploadId,
             request.PartNumber,
-            UploadUrlLifetime,
+            urlLifetime,
             cancellationToken);
         session.State = UploadState.Uploading;
-        session.ExpiresAt = expiresAt;
         session.Asset.State = AssetState.Uploading;
         await dbContext.SaveChangesAsync(cancellationToken);
         return Results.Ok(new UploadPartResponse(request.PartNumber, url.ToString(), expiresAt));
@@ -1062,6 +1213,7 @@ public static class Endpoints
         Hook2StreamDbContext dbContext,
         IObjectStorage objectStorage,
         IJobQueue jobQueue,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
@@ -1078,6 +1230,8 @@ public static class Endpoints
                 $"/api/v1/jobs/{existingJob}",
                 new CompleteUploadResponse(session.AssetId, existingJob));
         }
+
+        await RejectExpiredUploadAsync(session, dbContext, timeProvider, cancellationToken);
 
         if (session.State is UploadState.Aborted or UploadState.Expired)
         {
@@ -1120,7 +1274,7 @@ public static class Endpoints
         }
 
         session.State = UploadState.Completed;
-        session.CompletedAt = DateTimeOffset.UtcNow;
+        session.CompletedAt = timeProvider.GetUtcNow();
         session.Asset.State = AssetState.Uploaded;
         dbContext.OutboxMessages.Add(new OutboxMessage
         {
@@ -1145,14 +1299,41 @@ public static class Endpoints
         });
 
         var payload = JsonSerializer.Serialize(new { assetId = session.AssetId });
-        var jobId = await jobQueue.EnqueueAsync(
-            session.WorkspaceId,
-            session.ProjectId,
-            session.AssetId,
-            JobType.MediaIngest,
-            payload,
-            $"media-ingest:{session.AssetId:N}:r{session.Asset.Revision}",
-            cancellationToken);
+        Guid jobId;
+        try
+        {
+            jobId = await jobQueue.EnqueueAsync(
+                session.WorkspaceId,
+                session.ProjectId,
+                session.AssetId,
+                JobType.MediaIngest,
+                payload,
+                $"media-ingest:{session.AssetId:N}:r{session.Asset.Revision}",
+                cancellationToken);
+        }
+        catch
+        {
+            // Multipart completion is an external side effect that precedes the
+            // atomic DB transition. Remove the object if persistence fails so a
+            // completed-but-uncommitted upload cannot be orphaned.
+            try
+            {
+                if (session.IsMultipart && !string.IsNullOrWhiteSpace(session.MultipartUploadId))
+                {
+                    await objectStorage.AbortMultipartUploadAsync(
+                        session.ObjectKey,
+                        session.MultipartUploadId,
+                        CancellationToken.None);
+                }
+                await objectStorage.DeleteAsync(session.ObjectKey, CancellationToken.None);
+            }
+            catch
+            {
+                // Fixed session expiry plus retention cleanup remains the
+                // safety net when compensation cannot reach object storage.
+            }
+            throw;
+        }
         return Results.Accepted(
             $"/api/v1/jobs/{jobId}",
             new CompleteUploadResponse(session.AssetId, jobId));
@@ -1163,6 +1344,8 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         IObjectStorage objectStorage,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
@@ -1174,6 +1357,10 @@ public static class Endpoints
                 "upload.already_completed",
                 "A completed upload cannot be aborted.");
         }
+        if (session.State is UploadState.Aborted or UploadState.Expired)
+        {
+            return Results.NoContent();
+        }
 
         if (session.IsMultipart && !string.IsNullOrWhiteSpace(session.MultipartUploadId))
         {
@@ -1182,16 +1369,46 @@ public static class Endpoints
                 session.MultipartUploadId,
                 cancellationToken);
         }
-        else
-        {
-            await objectStorage.DeleteAsync(session.ObjectKey, cancellationToken);
-        }
+        await objectStorage.DeleteAsync(session.ObjectKey, cancellationToken);
 
+        var now = timeProvider.GetUtcNow();
+        var cleanupAvailableAt = now.AddMinutes(policyOptions.Value.DeletionFenceMinutes);
         session.State = UploadState.Aborted;
-        session.AbortedAt = DateTimeOffset.UtcNow;
+        session.AbortedAt = now;
         session.Asset.State = AssetState.Rejected;
         session.Asset.FailureCode = "upload.aborted";
         session.Asset.FailureMessage = "Upload cancelled by the user.";
+        var cleanupJob = new Job
+        {
+            WorkspaceId = session.WorkspaceId,
+            ProjectId = session.ProjectId,
+            AssetId = session.AssetId,
+            Type = JobType.AssetCleanup,
+            RequiredCapability = JobRoutingRegistry.Control,
+            HandlerVersion = "v1",
+            PayloadSchemaVersion = 1,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                projectId = session.ProjectId,
+                uploadSessionId = session.Id,
+                notBefore = cleanupAvailableAt
+            }),
+            IdempotencyKey = $"retention:upload:{session.Id:N}",
+            State = JobState.Queued,
+            AvailableAt = cleanupAvailableAt
+        };
+        dbContext.Jobs.Add(cleanupJob);
+        dbContext.JobEvents.Add(new JobEvent
+        {
+            JobId = cleanupJob.Id,
+            EventType = "queued",
+            DataJson = JsonSerializer.Serialize(new
+            {
+                cleanupJob.RequiredCapability,
+                cleanupJob.AvailableAt,
+                reason = "upload.aborted"
+            })
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
         return Results.NoContent();
     }
@@ -1202,11 +1419,13 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         HttpRequest request,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var expectedVersion = ApiEndpointHelpers.RequireIfMatch(request);
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
-        _ = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
+        var project = await FindProject(dbContext, context.Workspace.Id, projectId, false, cancellationToken);
         var asset = await dbContext.MediaAssets
             .SingleOrDefaultAsync(
                 value => value.ProjectId == projectId && value.Id == assetId,
@@ -1214,11 +1433,62 @@ public static class Endpoints
             ?? throw NotFound();
         ApiEndpointHelpers.EnsureVersion(expectedVersion, asset.Version);
 
-        asset.State = AssetState.Deleted;
-        asset.IsActive = false;
-        asset.DeletedAt = DateTimeOffset.UtcNow;
+        var now = timeProvider.GetUtcNow();
+        await AssetDeletionCoordinator.FenceAsync(
+            dbContext,
+            asset,
+            now,
+            "asset.deleted",
+            cancellationToken);
+
+        if (project.FlowKind == FlowKind.Mp3First)
+        {
+            dbContext.OutboxMessages.Add(new OutboxMessage
+            {
+                WorkspaceId = project.WorkspaceId,
+                AggregateId = project.Id,
+                Destination = "pipeline",
+                MessageType = "pipeline.reconcile",
+                DedupeKey = $"pipeline.reconcile:{project.Id:N}:asset-deleted:{asset.Id:N}:{Guid.CreateVersion7():N}",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    projectId = project.Id,
+                    assetId = asset.Id,
+                    reason = "asset.deleted"
+                })
+            });
+        }
+        var cleanupAvailableAt = now.AddMinutes(policyOptions.Value.DeletionFenceMinutes);
+        var cleanupJob = new Job
+        {
+            WorkspaceId = context.Workspace.Id,
+            ProjectId = projectId,
+            AssetId = asset.Id,
+            Type = JobType.AssetCleanup,
+            RequiredCapability = JobRoutingRegistry.GetRequiredCapability(JobType.AssetCleanup),
+            HandlerVersion = "v1",
+            PayloadSchemaVersion = 1,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                projectId,
+                assetId = asset.Id,
+                notBefore = cleanupAvailableAt
+            }),
+            IdempotencyKey = $"asset-cleanup:{asset.Id:N}",
+            State = JobState.Queued,
+            AvailableAt = cleanupAvailableAt
+        };
+        dbContext.Jobs.Add(cleanupJob);
+        dbContext.JobEvents.Add(new JobEvent
+        {
+            JobId = cleanupJob.Id,
+            EventType = "queued",
+            DataJson = "{\"requiredCapability\":\"control\"}"
+        });
         await dbContext.SaveChangesAsync(cancellationToken);
-        return Results.NoContent();
+        return Results.Accepted(
+            $"/api/v1/jobs/{cleanupJob.Id}",
+            new AssetDeletionResponse(asset.Id, cleanupJob.Id));
     }
 
     private static async Task<IResult> ReorderAssets(
@@ -1376,8 +1646,56 @@ public static class Endpoints
             .Include(value => value.Asset)
             .SingleOrDefaultAsync(
                 value => value.Id == sessionId && value.WorkspaceId == workspaceId,
-                cancellationToken)
+            cancellationToken)
         ?? throw NotFound();
+
+    private static async Task RejectExpiredUploadAsync(
+        UploadSession session,
+        Hook2StreamDbContext dbContext,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        var now = timeProvider.GetUtcNow();
+        if ((session.State is UploadState.Initiated or UploadState.Uploading) && session.ExpiresAt <= now)
+        {
+            session.State = UploadState.Expired;
+            session.Asset.State = AssetState.Rejected;
+            session.Asset.IsActive = false;
+            session.Asset.FailureCode = "upload.session_expired";
+            session.Asset.FailureMessage = "The upload session expired before it was completed.";
+            dbContext.ProjectEvents.Add(new ProjectEvent
+            {
+                WorkspaceId = session.WorkspaceId,
+                ProjectId = session.ProjectId,
+                EventType = "upload.expired",
+                DataJson = JsonSerializer.Serialize(new
+                {
+                    projectId = session.ProjectId,
+                    uploadSessionId = session.Id,
+                    assetId = session.AssetId
+                })
+            });
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        if (session.State == UploadState.Expired)
+        {
+            throw new ApiProblemException(
+                StatusCodes.Status410Gone,
+                "upload.session_expired",
+                "This upload session has expired. Start a new upload.");
+        }
+    }
+
+    private static TimeSpan GetUploadUrlLifetime(
+        DateTimeOffset now,
+        DateTimeOffset sessionExpiresAt,
+        OperationalPolicyOptions options)
+    {
+        var remaining = sessionExpiresAt - now;
+        var configured = TimeSpan.FromMinutes(options.UploadUrlMinutes);
+        return remaining < configured ? remaining : configured;
+    }
 
     private static ApiProblemException NotFound() =>
         new(

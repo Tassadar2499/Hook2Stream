@@ -26,10 +26,3 @@ export function buildOAuthLoginUrl(returnPath?: string) {
   const query = returnPath ? `?returnPath=${encodeURIComponent(returnPath)}` : "";
   return `${apiBaseUrl}/api/v1/auth/login${query}`;
 }
-
-export function buildOAuthLogoutUrl() {
-  const apiBaseUrl =
-    process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
-    "http://localhost:5000";
-  return `${apiBaseUrl}/api/v1/auth/logout`;
-}

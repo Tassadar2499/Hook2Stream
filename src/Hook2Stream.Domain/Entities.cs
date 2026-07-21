@@ -64,6 +64,7 @@ public sealed class ReleaseProject : Entity
     public DateOnly? CampaignStartDate { get; set; }
     public ProjectState State { get; set; } = ProjectState.Draft;
     public bool IsArchived { get; set; }
+    public ProjectState? StateBeforeArchive { get; set; }
     public long BrandKitVersion { get; set; }
     public DateTimeOffset? SetupCompletedAt { get; set; }
     public Guid? CurrentTranscriptRevisionId { get; set; }
@@ -77,14 +78,20 @@ public sealed class ReleaseProject : Entity
 
     public void Archive()
     {
+        if (IsArchived) return;
+        StateBeforeArchive = State;
         IsArchived = true;
         State = ProjectState.Archived;
     }
 
     public void Restore()
     {
+        if (!IsArchived) return;
         IsArchived = false;
-        State = ProjectState.Draft;
+        State = StateBeforeArchive is { } previous && previous != ProjectState.Archived
+            ? previous
+            : ProjectState.Draft;
+        StateBeforeArchive = null;
     }
 }
 
@@ -225,6 +232,7 @@ public sealed class PipelineStage : Entity
     public string? BlockerCode { get; set; }
     public string? ErrorCode { get; set; }
     public Guid? CurrentJobId { get; set; }
+    public Guid? CurrentRenderBatchId { get; set; }
 }
 
 public sealed class ProjectEvent : Entity
@@ -424,6 +432,7 @@ public sealed class RenderBatch : Entity
 {
     public Guid WorkspaceId { get; set; }
     public Guid ProjectId { get; set; }
+    public Guid? PipelineRunId { get; set; }
     public Guid EntitlementId { get; set; }
     public RenderBatchState State { get; set; } = RenderBatchState.Queued;
     public RenderRequestKind Kind { get; set; } = RenderRequestKind.Initial;

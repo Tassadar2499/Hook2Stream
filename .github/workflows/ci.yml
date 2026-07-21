@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18.3
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HOOK2STREAM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/web/package-lock.json
+
+      - run: dotnet restore src/Hook2Stream.slnx
+      - run: npm ci --prefix src/web
+      - run: src/ci/verify.sh
+
+      - run: npx --prefix src/web playwright install --with-deps chromium
+      - run: npm run test:e2e --prefix src/web
+
+  containers:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: src/Hook2Stream.Api/Dockerfile
+            runtime: dotnet
+            build_args: ""
+          - name: worker
+            dockerfile: src/Hook2Stream.Worker/Dockerfile
+            runtime: dotnet
+            build_args: ""
+          - name: bootstrapper
+            dockerfile: src/Hook2Stream.Bootstrapper/Dockerfile
+            runtime: dotnet
+            build_args: ""
+          - name: web
+            dockerfile: src/web/Dockerfile
+            runtime: node
+            build_args: --build-arg NEXT_PUBLIC_API_BASE_URL=https://api.example.test --build-arg NEXT_PUBLIC_AUTH_MODE=oauth
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build ${{ matrix.build_args }} --file "${{ matrix.dockerfile }}" --tag "hook2stream-${{ matrix.name }}:ci" .
+      - if: matrix.runtime == 'dotnet'
+        run: docker run --rm --entrypoint dotnet "hook2stream-${{ matrix.name }}:ci" --list-runtimes | grep -q Microsoft.AspNetCore.App
+      - if: matrix.runtime == 'node'
+        run: docker run --rm --entrypoint node "hook2stream-${{ matrix.name }}:ci" --version

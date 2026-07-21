@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
@@ -31,13 +31,41 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [importText, setImportText] = useState("");
+  const [phraseDraftDirty, setPhraseDraftDirty] = useState(false);
+  const [importTextDirty, setImportTextDirty] = useState(false);
+  const [draftSource, setDraftSource] = useState<"manual" | "imported">("manual");
+  const phraseDraftDirtyRef = useRef(false);
+  const importTextDirtyRef = useRef(false);
+  const draftDirtyRef = useRef(false);
+
+  function markPhraseDraftDirty(dirty: boolean) {
+    phraseDraftDirtyRef.current = dirty;
+    draftDirtyRef.current = dirty || importTextDirtyRef.current;
+    setPhraseDraftDirty(dirty);
+  }
+
+  function markImportTextDirty(dirty: boolean) {
+    importTextDirtyRef.current = dirty;
+    draftDirtyRef.current = phraseDraftDirtyRef.current || dirty;
+    setImportTextDirty(dirty);
+  }
+
+  function clearDraftDirty() {
+    phraseDraftDirtyRef.current = false;
+    importTextDirtyRef.current = false;
+    draftDirtyRef.current = false;
+    setPhraseDraftDirty(false);
+    setImportTextDirty(false);
+  }
 
   const load = useCallback(async () => {
     const token = await getToken();
     if (!token) throw new Error("No session token.");
     const releaseResult = await apiFetch<Release>(`/api/v1/releases/${projectId}`, token);
-    setRelease(releaseResult.data);
-    setProjectEtag(releaseResult.etag ?? `"${releaseResult.data.version}"`);
+    if (!draftDirtyRef.current) {
+      setRelease(releaseResult.data);
+      setProjectEtag(releaseResult.etag ?? `"${releaseResult.data.version}"`);
+    }
     const audio = releaseResult.data.assets.find(
       (asset) => asset.kind === "audio" && asset.isActive,
     );
@@ -55,13 +83,19 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
         `/api/v1/releases/${projectId}/transcript`,
         token,
       );
-      setTranscript(result.data);
-      setPhrases(result.data.phrases);
-      setEtag(result.etag ?? `"${result.data.version}"`);
+      if (!draftDirtyRef.current) {
+        setTranscript(result.data);
+        setPhrases(result.data.phrases);
+        setEtag(result.etag ?? `"${result.data.version}"`);
+        setDraftSource("manual");
+      }
     } catch (caught) {
       if (!(caught instanceof ApiRequestError && caught.status === 404)) throw caught;
-      setTranscript(undefined);
-      setPhrases([]);
+      if (!draftDirtyRef.current) {
+        setTranscript(undefined);
+        setPhrases([]);
+        setEtag(undefined);
+      }
     }
   }, [getToken, projectId]);
 
@@ -83,18 +117,26 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
     projectId,
     getToken,
     load,
-    isLoaded && isSignedIn && (!transcript || transcript.state === "processing"),
+    isLoaded &&
+      isSignedIn &&
+      !phraseDraftDirty &&
+      !importTextDirty &&
+      (!transcript || transcript.state === "processing"),
   );
 
-  const validation = useMemo(() => validatePhrases(phrases), [phrases]);
+  const isInstrumental = transcript?.isInstrumental ?? release?.isInstrumental ?? false;
+  const validation = useMemo(
+    () => validatePhrases(phrases, isInstrumental),
+    [isInstrumental, phrases],
+  );
   const unresolvedWarnings = phrases.filter(
     (phrase) => (phrase.confidence ?? 1) < 0.75 && !phrase.warningAcknowledged,
   ).length;
-  const transcriptDirty = transcript
-    ? JSON.stringify(phrases) !== JSON.stringify(transcript.phrases)
-    : false;
+  const draftDirty = phraseDraftDirty || importTextDirty;
+  const hasEditableDraft = Boolean(transcript) || phrases.length > 0 || (isInstrumental && draftDirty);
 
   function updatePhrase(id: string, patch: Partial<TranscriptPhrase>) {
+    markPhraseDraftDirty(true);
     setPhrases((current) =>
       current.map((phrase) => (phrase.id === id ? { ...phrase, ...patch } : phrase)),
     );
@@ -119,6 +161,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
       startMilliseconds: middle,
       words: undefined,
     };
+    markPhraseDraftDirty(true);
     setPhrases(
       [...phrases.slice(0, index), first, second, ...phrases.slice(index + 1)].map(
         (item, order) => ({ ...item, order }),
@@ -139,6 +182,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
         current.warningAcknowledged && next.warningAcknowledged,
       words: undefined,
     };
+    markPhraseDraftDirty(true);
     setPhrases(
       [...phrases.slice(0, index), merged, ...phrases.slice(index + 2)].map(
         (item, order) => ({ ...item, order }),
@@ -160,6 +204,8 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
       ),
       lines.length * 1500,
     );
+    setDraftSource("imported");
+    markPhraseDraftDirty(true);
     setPhrases(
       lines.map((text, order) => ({
         id: globalThis.crypto.randomUUID(),
@@ -177,11 +223,39 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (file) setImportText(await file.text());
+    if (file) {
+      setImportText(await file.text());
+      markImportTextDirty(true);
+    }
   }
 
-  async function save(source = "manual") {
-    if (!transcript || !projectEtag || validation.length > 0) return;
+  function createManualDraft() {
+    const duration = Math.max(
+      Number(
+        release?.assets.find((asset) => asset.kind === "audio")?.durationMilliseconds ??
+          30_000,
+      ),
+      1_000,
+    );
+    setPhrases([
+      {
+        id: globalThis.crypto.randomUUID(),
+        order: 0,
+        text: "",
+        startMilliseconds: 0,
+        endMilliseconds: duration,
+        confidence: 1,
+        warningAcknowledged: true,
+      },
+    ]);
+    setDraftSource("manual");
+    markPhraseDraftDirty(true);
+    setNotice("Manual transcript draft created. Add the first phrase and adjust its timing.");
+  }
+
+  async function save() {
+    const isNewInstrumental = !transcript && isInstrumental;
+    if (!projectEtag || validation.length > 0 || (!phraseDraftDirty && !isNewInstrumental)) return;
     setSaving(true);
     setError(undefined);
     setNotice(undefined);
@@ -197,9 +271,9 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
             "Idempotency-Key": createIdempotencyKey("transcript-revision"),
           },
           body: JSON.stringify({
-            source,
-            language: transcript.language,
-            isInstrumental: transcript.isInstrumental,
+            source: draftSource,
+            language: transcript?.language ?? release?.language ?? "en",
+            isInstrumental,
             phrases,
           }),
         },
@@ -207,6 +281,9 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
       setTranscript(result.data);
       setPhrases(result.data.phrases);
       setEtag(result.etag ?? `"${result.data.version}"`);
+      setImportText("");
+      setDraftSource("manual");
+      clearDraftDirty();
       setNotice("Transcript revision saved. Approval is still required.");
       await load();
     } catch (caught) {
@@ -217,7 +294,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
   }
 
   async function approve() {
-    if (!transcript || transcriptDirty || validation.length > 0 || unresolvedWarnings > 0) return;
+    if (!transcript || draftDirty || validation.length > 0 || unresolvedWarnings > 0) return;
     setSaving(true);
     setError(undefined);
     try {
@@ -249,7 +326,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
         headers: { "Idempotency-Key": createIdempotencyKey("transcript-regeneration") },
         body: JSON.stringify({ language: transcript?.language ?? release?.language ?? "en" }),
       });
-      setNotice("A new local transcription job has been queued.");
+      setNotice("A new transcription job has been queued.");
     } catch (caught) {
       setError(messageFor(caught, "Could not restart transcription."));
     } finally {
@@ -297,88 +374,130 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
 
       {loading ? (
         <div className="mt-7"><StatusPanel title="Loading transcript" message="Reading the current revision…" tone="neutral" /></div>
-      ) : !transcript ? (
-        <section className="paper-card mt-7 p-7">
-          <StatusPanel title="Transcription is still running" message="You may leave this page. The workflow will recover from the server." tone="neutral" />
-          <button className="button-secondary mt-5" type="button" onClick={regenerate} disabled={saving}>Retry transcription</button>
-        </section>
       ) : (
         <>
-          <section className="paper-card mt-7 p-6 sm:p-8">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="eyebrow text-[var(--violet)]">Review queue</p>
-                <h2 className="display mt-2 text-4xl">{unresolvedWarnings} issues left</h2>
+          {!transcript ? (
+            <section className="paper-card mt-7 p-7">
+              <StatusPanel
+                title="No transcript revision yet"
+                message="Transcription may still be running. You can retry it, start a manual transcript, or import prepared lyrics now."
+                tone="neutral"
+              />
+              <div className="mt-5 flex flex-wrap gap-2">
+                <button className="button-secondary" type="button" onClick={regenerate} disabled={saving}>
+                  Retry transcription
+                </button>
+                {!isInstrumental && !hasEditableDraft ? (
+                  <button className="button-primary" type="button" onClick={createManualDraft} disabled={saving}>
+                    Start manual transcript
+                  </button>
+                ) : null}
+                {isInstrumental ? (
+                  <button className="button-primary" type="button" onClick={() => save()} disabled={saving || !projectEtag}>
+                    Save instrumental transcript
+                  </button>
+                ) : null}
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button className="button-quiet" type="button" onClick={regenerate} disabled={saving}>Run transcription again</button>
-                <button className="button-secondary" type="button" onClick={() => save()} disabled={saving || validation.length > 0}>Save revision</button>
-                <button className="button-primary" type="button" onClick={approve} disabled={saving || transcriptDirty || validation.length > 0 || unresolvedWarnings > 0}>{transcriptDirty ? "Save before approval" : "Approve transcript"}</button>
-              </div>
-            </div>
-            {validation.length > 0 ? (
-              <ul className="mt-5 rounded-2xl bg-red-100 p-4 text-sm font-bold text-red-950" role="alert">
-                {validation.map((message) => <li key={message}>{message}</li>)}
-              </ul>
-            ) : null}
-            <div className="mt-6 grid gap-3">
-              {phrases.map((phrase, index) => {
-                const flagged = (phrase.confidence ?? 1) < 0.75;
-                return (
-                  <article key={phrase.id} className={`rounded-2xl border p-4 ${flagged && !phrase.warningAcknowledged ? "border-amber-600 bg-amber-50" : "border-[var(--line)] bg-white/55"}`}>
-                    <div className="grid gap-3 lg:grid-cols-[5rem_5rem_1fr_auto] lg:items-start">
-                      <label className="field">
-                        <span>Start, s</span>
-                        <input type="number" min={0} step={0.01} value={(phrase.startMilliseconds / 1000).toFixed(2)} onChange={(event) => updatePhrase(phrase.id, { startMilliseconds: Math.round(Number(event.target.value) * 1000) })} />
-                      </label>
-                      <label className="field">
-                        <span>End, s</span>
-                        <input type="number" min={0} step={0.01} value={(phrase.endMilliseconds / 1000).toFixed(2)} onChange={(event) => updatePhrase(phrase.id, { endMilliseconds: Math.round(Number(event.target.value) * 1000) })} />
-                      </label>
-                      <label className="field">
-                        <span>Phrase {index + 1}</span>
-                        <textarea className="min-h-20" value={phrase.text} onChange={(event) => updatePhrase(phrase.id, { text: event.target.value, words: undefined })} />
-                      </label>
-                      <div className="flex flex-wrap gap-2 lg:pt-6">
-                        <button className="button-quiet" type="button" onClick={() => splitPhrase(index)} disabled={phrase.text.trim().split(/\s+/).length < 2}>Split</button>
-                        <button className="button-quiet" type="button" onClick={() => mergePhrase(index)} disabled={index === phrases.length - 1}>Merge next</button>
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm">
-                      <span className="font-bold">Confidence {Math.round((phrase.confidence ?? 1) * 100)}%{flagged ? " · Review required" : ""}</span>
-                      {flagged ? (
-                        <label className="flex items-center gap-2 font-black">
-                          <input type="checkbox" checked={phrase.warningAcknowledged} onChange={(event) => updatePhrase(phrase.id, { warningAcknowledged: event.target.checked })} />
-                          Looks correct
-                        </label>
-                      ) : null}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
+            </section>
+          ) : null}
 
-          <details className="paper-card mt-6 p-6 sm:p-8">
-            <summary className="cursor-pointer font-black">Use prepared lyrics instead</summary>
-            <label className="field mt-5">
-              <span>One phrase per line</span>
-              <textarea value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="Paste final lyrics…" />
-            </label>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <label className="button-quiet cursor-pointer"><input className="sr-only" type="file" accept=".txt,text/plain" onChange={importFile} />Choose UTF-8 .txt</label>
-              <button className="button-secondary" type="button" onClick={importPreparedLyrics} disabled={!importText.trim()}>Create timed draft</button>
-              <button className="button-primary" type="button" onClick={() => save("imported")} disabled={saving || validation.length > 0}>Save imported revision</button>
-            </div>
-          </details>
+          {hasEditableDraft ? (
+            <section className="paper-card mt-7 p-6 sm:p-8">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <p className="eyebrow text-[var(--violet)]">Review queue</p>
+                  <h2 className="display mt-2 text-4xl">
+                    {transcript ? `${unresolvedWarnings} issues left` : "Manual draft"}
+                  </h2>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button className="button-quiet" type="button" onClick={regenerate} disabled={saving}>Run transcription again</button>
+                  <button className="button-secondary" type="button" onClick={() => save()} disabled={saving || !phraseDraftDirty || validation.length > 0}>Save revision</button>
+                  {transcript ? (
+                    <button className="button-primary" type="button" onClick={approve} disabled={saving || draftDirty || validation.length > 0 || unresolvedWarnings > 0}>{draftDirty ? "Save before approval" : "Approve transcript"}</button>
+                  ) : null}
+                </div>
+              </div>
+              {validation.length > 0 ? (
+                <ul className="mt-5 rounded-2xl bg-red-100 p-4 text-sm font-bold text-red-950" role="alert">
+                  {validation.map((message) => <li key={message}>{message}</li>)}
+                </ul>
+              ) : null}
+              <div className="mt-6 grid gap-3">
+                {phrases.map((phrase, index) => {
+                  const flagged = (phrase.confidence ?? 1) < 0.75;
+                  return (
+                    <article key={phrase.id} className={`rounded-2xl border p-4 ${flagged && !phrase.warningAcknowledged ? "border-amber-600 bg-amber-50" : "border-[var(--line)] bg-white/55"}`}>
+                      <div className="grid gap-3 lg:grid-cols-[5rem_5rem_1fr_auto] lg:items-start">
+                        <label className="field">
+                          <span>Start, s</span>
+                          <input type="number" min={0} step={0.01} value={(phrase.startMilliseconds / 1000).toFixed(2)} onChange={(event) => updatePhrase(phrase.id, { startMilliseconds: Math.round(Number(event.target.value) * 1000) })} />
+                        </label>
+                        <label className="field">
+                          <span>End, s</span>
+                          <input type="number" min={0} step={0.01} value={(phrase.endMilliseconds / 1000).toFixed(2)} onChange={(event) => updatePhrase(phrase.id, { endMilliseconds: Math.round(Number(event.target.value) * 1000) })} />
+                        </label>
+                        <label className="field">
+                          <span>Phrase {index + 1}</span>
+                          <textarea className="min-h-20" value={phrase.text} onChange={(event) => updatePhrase(phrase.id, { text: event.target.value, words: undefined })} />
+                        </label>
+                        <div className="flex flex-wrap gap-2 lg:pt-6">
+                          <button className="button-quiet" type="button" onClick={() => splitPhrase(index)} disabled={phrase.text.trim().split(/\s+/).length < 2}>Split</button>
+                          <button className="button-quiet" type="button" onClick={() => mergePhrase(index)} disabled={index === phrases.length - 1}>Merge next</button>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm">
+                        <span className="font-bold">Confidence {Math.round((phrase.confidence ?? 1) * 100)}%{flagged ? " · Review required" : ""}</span>
+                        {flagged ? (
+                          <label className="flex items-center gap-2 font-black">
+                            <input type="checkbox" checked={phrase.warningAcknowledged} onChange={(event) => updatePhrase(phrase.id, { warningAcknowledged: event.target.checked })} />
+                            Looks correct
+                          </label>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
+
+          {!isInstrumental ? (
+            <details className="paper-card mt-6 p-6 sm:p-8" open={!transcript}>
+              <summary className="cursor-pointer font-black">Use prepared lyrics instead</summary>
+              <label className="field mt-5">
+                <span>One phrase per line</span>
+                <textarea
+                  value={importText}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setImportText(value);
+                    markImportTextDirty(Boolean(value));
+                  }}
+                  placeholder="Paste final lyrics…"
+                />
+              </label>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <label className="button-quiet cursor-pointer"><input className="sr-only" type="file" accept=".txt,text/plain" onChange={importFile} />Choose UTF-8 .txt</label>
+                <button className="button-secondary" type="button" onClick={importPreparedLyrics} disabled={!importText.trim()}>Create timed draft</button>
+                <button className="button-primary" type="button" onClick={() => save()} disabled={saving || draftSource !== "imported" || !phraseDraftDirty || phrases.length === 0 || validation.length > 0}>Save imported revision</button>
+              </div>
+            </details>
+          ) : null}
         </>
       )}
     </AppShell>
   );
 }
 
-function validatePhrases(phrases: TranscriptPhrase[]) {
+function validatePhrases(phrases: TranscriptPhrase[], isInstrumental: boolean) {
   const errors: string[] = [];
+  if (!isInstrumental && phrases.length === 0) {
+    errors.push("Add at least one phrase before saving.");
+  }
+  if (isInstrumental && phrases.length > 0) {
+    errors.push("Instrumental transcripts cannot contain phrases.");
+  }
   phrases.forEach((phrase, index) => {
     if (!phrase.text.trim()) errors.push(`Phrase ${index + 1} is empty.`);
     if (phrase.startMilliseconds < 0 || phrase.endMilliseconds <= phrase.startMilliseconds) {

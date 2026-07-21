@@ -136,20 +136,40 @@ public sealed record UploadSessionResponse(
     string? MultipartUploadId,
     long PartSizeBytes,
     int PartCount,
-    DateTimeOffset ExpiresAt)
+    DateTimeOffset UrlExpiresAt,
+    DateTimeOffset SessionExpiresAt)
 {
     public Guid Id => SessionId;
+
+    // Kept as a transition alias for clients generated from the earlier
+    // contract. New clients must distinguish the URL and session lifetimes.
+    public DateTimeOffset ExpiresAt => UrlExpiresAt;
 }
 
 public sealed record UploadPartRequest(int PartNumber);
 
-public sealed record UploadPartResponse(int PartNumber, string UploadUrl, DateTimeOffset ExpiresAt);
+public sealed record UploadPartResponse(
+    int PartNumber,
+    string UploadUrl,
+    DateTimeOffset UrlExpiresAt)
+{
+    public DateTimeOffset ExpiresAt => UrlExpiresAt;
+}
 
 public sealed record CompletedPartRequest(int PartNumber, string ETag);
 
 public sealed record CompleteUploadRequest(IReadOnlyList<CompletedPartRequest> Parts);
 
 public sealed record CompleteUploadResponse(Guid AssetId, Guid JobId);
+
+public sealed record DeletionStatusResponse(
+    Guid DeletionId,
+    Guid ProjectId,
+    DateTimeOffset DeletedAt,
+    DateTimeOffset PurgeDueAt,
+    string State);
+
+public sealed record AssetDeletionResponse(Guid AssetId, Guid CleanupJobId);
 
 public sealed record AssetResponse(
     Guid Id,

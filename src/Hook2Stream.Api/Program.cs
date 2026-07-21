@@ -1,23 +1,26 @@
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
 using Hook2Stream.Api;
 using Hook2Stream.Api.Authentication;
 using Hook2Stream.Infrastructure;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
 builder.Services.AddHook2StreamInfrastructure(builder.Configuration, builder.Environment);
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer<OpenApiSecurityTransformers>();
+    options.AddOperationTransformer<OpenApiSecurityTransformers>();
+});
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<ApiExceptionHandler>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<CurrentUserService>();
+builder.Services.AddSingleton(TimeProvider.System);
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -27,10 +30,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.Configure<GoogleOAuthOptions>(
     builder.Configuration.GetSection(GoogleOAuthOptions.SectionName));
-builder.Services.Configure<JwtIssuerOptions>(
-    builder.Configuration.GetSection(JwtIssuerOptions.SectionName));
-builder.Services.AddSingleton<IApplicationJwtIssuer, ApplicationJwtIssuer>();
-builder.Services.AddSingleton<OAuthStateProtector>();
+builder.Services.AddSingleton<OAuthCookieManager>();
+builder.Services.AddScoped<OAuthSessionService>();
 builder.Services.AddHttpClient<IGoogleOAuthClient, GoogleOAuthClient>();
 
 var authentication = builder.Configuration
@@ -65,34 +66,21 @@ if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.LocalMod
 }
 else if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.OAuthMode, StringComparison.OrdinalIgnoreCase))
 {
-    var jwt = builder.Configuration.GetSection(JwtIssuerOptions.SectionName)
-        .Get<JwtIssuerOptions>() ?? new JwtIssuerOptions();
-    if (!jwt.IsValid)
+    var google = builder.Configuration.GetSection(GoogleOAuthOptions.SectionName)
+        .Get<GoogleOAuthOptions>() ?? new GoogleOAuthOptions();
+    if (!builder.Environment.IsDevelopment() &&
+        !builder.Environment.IsEnvironment("Testing") &&
+        (!google.IsConfigured || !google.HasValidProductionOrigins))
     {
         throw new InvalidOperationException(
-            "Jwt:SigningKey must be configured with at least 32 characters when Auth:Mode is OAuth.");
+            "Google OAuth requires an HTTPS PublicApiBaseUrl and, when configured, an HTTPS PublicWebReturnBaseUrl on the same public host outside Development.");
     }
 
     builder.Services
-        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-        .AddJwtBearer(options =>
-        {
-            options.MapInboundClaims = false;
-            options.TokenValidationParameters = new TokenValidationParameters
-            {
-                ValidateIssuer = true,
-                ValidIssuer = jwt.Issuer,
-                ValidateAudience = true,
-                ValidAudience = jwt.Audience,
-                ValidateIssuerSigningKey = true,
-                ValidateLifetime = true,
-                RequireExpirationTime = true,
-                RequireSignedTokens = true,
-                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SigningKey)),
-                ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
-                ClockSkew = TimeSpan.FromMinutes(1)
-            };
-        });
+        .AddAuthentication(OAuthSessionAuthenticationHandler.SchemeName)
+        .AddScheme<AuthenticationSchemeOptions, OAuthSessionAuthenticationHandler>(
+            OAuthSessionAuthenticationHandler.SchemeName,
+            _ => { });
 }
 else
 {
@@ -110,6 +98,7 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(origins)
             .AllowAnyHeader()
             .AllowAnyMethod()
+            .AllowCredentials()
             .WithExposedHeaders("ETag", "Location");
     });
 });
@@ -140,6 +129,7 @@ var app = builder.Build();
 app.UseExceptionHandler();
 app.UseCors();
 app.UseAuthentication();
+app.UseMiddleware<OAuthCsrfMiddleware>();
 app.UseRateLimiter();
 app.UseAuthorization();
 

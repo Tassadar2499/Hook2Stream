@@ -13,3 +13,5 @@ Pinned production routes:
 OpenRouter video generation is intentionally disabled: its current API cannot be used with Zero Data Retention. The worker records hashes, model/provider IDs, generation IDs, usage and safe failure codes, but never logs raw prompts, lyrics, audio/base64, presigned URLs or credentials.
 
 `Fixture` mode is allowed only in development and automated tests. Production should use `OpenRouter` for transcription/artwork/campaign and `Deterministic` for analysis/rendering. The legacy `ExternalProcess` adapter remains a compatibility seam, not the supported MVP deployment path.
+
+The example selects the `control` pool because that is the only pool that loads OpenRouter. Deploy the same worker image separately for `media`, `analysis`, `control`, `render`, and `export`, overriding `Worker__Capabilities__0` with exactly one of those values for each deployment. The old `artwork` and `campaign` capability names are no longer valid; both belong to `control`.

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -158,7 +159,7 @@ public sealed class RightsAttestationReadTests
                 ProjectId = projectId,
                 Type = JobType.FinalRender,
                 State = JobState.Running,
-                RequiredCapability = "video",
+                RequiredCapability = JobRoutingRegistry.Render,
                 PayloadJson = "{}",
                 AttemptCount = 1,
                 LeaseOwner = "rights-test-worker",
@@ -180,7 +181,7 @@ public sealed class RightsAttestationReadTests
                 ProjectId = projectId,
                 Type = JobType.ExportBundle,
                 State = JobState.Queued,
-                RequiredCapability = "export",
+                RequiredCapability = JobRoutingRegistry.Export,
                 PayloadJson = "{}"
             });
             var visualIngestJob = new Job
@@ -191,7 +192,7 @@ public sealed class RightsAttestationReadTests
                 AssetId = processingVisual.Id,
                 Type = JobType.MediaIngest,
                 State = JobState.Running,
-                RequiredCapability = "media",
+                RequiredCapability = JobRoutingRegistry.Media,
                 PayloadJson = "{}",
                 AttemptCount = 1,
                 LeaseOwner = "rights-test-worker",
@@ -344,7 +345,7 @@ public sealed class RightsAttestationReadTests
                     AssetId = audioAssetId,
                     Type = JobType.Transcription,
                     State = JobState.Running,
-                    RequiredCapability = "analysis",
+                    RequiredCapability = JobRoutingRegistry.Control,
                     HandlerVersion = "openrouter-stt-v1",
                     PayloadJson = "{}",
                     AttemptCount = 1,
@@ -358,7 +359,7 @@ public sealed class RightsAttestationReadTests
                     ProjectId = projectId,
                     Type = JobType.ArtworkGeneration,
                     State = JobState.Queued,
-                    RequiredCapability = "artwork",
+                    RequiredCapability = JobRoutingRegistry.Control,
                     HandlerVersion = "openrouter-image-v1",
                     PayloadJson = "{}"
                 },
@@ -368,7 +369,7 @@ public sealed class RightsAttestationReadTests
                     ProjectId = projectId,
                     Type = JobType.CampaignGeneration,
                     State = JobState.Queued,
-                    RequiredCapability = "campaign",
+                    RequiredCapability = JobRoutingRegistry.Control,
                     HandlerVersion = "openrouter-campaign-v1",
                     PayloadJson = "{}"
                 }

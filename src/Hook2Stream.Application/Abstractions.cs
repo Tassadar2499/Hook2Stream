@@ -8,6 +8,14 @@ public sealed record MultipartUpload(string UploadId);
 
 public sealed record MultipartPart(int PartNumber, string ETag);
 
+/// <summary>
+/// A server-derived storage scope. Callers provide identifiers, never object-key
+/// prefixes, so a deletion cannot escape the intended workspace and project.
+/// </summary>
+public sealed record ProjectStorageScope(Guid WorkspaceId, Guid ProjectId);
+
+public sealed record AssetStorageScope(Guid WorkspaceId, Guid ProjectId, Guid AssetId);
+
 public interface IObjectStorage
 {
     Task EnsureBucketAsync(CancellationToken cancellationToken);
@@ -47,6 +55,12 @@ public interface IObjectStorage
         string contentType,
         CancellationToken cancellationToken);
     Task DeleteAsync(string objectKey, CancellationToken cancellationToken);
+    Task DeleteProjectObjectsAsync(
+        ProjectStorageScope scope,
+        CancellationToken cancellationToken);
+    Task DeleteAssetObjectsAsync(
+        AssetStorageScope scope,
+        CancellationToken cancellationToken);
 }
 
 public sealed record LeasedJob(
@@ -78,7 +92,8 @@ public sealed record JobEnqueueRequest(
     string? InputFingerprint = null,
     int PayloadSchemaVersion = 1,
     Guid? PipelineRunId = null,
-    string? PipelineStage = null);
+    string? PipelineStage = null,
+    DateTimeOffset? AvailableAt = null);
 
 public interface IJobQueue
 {
@@ -98,7 +113,8 @@ public interface IJobQueue
                 assetId,
                 type,
                 payloadJson,
-                idempotencyKey),
+                idempotencyKey,
+                RequiredCapability: JobRoutingRegistry.GetRequiredCapability(type)),
             cancellationToken);
     Task<LeasedJob?> TryLeaseAsync(
         string workerId,

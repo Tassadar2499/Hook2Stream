@@ -16,6 +16,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../Hook2Stream.Api/Hook2Stream.Api.csproj" />
+    <ProjectReference Include="../Hook2Stream.Application/Hook2Stream.Application.csproj"
+                      IsAspireProjectResource="false" />
     <ProjectReference Include="../Hook2Stream.Bootstrapper/Hook2Stream.Bootstrapper.csproj" />
     <ProjectReference Include="../Hook2Stream.Worker/Hook2Stream.Worker.csproj" />
   </ItemGroup>

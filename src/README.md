@@ -73,6 +73,12 @@ The media worker expects `ffmpeg` and `ffprobe` in `PATH`. Originals are never r
 
 Workers lease only matching capabilities. A lease token fences late attempts; only .NET commits canonical business state after validating a sidecar manifest.
 
+Production images use the repository root as their build context so `Directory.Build.props` is applied, for example `docker build -f src/Hook2Stream.Api/Dockerfile .`. The Dockerfiles pin an available .NET 10 container SDK independently of the workstation-only `global.json`. Separate API, bootstrapper, worker and standalone Next.js Dockerfiles run as non-root users; deploy the same worker image once per capability pool.
+
+The public API URL is compiled into the browser bundle, so build the web image with an explicit origin: `docker build -f src/web/Dockerfile --build-arg NEXT_PUBLIC_API_BASE_URL=https://api.example.com --build-arg NEXT_PUBLIC_AUTH_MODE=oauth .`.
+
+Set exactly one `Worker__Capabilities__0` value per worker deployment (`media`, `analysis`, `control`, `render`, or `export`). The bootstrapper owns bucket setup; when `Storage__ConfigureBucketCors=true`, provide every public browser origin through `Storage__BrowserUploadOrigins__N` (HTTPS is required in Production).
+
 ## MP3-first API flow
 
 1. `POST /api/v1/releases/audio-uploads` with `Idempotency-Key`, rights confirmation and external-AI consent creates an `Unscheduled` project, bound attestation, audio asset and direct-upload session atomically.
@@ -85,22 +91,18 @@ Automatic transcription has a supported quality baseline for `en` and `ru`. WAV,
 
 ## Contracts
 
-Building `Hook2Stream.Api` writes `Hook2Stream.Api/openapi/Hook2Stream.Api.json`. Regenerate the checked-in frontend schema after an API contract change:
+The API contract is generated explicitly so ordinary builds never rewrite tracked files. Regenerate the OpenAPI document and checked-in frontend schema after an API contract change:
 
 ```bash
-dotnet build src/Hook2Stream.Api/Hook2Stream.Api.csproj
-npm run generate:api --prefix src/web
+src/ci/generate-contracts.sh
 ```
 
-`web/src/lib/api-schema.d.ts` is generated and must not be edited manually.
+`web/src/lib/api-schema.d.ts` is generated and must not be edited manually. CI reruns the generator and fails when either checked-in artifact drifts.
 
 ## Verification
 
 ```bash
-dotnet test src/Hook2Stream.slnx
-npm run check --prefix src/web
-npm run lint --prefix src/web
-npm run build --prefix src/web
+src/ci/verify.sh
 npm run test:e2e --prefix src/web
 ```
 

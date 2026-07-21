@@ -19,7 +19,7 @@ public sealed class AudioAnalysisJobHandler(
     IAudioAnalysisProvider provider) : IJobHandler
 {
     public JobType Type => JobType.AudioAnalysis;
-    public string Capability => "analysis";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {
@@ -71,7 +71,7 @@ public sealed class TranscriptionJobHandler(
     IAiProviderInvocationWriter invocations) : IJobHandler
 {
     public JobType Type => JobType.Transcription;
-    public string Capability => "analysis";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {
@@ -131,6 +131,38 @@ public sealed class TranscriptionJobHandler(
             }
 
             throw PipelineHandlerData.Failure(result.Failure!);
+        }
+
+        // Provider calls can outlive the revision they were started for. Re-read
+        // the authoritative pointers and the lease after the external call so a
+        // manual/imported transcript (or another invalidation) always wins.
+        var currentTranscriptId = await db.Projects.AsNoTracking()
+            .Where(value => value.Id == project.Id && value.WorkspaceId == job.WorkspaceId)
+            .Select(value => value.CurrentTranscriptRevisionId)
+            .SingleAsync(cancellationToken);
+        var currentRevisionState = await db.TranscriptRevisions.AsNoTracking()
+            .Where(value => value.Id == revision.Id)
+            .Select(value => value.State)
+            .SingleAsync(cancellationToken);
+        var leaseIsCurrent = await db.Jobs.AsNoTracking().AnyAsync(
+            value => value.Id == job.Id &&
+                     value.State == JobState.Running &&
+                     value.LeaseOwner == job.LeaseOwner &&
+                     value.LeaseToken == job.LeaseToken,
+            cancellationToken);
+        if (currentTranscriptId != revision.Id ||
+            currentRevisionState != RevisionState.Processing ||
+            !leaseIsCurrent)
+        {
+            await invocations.RecordAsync(
+                job,
+                "transcription",
+                providerContext,
+                result.Provenance,
+                failure: null,
+                AiProviderInvocationLedger.DiscardedStaleInput,
+                cancellationToken);
+            return;
         }
 
         var currentRights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
@@ -233,7 +265,7 @@ public sealed class ArtworkGenerationJobHandler(
     IAiProviderInvocationWriter invocations) : IJobHandler
 {
     public JobType Type => JobType.ArtworkGeneration;
-    public string Capability => "artwork";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {
@@ -647,7 +679,7 @@ public sealed class CampaignGenerationJobHandler(
     IAiProviderInvocationWriter invocations) : IJobHandler
 {
     public JobType Type => JobType.CampaignGeneration;
-    public string Capability => "campaign";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {
@@ -866,7 +898,7 @@ public sealed class VideoRenderJobHandler(
     public JobType Type { get; } = type is JobType.PreviewRender or JobType.FinalRender
         ? type
         : throw new ArgumentOutOfRangeException(nameof(type));
-    public string Capability => "render";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {

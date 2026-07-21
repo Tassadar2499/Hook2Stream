@@ -1,0 +1,11 @@
+**/bin
+**/obj
+**/.next
+**/node_modules
+**/TestResults
+.git
+global.json
+.idea
+.vscode
+Dockerfile*
+README.md

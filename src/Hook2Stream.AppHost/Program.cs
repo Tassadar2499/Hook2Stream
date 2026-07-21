@@ -1,4 +1,5 @@
 using Aspire.Hosting.ApplicationModel;
+using Hook2Stream.Application;
 using Microsoft.Extensions.Hosting;
 
 var builder = DistributedApplication.CreateBuilder(args);
@@ -22,7 +23,6 @@ if (useLocalAuthentication && !builder.Environment.IsDevelopment())
 }
 
 IResourceBuilder<ParameterResource>? localAuthenticationToken = null;
-IResourceBuilder<ParameterResource>? jwtSigningKey = null;
 if (useLocalAuthentication)
 {
     localAuthenticationToken = builder.AddParameter(
@@ -39,24 +39,6 @@ if (useLocalAuthentication)
             MinNumeric = 4
         },
         secret: true);
-}
-else
-{
-    jwtSigningKey = builder.AddParameter(
-        "jwt-signing-key",
-        new GenerateParameterDefault
-        {
-            MinLength = 64,
-            Lower = true,
-            Upper = true,
-            Numeric = true,
-            Special = false,
-            MinLower = 8,
-            MinUpper = 8,
-            MinNumeric = 8
-        },
-        secret: true,
-        persist: true);
 }
 
 var minioPassword = builder.AddParameter(
@@ -120,7 +102,10 @@ var bootstrapper = builder
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
-    .WithEnvironment("Storage__ConfigureBucketCors", "false")
+    .WithEnvironment("Storage__ConfigureBucketCors", "true")
+    .WithEnvironment("Storage__ConfigureBucketLifecycle", "true")
+    .WithEnvironment("Storage__BrowserUploadOrigins__0", "http://localhost:3000")
+    .WithEnvironment("Storage__BrowserUploadOrigins__1", "http://127.0.0.1:3000")
     .WaitFor(database)
     .WaitFor(minio);
 
@@ -138,25 +123,29 @@ var api = builder
     .WithEnvironment("Google__ClientSecret", googleClientSecret)
     .WaitForCompletion(bootstrapper);
 
+api.WithEnvironment("Google__PublicApiBaseUrl", api.GetEndpoint("http"));
+api.WithEnvironment("Google__PublicWebReturnBaseUrl", "http://localhost:3000");
+api.WithEnvironment("Cors__Origins__0", "http://localhost:3000");
+
 if (useLocalAuthentication)
 {
     api.WithEnvironment("Auth__LocalToken", localAuthenticationToken!);
 }
-else
-{
-    api.WithEnvironment("Jwt__SigningKey", jwtSigningKey!);
-}
 
-builder
-    .AddProject<Projects.Hook2Stream_Worker>("worker")
-    .WithReference(database)
-    .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-    .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
-    .WithEnvironment("Storage__AccessKey", "hook2stream")
-    .WithEnvironment("Storage__SecretKey", minioPassword)
-    .WithEnvironment("Storage__RequireCredentials", "true")
-    .WithEnvironment("Storage__ConfigureBucketCors", "false")
-    .WaitForCompletion(bootstrapper);
+foreach (var capability in JobRoutingRegistry.Capabilities)
+{
+    builder
+        .AddProject<Projects.Hook2Stream_Worker>($"worker-{capability}")
+        .WithReference(database)
+        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
+        .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
+        .WithEnvironment("Storage__AccessKey", "hook2stream")
+        .WithEnvironment("Storage__SecretKey", minioPassword)
+        .WithEnvironment("Storage__RequireCredentials", "true")
+        .WithEnvironment("Storage__ConfigureBucketCors", "false")
+        .WithEnvironment("Worker__Capabilities__0", capability)
+        .WaitForCompletion(bootstrapper);
+}
 
 var web = builder
     .AddJavaScriptApp("web", "../web", "dev")

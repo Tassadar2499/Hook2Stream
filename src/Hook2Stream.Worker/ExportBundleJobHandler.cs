@@ -15,7 +15,7 @@ public sealed class ExportBundleJobHandler(
     IPipelineArtifactStore artifacts) : IJobHandler
 {
     public JobType Type => JobType.ExportBundle;
-    public string Capability => "render";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
+using System.Collections.Concurrent;
 using Hook2Stream.Application;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication;
@@ -19,19 +20,20 @@ public sealed class Hook2StreamApiFactory : WebApplicationFactory<Program>
 {
     private readonly string _databaseName = $"hook2stream-tests-{Guid.NewGuid():N}";
     private readonly Action<IServiceCollection>? _configureTestServices;
+    private readonly Action<DbContextOptionsBuilder>? _configureDbContext;
 
-    public Hook2StreamApiFactory(Action<IServiceCollection>? configureTestServices = null)
+    public Hook2StreamApiFactory(
+        Action<IServiceCollection>? configureTestServices = null,
+        Action<DbContextOptionsBuilder>? configureDbContext = null)
     {
         _configureTestServices = configureTestServices;
+        _configureDbContext = configureDbContext;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("Auth:Mode", "OAuth");
-        builder.UseSetting(
-            "Jwt:SigningKey",
-            "hook2stream-testing-signing-key-with-32+-characters-of-entropy");
         builder.UseSetting("Storage:AccessKey", "test-access-key");
         builder.UseSetting("Storage:SecretKey", "test-secret-key");
         builder.ConfigureServices(services =>
@@ -40,7 +42,10 @@ public sealed class Hook2StreamApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IDbContextOptionsConfiguration<Hook2StreamDbContext>>();
             services.RemoveAll<Hook2StreamDbContext>();
             services.AddDbContext<Hook2StreamDbContext>(options =>
-                options.UseInMemoryDatabase(_databaseName));
+            {
+                options.UseInMemoryDatabase(_databaseName);
+                _configureDbContext?.Invoke(options);
+            });
 
             services.RemoveAll<IObjectStorage>();
             services.AddSingleton<IObjectStorage, FakeObjectStorage>();
@@ -83,6 +88,13 @@ internal sealed class TestAuthHandler(
 
 internal sealed class FakeObjectStorage : IObjectStorage
 {
+    private readonly ConcurrentQueue<(string ObjectKey, string UploadId)> _abortedMultipartUploads = new();
+
+    public IReadOnlyCollection<(string ObjectKey, string UploadId)> AbortedMultipartUploads =>
+        _abortedMultipartUploads.ToArray();
+
+    public Exception? AbortMultipartException { get; set; }
+
     public Task EnsureBucketAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     public Task<Uri> CreateUploadUrlAsync(
@@ -121,7 +133,13 @@ internal sealed class FakeObjectStorage : IObjectStorage
     public Task AbortMultipartUploadAsync(
         string objectKey,
         string uploadId,
-        CancellationToken cancellationToken) => Task.CompletedTask;
+        CancellationToken cancellationToken)
+    {
+        _abortedMultipartUploads.Enqueue((objectKey, uploadId));
+        return AbortMultipartException is null
+            ? Task.CompletedTask
+            : Task.FromException(AbortMultipartException);
+    }
 
     public Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken) =>
         Task.FromResult<StorageObjectInfo?>(new StorageObjectInfo(1, "\"etag\"", "application/octet-stream"));
@@ -140,4 +158,12 @@ internal sealed class FakeObjectStorage : IObjectStorage
         throw new NotSupportedException();
 
     public Task DeleteAsync(string objectKey, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task DeleteProjectObjectsAsync(
+        ProjectStorageScope scope,
+        CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task DeleteAssetObjectsAsync(
+        AssetStorageScope scope,
+        CancellationToken cancellationToken) => Task.CompletedTask;
 }

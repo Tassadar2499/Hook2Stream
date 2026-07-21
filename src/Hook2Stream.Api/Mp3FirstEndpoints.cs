@@ -3,15 +3,18 @@ using System.Text;
 using System.Text.Json;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
+using Hook2Stream.Infrastructure;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Api;
 
 public static class Mp3FirstEndpoints
 {
-    private static readonly TimeSpan UploadUrlLifetime = TimeSpan.FromMinutes(60);
     private static readonly TimeSpan ReadUrlLifetime = TimeSpan.FromMinutes(10);
+    private const int TranscriptMaxPhraseCount = 2_000;
+    private const int TranscriptMaxTotalTextLength = 200_000;
     private const string ExternalAiPolicyVersion = "external-ai-zdr-v1";
     private static readonly JsonSerializerOptions StoredJson = new(JsonSerializerDefaults.Web);
     private static readonly IReadOnlySet<string> CampaignTemplates = new HashSet<string>(
@@ -67,23 +70,34 @@ public static class Mp3FirstEndpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext db,
         IObjectStorage storage,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
         HttpRequest httpRequest,
         HttpResponse httpResponse,
         CancellationToken cancellationToken)
     {
         ValidateQuickAudio(request);
+        var now = timeProvider.GetUtcNow();
+        var uploadUrlLifetime = TimeSpan.FromMinutes(policyOptions.Value.UploadUrlMinutes);
+        var uploadSessionLifetime = TimeSpan.FromHours(policyOptions.Value.UploadSessionHours);
         var idempotencyKey = RequireIdempotencyKey(httpRequest);
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var requestHash = Hash(
             $"{Path.GetFileName(request.FileName)}\n{request.ContentType.ToLowerInvariant()}\n{request.SizeBytes}\n{request.ConfirmsContentRights}\n{request.AllowsExternalAiProcessing}");
 
         var existing = await db.ApiIdempotencyRecords
-            .AsNoTracking()
             .SingleOrDefaultAsync(
                 value => value.WorkspaceId == context.Workspace.Id &&
                          value.Scope == "release.audio-upload" &&
                          value.Key == idempotencyKey,
                 cancellationToken);
+        if (existing is not null && existing.ExpiresAt <= now)
+        {
+            db.ApiIdempotencyRecords.Remove(existing);
+            await db.SaveChangesAsync(cancellationToken);
+            existing = null;
+        }
+
         if (existing is not null)
         {
             if (!CryptographicOperations.FixedTimeEquals(
@@ -97,7 +111,12 @@ public static class Mp3FirstEndpoints
             var existingSession = await db.UploadSessions
                 .Include(value => value.Asset)
                 .SingleAsync(value => value.Id == existing.SecondaryResourceId, cancellationToken);
-            var upload = await RefreshUploadResponse(existingSession, storage, cancellationToken);
+            var upload = await RefreshUploadResponse(
+                existingSession,
+                storage,
+                uploadUrlLifetime,
+                now,
+                cancellationToken);
             var workflow = await BuildWorkflow(db, existingProject, cancellationToken);
             ApiEndpointHelpers.SetEtag(httpResponse, existingProject.Version);
             return Results.Ok(new QuickAudioUploadResponse(ToRelease(existingProject), upload, workflow));
@@ -153,7 +172,7 @@ public static class Mp3FirstEndpoints
             AudioAssetId = asset.Id,
             AudioFingerprint = null,
             SyntheticContentStatus = SyntheticContentStatus.Unknown,
-            AcceptedAt = DateTimeOffset.UtcNow
+            AcceptedAt = now
         };
 
         var multipart = request.SizeBytes >= MediaPolicy.MultipartThresholdBytes;
@@ -167,7 +186,7 @@ public static class Mp3FirstEndpoints
         else
         {
             uploadUrl = await storage.CreateUploadUrlAsync(
-                asset.ObjectKey, asset.DeclaredContentType, UploadUrlLifetime, cancellationToken);
+                asset.ObjectKey, asset.DeclaredContentType, uploadUrlLifetime, cancellationToken);
         }
 
         var session = new UploadSession
@@ -180,7 +199,7 @@ public static class Mp3FirstEndpoints
             IsMultipart = multipart,
             MultipartUploadId = multipartUpload?.UploadId,
             PartSizeBytes = multipart ? MediaPolicy.MultipartPartSizeBytes : request.SizeBytes,
-            ExpiresAt = DateTimeOffset.UtcNow.Add(UploadUrlLifetime)
+            ExpiresAt = now.Add(uploadSessionLifetime)
         };
         var pipelineRun = new PipelineRun
         {
@@ -214,7 +233,7 @@ public static class Mp3FirstEndpoints
             RequestHash = requestHash,
             ResourceId = project.Id,
             SecondaryResourceId = session.Id,
-            ExpiresAt = DateTimeOffset.UtcNow.AddDays(7)
+            ExpiresAt = now.AddDays(policyOptions.Value.IdempotencyDays)
         });
         db.AuditEvents.Add(new AuditEvent
         {
@@ -252,26 +271,34 @@ public static class Mp3FirstEndpoints
         }
         catch (DbUpdateException)
         {
+            await BestEffortAbortMultipartUploadAsync(storage, asset.ObjectKey, multipartUpload);
             db.ChangeTracker.Clear();
             var winner = await db.ApiIdempotencyRecords.AsNoTracking().SingleOrDefaultAsync(
                 value => value.WorkspaceId == context.Workspace.Id &&
-                         value.Scope == "release.audio-upload" && value.Key == idempotencyKey,
+                         value.Scope == "release.audio-upload" &&
+                         value.Key == idempotencyKey &&
+                         value.ExpiresAt > now,
                 cancellationToken);
             if (winner is null) throw;
-            if (multipartUpload is not null)
-            {
-                await storage.AbortMultipartUploadAsync(
-                    asset.ObjectKey, multipartUpload.UploadId, cancellationToken);
-            }
             if (!string.Equals(winner.RequestHash, requestHash, StringComparison.Ordinal))
                 throw Problem(409, "idempotency.payload_mismatch", "This idempotency key was used with a different request.");
             var winnerProject = await Project(db, context.Workspace.Id, winner.ResourceId, true, cancellationToken);
             var winnerSession = await db.UploadSessions.Include(value => value.Asset)
                 .SingleAsync(value => value.Id == winner.SecondaryResourceId, cancellationToken);
-            var winnerUpload = await RefreshUploadResponse(winnerSession, storage, cancellationToken);
+            var winnerUpload = await RefreshUploadResponse(
+                winnerSession,
+                storage,
+                uploadUrlLifetime,
+                now,
+                cancellationToken);
             ApiEndpointHelpers.SetEtag(httpResponse, winnerProject.Version);
             return Results.Ok(new QuickAudioUploadResponse(
                 ToRelease(winnerProject), winnerUpload, await BuildWorkflow(db, winnerProject, cancellationToken)));
+        }
+        catch
+        {
+            await BestEffortAbortMultipartUploadAsync(storage, asset.ObjectKey, multipartUpload);
+            throw;
         }
 
         var response = new UploadSessionResponse(
@@ -282,12 +309,40 @@ public static class Mp3FirstEndpoints
             multipartUpload?.UploadId,
             session.PartSizeBytes,
             multipart ? (int)Math.Ceiling(request.SizeBytes / (double)session.PartSizeBytes) : 1,
+            Min(now.Add(uploadUrlLifetime), session.ExpiresAt),
             session.ExpiresAt);
         var initialWorkflow = await BuildWorkflow(db, project, cancellationToken);
         ApiEndpointHelpers.SetEtag(httpResponse, project.Version);
         return Results.Created(
             $"/api/v1/releases/{project.Id}",
             new QuickAudioUploadResponse(ToRelease(project), response, initialWorkflow));
+    }
+
+    private static async Task BestEffortAbortMultipartUploadAsync(
+        IObjectStorage storage,
+        string objectKey,
+        MultipartUpload? multipartUpload)
+    {
+        if (multipartUpload is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // Persistence cancellation must not strand an already-created multipart
+            // upload, so cleanup deliberately does not reuse the request token.
+            await storage.AbortMultipartUploadAsync(
+                objectKey,
+                multipartUpload.UploadId,
+                CancellationToken.None);
+        }
+        catch
+        {
+            // Multipart lifecycle cleanup is also enforced by the bucket policy.
+            // Never replace the persistence failure (or request cancellation) with
+            // a secondary storage-cleanup exception.
+        }
     }
 
     private static async Task<IResult> UpdateSetup(
@@ -491,8 +546,9 @@ public static class Mp3FirstEndpoints
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var project = await Project(db, context.Workspace.Id, projectId, true, cancellationToken);
-        ApiEndpointHelpers.SetEtag(response, project.Version);
-        return Results.Ok(await BuildWorkflow(db, project, cancellationToken));
+        var workflow = await BuildWorkflow(db, project, cancellationToken);
+        ApiEndpointHelpers.SetEtag(response, workflow.WorkflowVersion);
+        return Results.Ok(workflow);
     }
 
     private static async Task StreamProjectEvents(
@@ -592,6 +648,20 @@ public static class Mp3FirstEndpoints
         project.IsInstrumental = request.IsInstrumental;
         project.IsInstrumentalConfirmed = request.IsInstrumental;
         project.LyricsText = request.IsInstrumental ? null : string.Join('\n', request.Phrases.OrderBy(value => value.Order).Select(value => value.Text));
+        await CancelActiveJobsAsync(
+            db,
+            project.Id,
+            JobType.Transcription,
+            "transcript.manual_override",
+            cancellationToken);
+        await UpdateWorkflowStagesAsync(
+            db,
+            project.Id,
+            [new WorkflowStageUpdate(
+                WorkflowLane.Transcript,
+                PipelineStageState.WaitingUser,
+                "transcript.review_required")],
+            cancellationToken);
         await InvalidateAfterTranscript(db, project, cancellationToken);
         AddReconcile(db, project, "transcript.updated");
         await db.SaveChangesAsync(cancellationToken);
@@ -648,7 +718,7 @@ public static class Mp3FirstEndpoints
         var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
             project.WorkspaceId, project.Id, audio.Id, JobType.Transcription,
             JsonSerializer.Serialize(new { projectId, assetId = audio.Id }),
-            $"transcript:{project.Id:N}:{key}", "analysis", "openrouter-stt-v1", audio.Sha256), cancellationToken);
+            $"transcript:{project.Id:N}:{key}", JobRoutingRegistry.Control, "openrouter-stt-v1", audio.Sha256), cancellationToken);
         return Results.Accepted($"/api/v1/jobs/{jobId}", new JobAcceptedResponse(jobId, null));
     }
 
@@ -745,7 +815,7 @@ public static class Mp3FirstEndpoints
         var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
             project.WorkspaceId, project.Id, null, JobType.ArtworkGeneration,
             JsonSerializer.Serialize(new { projectId, artworkPackRevisionId = revision.Id, prompt = revision.Prompt, request.Style }),
-            $"artwork:{project.Id:N}:{key}", "artwork", "openrouter-image-v1", $"request:{key}"), cancellationToken);
+            $"artwork:{project.Id:N}:{key}", JobRoutingRegistry.Control, "openrouter-image-v1", $"request:{key}"), cancellationToken);
         return Results.Accepted($"/api/v1/jobs/{jobId}", new JobAcceptedResponse(jobId, revision.Id));
     }
 
@@ -822,7 +892,7 @@ public static class Mp3FirstEndpoints
         var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
             project.WorkspaceId, project.Id, selectedId, JobType.ArtworkGeneration,
             JsonSerializer.Serialize(new { projectId, artworkPackRevisionId = pack.Id, mode = "backgrounds", count = 3 }),
-            $"artwork-backgrounds:{pack.Id:N}", "artwork", "openrouter-image-v1", $"cover:{selectedId:N}:v{asset.Version}"), cancellationToken);
+            $"artwork-backgrounds:{pack.Id:N}", JobRoutingRegistry.Control, "openrouter-image-v1", $"cover:{selectedId:N}:v{asset.Version}"), cancellationToken);
         ApiEndpointHelpers.SetEtag(response, pack.Version);
         response.Headers.Location = $"/api/v1/jobs/{jobId}";
         return Results.Ok(ToArtwork(pack));
@@ -967,14 +1037,35 @@ public static class Mp3FirstEndpoints
         if (items.Count != 18) throw Problem(409, "campaign.incomplete", "The current campaign must contain exactly 18 items.");
         var index = items.FindIndex(value => value.Id == itemId);
         if (index < 0) throw NotFound();
+        var existingItem = items[index];
+        if (!string.Equals(request.Template, existingItem.Template, StringComparison.Ordinal) ||
+            !string.Equals(request.HookId, existingItem.HookId, StringComparison.Ordinal))
+        {
+            throw Problem(
+                422,
+                "campaign.slot_assignment_immutable",
+                "A campaign item keeps its canonical template and hook assignment. Edit its copy, background, or composition instead.");
+        }
+
         items[index] = items[index] with
         {
-            Template = request.Template,
-            HookId = request.HookId,
             BackgroundAssetId = request.BackgroundAssetId,
             Text = request.Text,
             CompositionJson = request.CompositionJson
         };
+        var storedHooks = Deserialize<IReadOnlyList<HookRequest>>(currentHooks.HooksJson) ?? [];
+        var validation = CampaignPlanContractValidator.Validate(
+            project.Mode == ReleaseMode.Released,
+            storedHooks.Select(value => StableGuid(value.Id)).ToArray(),
+            items.OrderBy(value => value.Slot).Select(ToCampaignPlan).ToArray());
+        if (!validation.IsValid)
+        {
+            throw Problem(
+                422,
+                "campaign.recipe_invalid",
+                string.Join(' ', validation.Errors.Select(value => value.Message).Distinct(StringComparer.Ordinal)));
+        }
+
         current.State = RevisionState.Superseded;
         var revision = new CampaignPlanRevision
         {
@@ -986,10 +1077,34 @@ public static class Mp3FirstEndpoints
             ArtworkPackRevisionId = current.ArtworkPackRevisionId,
             HookSetRevisionId = current.HookSetRevisionId,
             ItemsJson = JsonSerializer.Serialize(items, StoredJson),
-            SourceFingerprint = Hash(current.SourceFingerprint + ":item:" + itemId + ":v" + current.Version)
+            // This fingerprint describes upstream dependencies only. The immutable
+            // revision id identifies edited campaign content and preview inputs.
+            SourceFingerprint = current.SourceFingerprint
         };
         db.CampaignPlanRevisions.Add(revision);
         project.CurrentCampaignPlanRevisionId = revision.Id;
+        await CancelActiveJobsAsync(
+            db,
+            project.Id,
+            JobType.PreviewRender,
+            "preview.revision_superseded",
+            cancellationToken);
+        var previewAllowanceConsumed = await db.Jobs.AsNoTracking().AnyAsync(
+            value => value.ProjectId == project.Id &&
+                     value.Type == JobType.PreviewRender &&
+                     value.State == JobState.Succeeded,
+            cancellationToken);
+        await UpdateWorkflowStagesAsync(
+            db,
+            project.Id,
+            [
+                new WorkflowStageUpdate(WorkflowLane.Campaign, PipelineStageState.Succeeded),
+                new WorkflowStageUpdate(
+                    WorkflowLane.Preview,
+                    previewAllowanceConsumed ? PipelineStageState.Stale : PipelineStageState.NotStarted,
+                    previewAllowanceConsumed ? "preview.allowance_consumed" : null)
+            ],
+            cancellationToken);
         AddReconcile(db, project, "campaign.item_updated");
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, revision.Version);
@@ -1031,73 +1146,82 @@ public static class Mp3FirstEndpoints
         ReleaseProject project,
         CancellationToken cancellationToken)
     {
-        if (!db.Entry(project).Collection(value => value.Assets).IsLoaded)
-            await db.Entry(project).Collection(value => value.Assets).LoadAsync(cancellationToken);
-        var jobs = await db.Jobs.AsNoTracking().Where(value => value.ProjectId == project.Id)
-            .OrderByDescending(value => value.CreatedAt).ToListAsync(cancellationToken);
-        var transcript = project.CurrentTranscriptRevisionId is { } transcriptId
-            ? await db.TranscriptRevisions.AsNoTracking().SingleOrDefaultAsync(value => value.Id == transcriptId, cancellationToken) : null;
-        var artwork = project.CurrentArtworkPackRevisionId is { } artworkId
-            ? await db.ArtworkPackRevisions.AsNoTracking().SingleOrDefaultAsync(value => value.Id == artworkId, cancellationToken) : null;
-        var hooks = project.CurrentHookSetRevisionId is { } hookId
-            ? await db.HookSetRevisions.AsNoTracking().SingleOrDefaultAsync(value => value.Id == hookId, cancellationToken) : null;
-        var campaign = project.CurrentCampaignPlanRevisionId is { } campaignId
-            ? await db.CampaignPlanRevisions.AsNoTracking().SingleOrDefaultAsync(value => value.Id == campaignId, cancellationToken) : null;
-        var rights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(value => value.ProjectId == project.Id, cancellationToken);
-        var audio = project.Assets.SingleOrDefault(value => value.Kind == AssetKind.Audio && value.IsActive)
-            ?? project.Assets.OrderByDescending(value => value.Revision).FirstOrDefault(value => value.Kind == AssetKind.Audio);
+        var run = await db.PipelineRuns.AsNoTracking()
+            .Include(value => value.Stages)
+            .Where(value => value.ProjectId == project.Id && value.WorkspaceId == project.WorkspaceId)
+            .OrderByDescending(value => value.Number)
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw Problem(409, "workflow.not_initialized", "The release workflow has not been initialized yet.");
+        var stages = run.Stages.ToDictionary(value => value.Lane);
+        var laneResponses = Enum.GetValues<WorkflowLane>()
+            .Select(lane => stages.TryGetValue(lane, out var stage)
+                ? new WorkflowLaneResponse(
+                    lane,
+                    stage.State,
+                    stage.ProgressPercent,
+                    stage.BlockerCode,
+                    stage.ErrorCode,
+                    stage.CurrentJobId)
+                : new WorkflowLaneResponse(
+                    lane,
+                    PipelineStageState.NotStarted,
+                    0,
+                    "workflow.stage_missing",
+                    null,
+                    null))
+            .ToArray();
+        var blockers = laneResponses
+            .Where(value => value.BlockerCode is not null)
+            .Select(value => value.BlockerCode!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var nextAction = NextAction(laneResponses);
+        var currentRenderBatchId = stages.TryGetValue(WorkflowLane.FinalRender, out var finalRenderStage)
+            ? finalRenderStage.CurrentRenderBatchId
+            : null;
+        return new WorkflowResponse(
+            project.Id,
+            project.FlowKind,
+            project.Version,
+            run.Version,
+            blockers,
+            nextAction,
+            laneResponses,
+            currentRenderBatchId);
+    }
 
-        WorkflowLaneResponse Lane(WorkflowLane lane, PipelineStageState state, string? blocker = null, Job? job = null) =>
-            new(lane, state, job?.ProgressPercent ?? (state == PipelineStageState.Succeeded ? 100 : 0), blocker, job?.ErrorCode, job?.Id);
-        Job? Latest(params JobType[] types) => jobs.FirstOrDefault(value => types.Contains(value.Type));
-        PipelineStageState JobStateOr(Job? job, PipelineStageState fallback) => job?.State switch
+    private static WorkflowNextAction? NextAction(IReadOnlyList<WorkflowLaneResponse> lanes)
+    {
+        WorkflowLaneResponse Lane(WorkflowLane lane) => lanes.Single(value => value.Lane == lane);
+        if (lanes.Any(value => WorkflowBlockerCodes.RequiresRightsConfirmation(value.BlockerCode)))
+            return WorkflowNextAction.ConfirmRights;
+        var audio = Lane(WorkflowLane.Audio);
+        if (audio.State != PipelineStageState.Succeeded) return WorkflowNextAction.UploadAudio;
+        if (lanes.Any(value => value.BlockerCode == "setup.required")) return WorkflowNextAction.CompleteSetup;
+
+        var transcript = Lane(WorkflowLane.Transcript);
+        if (transcript.State != PipelineStageState.Succeeded) return WorkflowNextAction.ReviewTranscript;
+        var artwork = Lane(WorkflowLane.Artwork);
+        if (artwork.State != PipelineStageState.Succeeded) return WorkflowNextAction.ReviewArtwork;
+        var hooks = Lane(WorkflowLane.Hooks);
+        if (hooks.State != PipelineStageState.Succeeded) return WorkflowNextAction.ReviewHooks;
+        var campaign = Lane(WorkflowLane.Campaign);
+        if (campaign.State != PipelineStageState.Succeeded) return WorkflowNextAction.WaitForCampaign;
+        var preview = Lane(WorkflowLane.Preview);
+        if (preview.State != PipelineStageState.Succeeded &&
+            !(preview.State == PipelineStageState.Stale && preview.BlockerCode == "preview.allowance_consumed"))
+            return WorkflowNextAction.WaitForPreview;
+
+        var finalRender = Lane(WorkflowLane.FinalRender);
+        return finalRender.State switch
         {
-            JobState.Queued => PipelineStageState.Queued,
-            JobState.Running => PipelineStageState.Running,
-            JobState.Succeeded => PipelineStageState.Succeeded,
-            JobState.Failed => PipelineStageState.Failed,
-            JobState.Cancelled => PipelineStageState.Cancelled,
-            _ => fallback
+            PipelineStageState.WaitingUser when finalRender.BlockerCode == "purchase.required" => WorkflowNextAction.PurchaseRender,
+            PipelineStageState.WaitingUser when finalRender.BlockerCode == "render.start_required" => WorkflowNextAction.StartFinalRender,
+            PipelineStageState.Queued or PipelineStageState.Running or PipelineStageState.Retrying => WorkflowNextAction.WaitForFinalRender,
+            PipelineStageState.Succeeded => WorkflowNextAction.DownloadExport,
+            PipelineStageState.Degraded or PipelineStageState.Failed => WorkflowNextAction.RetryFailedRenders,
+            _ => null
         };
-
-        var audioJob = Latest(JobType.MediaIngest);
-        var analysisJob = Latest(JobType.AudioAnalysis);
-        var transcriptJob = Latest(JobType.Transcription);
-        var artworkJob = Latest(JobType.ArtworkGeneration);
-        var campaignJob = Latest(JobType.CampaignGeneration);
-        var previewJob = Latest(JobType.PreviewRender);
-        var finalJob = Latest(JobType.FinalRender, JobType.ExportBundle);
-        var setupReady = project.SetupCompletedAt is not null;
-        var externalAiReady = rights?.OwnsAudioRights == true &&
-                          (project.IsInstrumental && project.IsInstrumentalConfirmed || rights.OwnsLyricsRights) &&
-                          rights.AllowsExternalAiProcessing &&
-                          rights.AudioAssetId == audio?.Id &&
-                          !string.IsNullOrWhiteSpace(audio?.Sha256) &&
-                          string.Equals(rights.AudioFingerprint, audio.Sha256, StringComparison.Ordinal);
-        var audioReady = audio?.State == AssetState.Ready;
-        var transcriptApproved = transcript?.State == RevisionState.Approved;
-        var backgroundIds = artwork is null
-            ? []
-            : Deserialize<IReadOnlyList<Guid>>(artwork.BackgroundAssetIdsJson) ?? [];
-        var backgroundsReady = backgroundIds.Count == 3 && project.Assets.Count(value =>
-            backgroundIds.Contains(value.Id) && value.State == AssetState.Ready) == 3;
-        var artworkApproved = artwork?.State == RevisionState.Approved && backgroundsReady;
-        var hooksReady = hooks?.State == RevisionState.Approved;
-
-        var laneResponses = new List<WorkflowLaneResponse>
-        {
-            Lane(WorkflowLane.Audio, audioReady ? PipelineStageState.Succeeded : JobStateOr(audioJob, audio is null ? PipelineStageState.NotStarted : PipelineStageState.WaitingUser), audio is null ? "audio.upload_required" : null, audioJob),
-            Lane(WorkflowLane.Analysis, JobStateOr(analysisJob, audioReady ? PipelineStageState.Queued : PipelineStageState.NotStarted), audioReady ? null : "audio.not_ready", analysisJob),
-            Lane(WorkflowLane.Transcript, transcriptApproved ? PipelineStageState.Succeeded : transcript is not null ? PipelineStageState.WaitingUser : JobStateOr(transcriptJob, audioReady && externalAiReady ? PipelineStageState.Queued : PipelineStageState.NotStarted), transcript is { State: RevisionState.ReadyForReview } ? "transcript.review_required" : audioReady && !externalAiReady ? "rights.external_ai_processing_required" : null, transcriptJob),
-            Lane(WorkflowLane.Artwork, artworkApproved ? PipelineStageState.Succeeded : artwork is { State: RevisionState.ReadyForReview } ? PipelineStageState.WaitingUser : JobStateOr(artworkJob, setupReady && externalAiReady ? PipelineStageState.NotStarted : PipelineStageState.NotStarted), !setupReady ? "setup.required" : !externalAiReady ? "rights.external_ai_processing_required" : null, artworkJob),
-            Lane(WorkflowLane.Hooks, hooksReady ? PipelineStageState.Succeeded : transcriptApproved ? PipelineStageState.NotStarted : PipelineStageState.NotStarted, transcriptApproved ? null : "transcript.approval_required"),
-            Lane(WorkflowLane.Campaign, campaign?.State is RevisionState.ReadyForReview or RevisionState.Approved ? PipelineStageState.Succeeded : JobStateOr(campaignJob, PipelineStageState.NotStarted), !externalAiReady ? "rights.external_ai_processing_required" : transcriptApproved && artworkApproved && hooksReady ? null : "campaign.dependencies_required", campaignJob),
-            Lane(WorkflowLane.Preview, JobStateOr(previewJob, campaign is null ? PipelineStageState.NotStarted : PipelineStageState.Queued), campaign is null ? "campaign.required" : null, previewJob),
-            Lane(WorkflowLane.FinalRender, JobStateOr(finalJob, PipelineStageState.NotStarted), "purchase.required", finalJob)
-        };
-        var blockers = laneResponses.Where(value => value.BlockerCode is not null).Select(value => value.BlockerCode!).Distinct().ToList();
-        var next = !audioReady ? "uploadAudio" : !setupReady ? "completeSetup" : !externalAiReady ? "confirmRights" : !transcriptApproved ? "reviewTranscript" : !artworkApproved ? "reviewArtwork" : !hooksReady ? "reviewHooks" : campaign is null ? "waitForCampaign" : previewJob?.State != JobState.Succeeded ? "waitForPreview" : null;
-        return new WorkflowResponse(project.Id, project.FlowKind, project.Version, blockers, next, laneResponses);
     }
 
     private static async Task RequireArtworkGate(
@@ -1170,9 +1294,23 @@ public static class Mp3FirstEndpoints
     private static void ValidateTranscript(PutTranscriptRequest request)
     {
         var errors = new ValidationErrors();
+        if (request.Source == TranscriptSource.Automatic)
+            errors.Add("source", "Automatic transcript revisions can only be created by the transcription worker.");
+        if (request.Source == TranscriptSource.Instrumental && !request.IsInstrumental)
+            errors.Add("source", "Instrumental source requires an explicitly confirmed instrumental transcript.");
         if (request.Language is not ("en" or "ru")) errors.Add("language", "Automatic workflow supports English and Russian.");
+        if (request.Phrases is null)
+        {
+            errors.Add("phrases", "Provide a transcript phrase list.");
+            ApiEndpointHelpers.RequireValid(errors);
+            return;
+        }
         if (request.IsInstrumental && request.Phrases.Count != 0) errors.Add("phrases", "Instrumental transcripts must not contain phrases.");
         if (!request.IsInstrumental && request.Phrases.Count == 0) errors.Add("phrases", "Add at least one phrase.");
+        if (request.Phrases.Count > TranscriptMaxPhraseCount)
+            errors.Add("phrases", $"A transcript can contain at most {TranscriptMaxPhraseCount:N0} phrases.");
+        if (request.Phrases.Sum(value => (long)(value.Text?.Length ?? 0)) > TranscriptMaxTotalTextLength)
+            errors.Add("phrases", $"Transcript text can contain at most {TranscriptMaxTotalTextLength:N0} characters.");
         if (request.Phrases.Select(value => value.Id).Distinct(StringComparer.Ordinal).Count() != request.Phrases.Count) errors.Add("phrases", "Phrase IDs must be unique.");
         if (request.Phrases.Select(value => value.Order).Distinct().Count() != request.Phrases.Count ||
             !request.Phrases.OrderBy(value => value.Order).Select(value => value.Order).SequenceEqual(Enumerable.Range(0, request.Phrases.Count)))
@@ -1182,7 +1320,101 @@ public static class Mp3FirstEndpoints
             if (string.IsNullOrWhiteSpace(phrase.Id) || phrase.Id.Length > 64 || string.IsNullOrWhiteSpace(phrase.Text) || phrase.Text.Length > 2_000 || phrase.StartMilliseconds < 0 || phrase.EndMilliseconds <= phrase.StartMilliseconds || phrase.Confidence is < 0 or > 1)
                 errors.Add("phrases", "Every phrase needs a stable ID, text, valid timing, and confidence between 0 and 1.");
         }
+        var orderedPhrases = request.Phrases.OrderBy(value => value.Order).ToArray();
+        for (var index = 1; index < orderedPhrases.Length; index++)
+        {
+            if (orderedPhrases[index].StartMilliseconds < orderedPhrases[index - 1].EndMilliseconds)
+            {
+                errors.Add("phrases", "Phrase timings must be chronological and must not overlap.");
+                break;
+            }
+        }
         ApiEndpointHelpers.RequireValid(errors);
+    }
+
+    private static async Task CancelActiveJobsAsync(
+        Hook2StreamDbContext db,
+        Guid projectId,
+        JobType type,
+        string reasonCode,
+        CancellationToken cancellationToken)
+    {
+        var jobs = await db.Jobs
+            .Where(value => value.ProjectId == projectId &&
+                            value.Type == type &&
+                            (value.State == JobState.Queued || value.State == JobState.Running))
+            .ToListAsync(cancellationToken);
+        if (jobs.Count == 0) return;
+
+        var jobIds = jobs.Select(value => value.Id).ToArray();
+        var attempts = await db.JobAttempts
+            .Where(value => jobIds.Contains(value.JobId) && value.State == JobState.Running)
+            .ToListAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        foreach (var job in jobs)
+        {
+            job.State = JobState.Cancelled;
+            job.CompletedAt = now;
+            job.ProgressStage = "cancelled";
+            job.ErrorCode = reasonCode;
+            job.ErrorMessage = "The job was cancelled because a user supplied a newer revision.";
+            job.LeaseOwner = null;
+            job.LeaseExpiresAt = null;
+            job.LeaseToken = null;
+            db.JobEvents.Add(new JobEvent
+            {
+                JobId = job.Id,
+                EventType = "cancelled",
+                DataJson = JsonSerializer.Serialize(new { reasonCode })
+            });
+        }
+
+        foreach (var attempt in attempts)
+        {
+            attempt.State = JobState.Cancelled;
+            attempt.CompletedAt = now;
+            attempt.ErrorCode = reasonCode;
+        }
+    }
+
+    private static async Task UpdateWorkflowStagesAsync(
+        Hook2StreamDbContext db,
+        Guid projectId,
+        IReadOnlyList<WorkflowStageUpdate> updates,
+        CancellationToken cancellationToken)
+    {
+        var run = await db.PipelineRuns
+            .Include(value => value.Stages)
+            .Where(value => value.ProjectId == projectId)
+            .OrderByDescending(value => value.Number)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (run is null) return;
+
+        foreach (var update in updates)
+        {
+            var stage = run.Stages.SingleOrDefault(value => value.Lane == update.Lane);
+            if (stage is null) continue;
+            stage.State = update.State;
+            stage.ProgressPercent = update.State == PipelineStageState.Succeeded ? 100 : 0;
+            stage.BlockerCode = update.BlockerCode;
+            stage.ErrorCode = null;
+            stage.CurrentJobId = null;
+        }
+
+        var states = run.Stages.Select(value => value.State).ToArray();
+        run.State = states.Any(value => value == PipelineStageState.Failed)
+            ? PipelineStageState.Failed
+            : states.Any(value => value == PipelineStageState.Degraded)
+                ? PipelineStageState.Degraded
+                : states.Any(value => value is PipelineStageState.Running or PipelineStageState.Queued or PipelineStageState.Retrying)
+                    ? PipelineStageState.Running
+                    : states.All(value => value == PipelineStageState.Succeeded)
+                        ? PipelineStageState.Succeeded
+                        : PipelineStageState.WaitingUser;
+        run.CompletedAt = run.State == PipelineStageState.Succeeded
+            ? run.CompletedAt ?? DateTimeOffset.UtcNow
+            : null;
+        run.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     private static void ValidateHooks(PutHooksRequest request, long? audioDuration)
@@ -1249,14 +1481,39 @@ public static class Mp3FirstEndpoints
         return key;
     }
 
-    private static async Task<UploadSessionResponse> RefreshUploadResponse(UploadSession session, IObjectStorage storage, CancellationToken cancellationToken)
+    private static async Task<UploadSessionResponse> RefreshUploadResponse(
+        UploadSession session,
+        IObjectStorage storage,
+        TimeSpan configuredUrlLifetime,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
+        if (session.ExpiresAt <= now)
+            throw Problem(410, "upload.session_expired", "The upload session expired. Start a new upload.");
+        var urlLifetime = session.ExpiresAt - now < configuredUrlLifetime
+            ? session.ExpiresAt - now
+            : configuredUrlLifetime;
         Uri? uploadUrl = null;
         if (!session.IsMultipart && session.State is UploadState.Initiated or UploadState.Uploading)
-            uploadUrl = await storage.CreateUploadUrlAsync(session.ObjectKey, session.Asset.DeclaredContentType, UploadUrlLifetime, cancellationToken);
+            uploadUrl = await storage.CreateUploadUrlAsync(
+                session.ObjectKey,
+                session.Asset.DeclaredContentType,
+                urlLifetime,
+                cancellationToken);
         var partCount = session.IsMultipart ? (int)Math.Ceiling(session.Asset.DeclaredBytes / (double)session.PartSizeBytes) : 1;
-        return new UploadSessionResponse(session.Id, session.AssetId, session.IsMultipart, uploadUrl?.ToString(), session.MultipartUploadId, session.PartSizeBytes, partCount, session.ExpiresAt);
+        return new UploadSessionResponse(
+            session.Id,
+            session.AssetId,
+            session.IsMultipart,
+            uploadUrl?.ToString(),
+            session.MultipartUploadId,
+            session.PartSizeBytes,
+            partCount,
+            now.Add(urlLifetime),
+            session.ExpiresAt);
     }
+
+    private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) => left <= right ? left : right;
 
     private static async Task<ReleaseProject> Project(Hook2StreamDbContext db, Guid workspaceId, Guid projectId, bool assets, CancellationToken cancellationToken)
     {
@@ -1301,6 +1558,72 @@ public static class Mp3FirstEndpoints
         try { return JsonDocument.Parse(json); }
         catch (JsonException) { throw Problem(422, "validation.failed", $"{field} must contain valid JSON."); }
     }
+
+    private static CampaignItemPlan ToCampaignPlan(CampaignItemRequest item)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(item.CompositionJson);
+            var root = document.RootElement;
+            var relativeDay = root.TryGetProperty("relativeDay", out var relativeDayValue) &&
+                              relativeDayValue.TryGetInt32(out var parsedRelativeDay)
+                ? parsedRelativeDay
+                : int.MinValue;
+            var duration = root.TryGetProperty("durationMilliseconds", out var durationValue) &&
+                           durationValue.TryGetInt64(out var parsedDuration)
+                ? parsedDuration
+                : 0;
+            var headline = root.TryGetProperty("headline", out var headlineValue) &&
+                           headlineValue.ValueKind == JsonValueKind.String
+                ? headlineValue.GetString() ?? item.Text
+                : item.Text;
+            var callToAction = root.TryGetProperty("cta", out var ctaValue) &&
+                               ctaValue.ValueKind == JsonValueKind.String
+                ? ctaValue.GetString() ?? string.Empty
+                : string.Empty;
+            return new CampaignItemPlan(
+                item.Id,
+                item.Slot,
+                relativeDay,
+                item.Template,
+                string.IsNullOrWhiteSpace(item.HookId) ? null : StableGuid(item.HookId),
+                headline,
+                item.Text,
+                callToAction,
+                item.BackgroundAssetId,
+                duration,
+                item.CompositionJson);
+        }
+        catch (JsonException)
+        {
+            return new CampaignItemPlan(
+                item.Id,
+                item.Slot,
+                int.MinValue,
+                item.Template,
+                string.IsNullOrWhiteSpace(item.HookId) ? null : StableGuid(item.HookId),
+                item.Text,
+                item.Text,
+                string.Empty,
+                item.BackgroundAssetId,
+                0,
+                item.CompositionJson);
+        }
+    }
+
+    private static Guid StableGuid(string value)
+    {
+        if (Guid.TryParse(value, out var parsed)) return parsed;
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value))[..16];
+        bytes[6] = (byte)((bytes[6] & 0x0F) | 0x50);
+        bytes[8] = (byte)((bytes[8] & 0x3F) | 0x80);
+        return new Guid(bytes);
+    }
+
+    private sealed record WorkflowStageUpdate(
+        WorkflowLane Lane,
+        PipelineStageState State,
+        string? BlockerCode = null);
 
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static ApiProblemException NotFound() => Problem(404, "resource.not_found", "The requested resource was not found.");

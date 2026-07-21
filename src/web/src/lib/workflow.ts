@@ -13,17 +13,36 @@ export type WorkflowLane = {
   state: string;
   progressPercent: number;
   blockerCode?: string | null;
+  errorCode?: string | null;
+  currentJobId?: string | null;
   message?: string | null;
   updatedAt?: string | null;
 };
+
+export type WorkflowNextAction =
+  | "uploadAudio"
+  | "completeSetup"
+  | "confirmRights"
+  | "reviewTranscript"
+  | "reviewArtwork"
+  | "reviewHooks"
+  | "waitForCampaign"
+  | "waitForPreview"
+  | "purchaseRender"
+  | "startFinalRender"
+  | "waitForFinalRender"
+  | "downloadExport"
+  | "retryFailedRenders";
 
 export type Workflow = {
   projectId: string;
   flowKind: "legacy" | "mp3First" | string;
   projectVersion: number;
+  workflowVersion: number;
   lanes: WorkflowLane[];
   blockers: string[];
-  nextAction?: string | null;
+  nextAction?: WorkflowNextAction | null;
+  currentRenderBatchId?: string | null;
 };
 
 export type TranscriptWord = {

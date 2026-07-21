@@ -259,12 +259,6 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
-                    b.Property<string>("ExternalSubject")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("character varying(255)")
-                        .HasColumnName("external_subject");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -282,6 +276,12 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasMaxLength(320)
                         .HasColumnType("character varying(320)")
                         .HasColumnName("email");
+
+                    b.Property<string>("ExternalSubject")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("external_subject");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -582,6 +582,69 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("ix_audit_events_workspace_id_created_at");
 
                     b.ToTable("audit_events", (string)null);
+                });
+
+            modelBuilder.Entity("Hook2Stream.Domain.AuthSession", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CsrfTokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("csrf_token_hash")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("token_hash")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id")
+                        .HasName("pk_auth_sessions");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_auth_sessions_token_hash");
+
+                    b.HasIndex("UserId", "ExpiresAt")
+                        .HasDatabaseName("ix_auth_sessions_user_id_expires_at");
+
+                    b.ToTable("auth_sessions", (string)null);
                 });
 
             modelBuilder.Entity("Hook2Stream.Domain.BillingCheckout", b =>
@@ -1745,6 +1808,64 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                     b.ToTable("media_derivatives", (string)null);
                 });
 
+            modelBuilder.Entity("Hook2Stream.Domain.OAuthLoginState", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset?>("ConsumedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("consumed_at");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<string>("ReturnPath")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("return_path");
+
+                    b.Property<string>("StateHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("state_hash")
+                        .IsFixedLength();
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id")
+                        .HasName("pk_oauth_login_states");
+
+                    b.HasIndex("StateHash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_oauth_login_states_state_hash");
+
+                    b.HasIndex("ExpiresAt", "ConsumedAt")
+                        .HasDatabaseName("ix_oauth_login_states_expires_at_consumed_at");
+
+                    b.ToTable("oauth_login_states", (string)null);
+                });
+
             modelBuilder.Entity("Hook2Stream.Domain.OutboxMessage", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1911,6 +2032,10 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("current_job_id");
 
+                    b.Property<Guid?>("CurrentRenderBatchId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("current_render_batch_id");
+
                     b.Property<DateTimeOffset?>("DeletedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
@@ -1948,11 +2073,94 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_pipeline_stages");
 
+                    b.HasIndex("CurrentRenderBatchId")
+                        .HasDatabaseName("ix_pipeline_stages_current_render_batch_id")
+                        .HasFilter("current_render_batch_id IS NOT NULL");
+
                     b.HasIndex("PipelineRunId", "Lane")
                         .IsUnique()
                         .HasDatabaseName("ix_pipeline_stages_pipeline_run_id_lane");
 
                     b.ToTable("pipeline_stages", (string)null);
+                });
+
+            modelBuilder.Entity("Hook2Stream.Domain.ProjectDeletionTombstone", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ActorSubject")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("actor_subject");
+
+                    b.Property<DateTimeOffset?>("ContentPurgedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("content_purged_at");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("last_error");
+
+                    b.Property<string>("PolicyVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("policy_version");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.Property<DateTimeOffset>("PurgeDueAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("purge_due_at");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("requested_at");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("state");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("workspace_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_project_deletion_tombstones");
+
+                    b.HasIndex("State", "PurgeDueAt")
+                        .HasDatabaseName("ix_project_deletion_tombstones_state_purge_due_at");
+
+                    b.HasIndex("WorkspaceId", "ProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_project_deletion_tombstones_workspace_id_project_id");
+
+                    b.ToTable("project_deletion_tombstones", (string)null);
                 });
 
             modelBuilder.Entity("Hook2Stream.Domain.ProjectEvent", b =>
@@ -2119,6 +2327,10 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("state");
 
+                    b.Property<int?>("StateBeforeArchive")
+                        .HasColumnType("integer")
+                        .HasColumnName("state_before_archive");
+
                     b.Property<string>("TrackTitle")
                         .IsRequired()
                         .HasMaxLength(160)
@@ -2190,6 +2402,10 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("kind");
 
+                    b.Property<Guid?>("PipelineRunId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("pipeline_run_id");
+
                     b.Property<Guid>("ProjectId")
                         .HasColumnType("uuid")
                         .HasColumnName("project_id");
@@ -2219,6 +2435,10 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_render_batches");
+
+                    b.HasIndex("PipelineRunId")
+                        .HasDatabaseName("ix_render_batches_pipeline_run_id")
+                        .HasFilter("pipeline_run_id IS NOT NULL");
 
                     b.HasIndex("ProjectId", "CreatedAt")
                         .HasDatabaseName("ix_render_batches_project_id_created_at");
@@ -2725,6 +2945,18 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("ix_workspace_artwork_credits_workspace_id");
 
                     b.ToTable("workspace_artwork_credits", (string)null);
+                });
+
+            modelBuilder.Entity("Hook2Stream.Domain.AuthSession", b =>
+                {
+                    b.HasOne("Hook2Stream.Domain.AppUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_auth_sessions_users_user_id");
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("Hook2Stream.Domain.BrandKit", b =>

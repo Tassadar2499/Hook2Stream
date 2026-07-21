@@ -225,6 +225,249 @@ public sealed class Mp3FirstWorkflowTests
     }
 
     [Fact]
+    public async Task Manual_transcript_supersedes_processing_revision_and_fences_active_job()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var quick = await QuickUpload(client, "transcript-override-1", "lyrics.mp3", 1024);
+        var quickJson = await quick.Content.ReadFromJsonAsync<JsonElement>();
+        var projectId = quickJson.GetProperty("project").GetProperty("id").GetGuid();
+        Guid automaticId;
+        Guid jobId;
+
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            var project = await db.Projects.SingleAsync(value => value.Id == projectId);
+            var asset = await db.MediaAssets.SingleAsync(value => value.ProjectId == projectId);
+            asset.Sha256 = new string('a', 64);
+            var automatic = new TranscriptRevision
+            {
+                WorkspaceId = project.WorkspaceId,
+                ProjectId = project.Id,
+                Number = 1,
+                Source = TranscriptSource.Automatic,
+                State = RevisionState.Processing,
+                Language = "en",
+                SourceFingerprint = asset.Sha256
+            };
+            automaticId = automatic.Id;
+            project.CurrentTranscriptRevisionId = automatic.Id;
+            var job = new Job
+            {
+                WorkspaceId = project.WorkspaceId,
+                ProjectId = project.Id,
+                AssetId = asset.Id,
+                Type = JobType.Transcription,
+                State = JobState.Running,
+                RequiredCapability = Hook2Stream.Application.JobRoutingRegistry.Control,
+                HandlerVersion = "openrouter-stt-v1",
+                InputFingerprint = asset.Sha256,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    projectId,
+                    assetId = asset.Id,
+                    transcriptRevisionId = automatic.Id
+                }),
+                AttemptCount = 1,
+                LeaseOwner = "worker",
+                LeaseToken = Guid.CreateVersion7(),
+                LeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(1)
+            };
+            jobId = job.Id;
+            db.TranscriptRevisions.Add(automatic);
+            db.Jobs.Add(job);
+            db.JobAttempts.Add(new JobAttempt
+            {
+                JobId = job.Id,
+                Number = 1,
+                WorkerId = "worker",
+                State = JobState.Running,
+                StartedAt = DateTimeOffset.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var release = await client.GetAsync($"/api/v1/releases/{projectId}");
+        using var put = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/releases/{projectId}/transcript")
+        {
+            Content = JsonContent.Create(Transcript(warningAcknowledged: true))
+        };
+        put.Headers.TryAddWithoutValidation("If-Match", release.Headers.ETag!.Tag);
+
+        var response = await client.SendAsync(put);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Equal(
+            RevisionState.Superseded,
+            (await verifyDb.TranscriptRevisions.SingleAsync(value => value.Id == automaticId)).State);
+        var cancelled = await verifyDb.Jobs.SingleAsync(value => value.Id == jobId);
+        Assert.Equal(JobState.Cancelled, cancelled.State);
+        Assert.Null(cancelled.LeaseToken);
+        Assert.Equal("transcript.manual_override", cancelled.ErrorCode);
+        Assert.Equal(
+            JobState.Cancelled,
+            (await verifyDb.JobAttempts.SingleAsync(value => value.JobId == jobId)).State);
+    }
+
+    [Fact]
+    public async Task User_endpoint_rejects_automatic_transcript_source()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var quick = await QuickUpload(client, "transcript-source-1", "lyrics.mp3", 1024);
+        var quickJson = await quick.Content.ReadFromJsonAsync<JsonElement>();
+        var projectId = quickJson.GetProperty("project").GetProperty("id").GetGuid();
+        using var put = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/releases/{projectId}/transcript")
+        {
+            Content = JsonContent.Create(new
+            {
+                source = "automatic",
+                language = "en",
+                isInstrumental = false,
+                phrases = new[]
+                {
+                    new
+                    {
+                        id = "phrase-1",
+                        order = 0,
+                        text = "Cannot impersonate the worker",
+                        startMilliseconds = 0,
+                        endMilliseconds = 10_000,
+                        confidence = 1,
+                        warningAcknowledged = true,
+                        words = Array.Empty<object>()
+                    }
+                }
+            })
+        };
+        put.Headers.TryAddWithoutValidation("If-Match", quick.Headers.ETag!.Tag);
+
+        var response = await client.SendAsync(put);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Transcript_rejects_overlapping_phrase_timings()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var quick = await QuickUpload(client, "transcript-overlap-1", "lyrics.mp3", 1024);
+        var quickJson = await quick.Content.ReadFromJsonAsync<JsonElement>();
+        var projectId = quickJson.GetProperty("project").GetProperty("id").GetGuid();
+        using var put = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/releases/{projectId}/transcript")
+        {
+            Content = JsonContent.Create(new
+            {
+                source = "manual",
+                language = "en",
+                isInstrumental = false,
+                phrases = new[]
+                {
+                    new
+                    {
+                        id = "phrase-1",
+                        order = 0,
+                        text = "First line",
+                        startMilliseconds = 0,
+                        endMilliseconds = 2_000,
+                        confidence = 1,
+                        warningAcknowledged = true,
+                        words = Array.Empty<object>()
+                    },
+                    new
+                    {
+                        id = "phrase-2",
+                        order = 1,
+                        text = "Overlapping line",
+                        startMilliseconds = 1_999,
+                        endMilliseconds = 3_000,
+                        confidence = 1,
+                        warningAcknowledged = true,
+                        words = Array.Empty<object>()
+                    }
+                }
+            })
+        };
+        put.Headers.TryAddWithoutValidation("If-Match", quick.Headers.ETag!.Tag);
+
+        var response = await client.SendAsync(put);
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Transcript_rejects_excessive_phrase_count_and_total_text()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var quick = await QuickUpload(client, "transcript-limits-1", "lyrics.mp3", 1024);
+        var quickJson = await quick.Content.ReadFromJsonAsync<JsonElement>();
+        var projectId = quickJson.GetProperty("project").GetProperty("id").GetGuid();
+
+        var tooManyPhrases = Enumerable.Range(0, 2_001)
+            .Select(index => new
+            {
+                id = $"phrase-{index}",
+                order = index,
+                text = "x",
+                startMilliseconds = index * 2L,
+                endMilliseconds = index * 2L + 1,
+                confidence = 1,
+                warningAcknowledged = true,
+                words = Array.Empty<object>()
+            })
+            .ToArray();
+        using var tooManyRequest = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/releases/{projectId}/transcript")
+        {
+            Content = JsonContent.Create(new
+            {
+                source = "manual",
+                language = "en",
+                isInstrumental = false,
+                phrases = tooManyPhrases
+            })
+        };
+        tooManyRequest.Headers.TryAddWithoutValidation("If-Match", quick.Headers.ETag!.Tag);
+        var tooManyResponse = await client.SendAsync(tooManyRequest);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, tooManyResponse.StatusCode);
+
+        var tooMuchText = Enumerable.Range(0, 101)
+            .Select(index => new
+            {
+                id = $"phrase-{index}",
+                order = index,
+                text = new string('x', 2_000),
+                startMilliseconds = index * 2L,
+                endMilliseconds = index * 2L + 1,
+                confidence = 1,
+                warningAcknowledged = true,
+                words = Array.Empty<object>()
+            })
+            .ToArray();
+        using var tooMuchTextRequest = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/releases/{projectId}/transcript")
+        {
+            Content = JsonContent.Create(new
+            {
+                source = "manual",
+                language = "en",
+                isInstrumental = false,
+                phrases = tooMuchText
+            })
+        };
+        tooMuchTextRequest.Headers.TryAddWithoutValidation("If-Match", quick.Headers.ETag!.Tag);
+        var tooMuchTextResponse = await client.SendAsync(tooMuchTextRequest);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, tooMuchTextResponse.StatusCode);
+    }
+
+    [Fact]
     public async Task Artwork_requires_external_ai_consent_after_setup_and_rights()
     {
         await using var factory = new Hook2StreamApiFactory();

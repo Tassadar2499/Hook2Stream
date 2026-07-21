@@ -19,7 +19,7 @@ public sealed class MediaIngestJobHandler(
     Hook2Stream.Infrastructure.Persistence.Hook2StreamDbContext db) : IJobHandler
 {
     public JobType Type => JobType.MediaIngest;
-    public string Capability => "media";
+    public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {

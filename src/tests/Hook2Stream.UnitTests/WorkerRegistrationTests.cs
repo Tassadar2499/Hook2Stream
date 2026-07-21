@@ -1,8 +1,11 @@
 using Hook2Stream.Domain;
 using Hook2Stream.Application;
 using Hook2Stream.Infrastructure;
+using Hook2Stream.Infrastructure.Providers;
+using Microsoft.Extensions.Configuration;
 using Hook2Stream.Worker;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.UnitTests;
@@ -17,7 +20,7 @@ public sealed class WorkerRegistrationTests
         services.AddHook2StreamJobHandlers();
 
         var handlers = services.Where(value => value.ServiceType == typeof(IJobHandler)).ToArray();
-        Assert.Equal(9, handlers.Length);
+        Assert.Equal(10, handlers.Length);
         Assert.Equal(2, handlers.Count(value => value.ImplementationFactory is not null));
         Assert.Contains(handlers, value => value.ImplementationType == typeof(ExportBundleJobHandler));
         Assert.Contains(handlers, value => value.ImplementationType == typeof(CleanCoverRenderJobHandler));
@@ -30,6 +33,130 @@ public sealed class WorkerRegistrationTests
         Assert.Equal(JobType.FinalRender, final.Type);
         Assert.Throws<ArgumentOutOfRangeException>(() => new VideoRenderJobHandler(
             JobType.ExportBundle, null!, null!, null!, null!));
+    }
+
+    [Theory]
+    [InlineData(JobType.MediaIngest, JobRoutingRegistry.Media)]
+    [InlineData(JobType.AudioAnalysis, JobRoutingRegistry.Analysis)]
+    [InlineData(JobType.Transcription, JobRoutingRegistry.Control)]
+    [InlineData(JobType.ArtworkGeneration, JobRoutingRegistry.Control)]
+    [InlineData(JobType.CampaignGeneration, JobRoutingRegistry.Control)]
+    [InlineData(JobType.AssetCleanup, JobRoutingRegistry.Control)]
+    [InlineData(JobType.PreviewRender, JobRoutingRegistry.Render)]
+    [InlineData(JobType.FinalRender, JobRoutingRegistry.Render)]
+    [InlineData(JobType.CleanCoverRender, JobRoutingRegistry.Render)]
+    [InlineData(JobType.ExportBundle, JobRoutingRegistry.Export)]
+    public void Job_routing_registry_is_authoritative(JobType type, string capability)
+    {
+        Assert.Equal(capability, JobRoutingRegistry.GetRequiredCapability(type));
+        JobRoutingRegistry.EnsureMatches(type, capability.ToUpperInvariant());
+    }
+
+    [Theory]
+    [InlineData(JobRoutingRegistry.Media, 1)]
+    [InlineData(JobRoutingRegistry.Analysis, 1)]
+    [InlineData(JobRoutingRegistry.Control, 4)]
+    [InlineData(JobRoutingRegistry.Render, 3)]
+    [InlineData(JobRoutingRegistry.Export, 1)]
+    public void Worker_pool_registers_only_its_routed_handlers(
+        string capability,
+        int expectedHandlerCount)
+    {
+        var services = new ServiceCollection();
+
+        services.AddHook2StreamJobHandlers([capability]);
+
+        var handlers = services.Count(value => value.ServiceType == typeof(IJobHandler));
+        Assert.Equal(expectedHandlerCount, handlers);
+    }
+
+    [Fact]
+    public void Worker_routing_validation_rejects_a_handler_capability_mismatch()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            WorkerRoutingValidation.Validate(
+                [JobRoutingRegistry.Media],
+                [new MismatchedHandler()]));
+
+        Assert.Contains("authoritative job route", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(JobRoutingRegistry.Media)]
+    [InlineData(JobRoutingRegistry.Analysis)]
+    [InlineData(JobRoutingRegistry.Render)]
+    [InlineData(JobRoutingRegistry.Export)]
+    public void Non_control_pool_does_not_register_or_require_OpenRouter(string capability)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PipelineProviders:AudioAnalysis:Mode"] = "Deterministic",
+                ["PipelineProviders:VideoRendering:Mode"] = "Deterministic"
+            })
+            .Build();
+        var services = new ServiceCollection()
+            .AddHook2StreamPipelineProviders(
+                configuration,
+                allowFixtureProviders: false,
+                [capability]);
+
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType == typeof(OpenRouterClient));
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType == typeof(ITranscriptionProvider));
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType == typeof(IArtworkProvider));
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType == typeof(ICampaignPlanner));
+
+        using var provider = services.BuildServiceProvider();
+        _ = provider.GetRequiredService<IOptions<PipelineProviderOptions>>().Value;
+    }
+
+    [Fact]
+    public void Control_pool_owns_OpenRouter_and_AI_provider_registrations()
+    {
+        var services = new ServiceCollection()
+            .AddHook2StreamPipelineProviders(
+                new ConfigurationBuilder().Build(),
+                allowFixtureProviders: true,
+                [JobRoutingRegistry.Control]);
+
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(OpenRouterClient));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(ITranscriptionProvider));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(IArtworkProvider));
+        Assert.Contains(services, descriptor => descriptor.ServiceType == typeof(ICampaignPlanner));
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IAudioAnalysisProvider));
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IVideoRenderer));
+    }
+
+    [Theory]
+    [InlineData(JobRoutingRegistry.Media, false)]
+    [InlineData(JobRoutingRegistry.Analysis, false)]
+    [InlineData(JobRoutingRegistry.Control, true)]
+    [InlineData(JobRoutingRegistry.Render, false)]
+    [InlineData(JobRoutingRegistry.Export, false)]
+    public void Only_control_pool_registers_control_loop_services(
+        string capability,
+        bool expectedControlLoops)
+    {
+        var services = new ServiceCollection()
+            .AddHook2StreamWorkerRole([capability]);
+        var hostedServiceTypes = services
+            .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
+            .Select(descriptor => descriptor.ImplementationType)
+            .ToHashSet();
+
+        Assert.Equal(expectedControlLoops, hostedServiceTypes.Contains(typeof(OutboxJobDispatcher)));
+        Assert.Equal(expectedControlLoops, hostedServiceTypes.Contains(typeof(PipelineReconciler)));
+        Assert.Equal(expectedControlLoops, hostedServiceTypes.Contains(typeof(RetentionSweepService)));
+        Assert.Contains(typeof(WorkerRoutingStartupValidator), hostedServiceTypes);
+        Assert.Contains(typeof(MediaJobWorker), hostedServiceTypes);
     }
 
     [Fact]
@@ -97,4 +224,13 @@ public sealed class WorkerRegistrationTests
         ObjectKey = "asset/object",
         Sha256 = new string(hashSeed[0], 64)
     };
+
+    private sealed class MismatchedHandler : IJobHandler
+    {
+        public JobType Type => JobType.MediaIngest;
+        public string Capability => JobRoutingRegistry.Analysis;
+
+        public Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+    }
 }

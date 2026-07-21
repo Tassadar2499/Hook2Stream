@@ -50,6 +50,29 @@ public sealed class ReleaseRulesTests
         Assert.Contains("lyricsText", errors.Keys);
     }
 
+    [Fact]
+    public void Archive_and_restore_preserve_the_previous_workflow_state()
+    {
+        var project = new ReleaseProject
+        {
+            WorkspaceId = Guid.CreateVersion7(),
+            ProjectLabel = "Release 01",
+            ArtistName = "Artist",
+            TrackTitle = "Track",
+            State = ProjectState.PreviewReady
+        };
+
+        project.Archive();
+        Assert.True(project.IsArchived);
+        Assert.Equal(ProjectState.Archived, project.State);
+        Assert.Equal(ProjectState.PreviewReady, project.StateBeforeArchive);
+
+        project.Restore();
+        Assert.False(project.IsArchived);
+        Assert.Equal(ProjectState.PreviewReady, project.State);
+        Assert.Null(project.StateBeforeArchive);
+    }
+
     private static CreateReleaseRequest CreateRequest(
         ReleaseMode mode,
         DateOnly? releaseDate,

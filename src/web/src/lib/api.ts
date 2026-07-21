@@ -1,4 +1,9 @@
 import type { components } from "./api-schema";
+import {
+  COOKIE_SESSION_MARKER,
+  markOAuthSessionSignedOut,
+  readOAuthCsrfToken,
+} from "./auth-session";
 
 type Schemas = components["schemas"];
 
@@ -46,19 +51,29 @@ export async function apiFetch<T>(
   init: RequestInit = {},
 ): Promise<{ data: T; etag?: string }> {
   const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
+  if (token !== COOKIE_SESSION_MARKER) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
   headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
+  }
+  if (token === COOKIE_SESSION_MARKER && isUnsafeMethod(init.method)) {
+    const csrfToken = readOAuthCsrfToken();
+    if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
   }
 
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
     headers,
+    credentials: "include",
     cache: "no-store",
   });
 
   if (!response.ok) {
+    if (response.status === 401 && token === COOKIE_SESSION_MARKER) {
+      markOAuthSessionSignedOut();
+    }
     let problem: ProblemDetails = {};
     try {
       problem = (await response.json()) as ProblemDetails;
@@ -90,11 +105,10 @@ export async function streamJobEvents(
   onEvent: (event: { id?: string; type: string; data: unknown }) => void,
   signal: AbortSignal,
 ) {
+  const headers = authenticatedHeaders(token, "text/event-stream");
   const response = await fetch(`${apiBaseUrl}/api/v1/jobs/${jobId}/events`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "text/event-stream",
-    },
+    headers,
+    credentials: "include",
     cache: "no-store",
     signal,
   });
@@ -145,13 +159,12 @@ export async function streamProjectEvents(
   onEvent: (event: { id?: string; type: string; data: unknown }) => void,
   signal: AbortSignal,
 ) {
+  const headers = authenticatedHeaders(token, "text/event-stream");
   const response = await fetch(
     `${apiBaseUrl}/api/v1/releases/${projectId}/events`,
     {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "text/event-stream",
-      },
+      headers,
+      credentials: "include",
       cache: "no-store",
       signal,
     },
@@ -196,4 +209,17 @@ export async function streamProjectEvents(
       onEvent({ id, type, data });
     }
   }
+}
+
+function authenticatedHeaders(token: string, accept: string) {
+  const headers = new Headers({ Accept: accept });
+  if (token !== COOKIE_SESSION_MARKER) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return headers;
+}
+
+function isUnsafeMethod(method?: string) {
+  const normalized = (method ?? "GET").toUpperCase();
+  return !["GET", "HEAD", "OPTIONS", "TRACE"].includes(normalized);
 }

@@ -83,10 +83,24 @@ public static class CampaignPlanContractValidator
         IReadOnlyList<CampaignItemPlan> items)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return Validate(request.IsAlreadyReleased, request.Hooks.Select(value => value.HookId).ToArray(), items);
+    }
+
+    /// <summary>
+    /// Validates an already materialized campaign revision without requiring a provider execution
+    /// context. Manual edits use this overload so they cross the same canonical boundary as
+    /// fixture and external-provider output.
+    /// </summary>
+    public static CampaignPlanContractValidation Validate(
+        bool isAlreadyReleased,
+        IReadOnlyList<Guid> hookIds,
+        IReadOnlyList<CampaignItemPlan> items)
+    {
+        ArgumentNullException.ThrowIfNull(hookIds);
         ArgumentNullException.ThrowIfNull(items);
 
         var errors = new List<CampaignPlanContractError>();
-        if (request.Hooks.Count != 3)
+        if (hookIds.Count != 3)
         {
             Add(errors, "campaign.hook_count", "The campaign input must contain exactly three hooks.");
         }
@@ -121,20 +135,20 @@ public static class CampaignPlanContractValidator
             ValidateComposition(item, errors);
         }
 
-        ValidateHookMatrix(request, items, errors);
-        ValidateSupportingTypes(request.IsAlreadyReleased, items, errors);
-        ValidateSchedule(request, items, errors);
+        ValidateHookMatrix(hookIds, items, errors);
+        ValidateSupportingTypes(isAlreadyReleased, items, errors);
+        ValidateSchedule(isAlreadyReleased, hookIds, items, errors);
         return new CampaignPlanContractValidation(errors);
     }
 
     private static void ValidateHookMatrix(
-        CampaignPlanningRequest request,
+        IReadOnlyList<Guid> hookIds,
         IReadOnlyList<CampaignItemPlan> items,
         ICollection<CampaignPlanContractError> errors)
     {
-        if (request.Hooks.Count != 3) return;
+        if (hookIds.Count != 3) return;
 
-        var expectedHookIds = request.Hooks.Select(hook => hook.HookId).ToHashSet();
+        var expectedHookIds = hookIds.ToHashSet();
         var hookItems = items.Where(item => item.HookId is not null).ToArray();
         if (hookItems.Length != 12 || hookItems.Any(item => !expectedHookIds.Contains(item.HookId!.Value)))
         {
@@ -142,16 +156,16 @@ public static class CampaignPlanContractValidator
             return;
         }
 
-        foreach (var hook in request.Hooks)
+        foreach (var hookId in hookIds)
         {
             foreach (var template in HookTemplates)
             {
-                if (hookItems.Count(item => item.HookId == hook.HookId && item.TemplateKey == template) != 1)
+                if (hookItems.Count(item => item.HookId == hookId && item.TemplateKey == template) != 1)
                 {
                     Add(
                         errors,
                         "campaign.hook_matrix",
-                        $"Hook {hook.HookId} must have exactly one {template} item.");
+                        $"Hook {hookId} must have exactly one {template} item.");
                 }
             }
         }
@@ -194,19 +208,20 @@ public static class CampaignPlanContractValidator
     }
 
     private static void ValidateSchedule(
-        CampaignPlanningRequest request,
+        bool isAlreadyReleased,
+        IReadOnlyList<Guid> hookIds,
         IReadOnlyList<CampaignItemPlan> items,
         ICollection<CampaignPlanContractError> errors)
     {
-        if (request.Hooks.Count != 3 || items.Count != ExpectedItemCount) return;
+        if (hookIds.Count != 3 || items.Count != ExpectedItemCount) return;
 
-        var expected = CanonicalSlots(request.IsAlreadyReleased);
+        var expected = CanonicalSlots(isAlreadyReleased);
         for (var index = 0; index < expected.Count; index++)
         {
             var slot = expected[index];
             var item = items[index];
             var expectedHookId = slot.HookIndex is { } hookIndex
-                ? request.Hooks[hookIndex].HookId
+                ? hookIds[hookIndex]
                 : (Guid?)null;
             if (item.RelativeDay != slot.RelativeDay ||
                 item.TemplateKey != slot.TemplateKey ||
@@ -215,7 +230,7 @@ public static class CampaignPlanContractValidator
                 Add(
                     errors,
                     "campaign.schedule",
-                    $"Slot {index + 1} does not match the canonical {(request.IsAlreadyReleased ? "Released" : "Upcoming")} recipe.");
+                    $"Slot {index + 1} does not match the canonical {(isAlreadyReleased ? "Released" : "Upcoming")} recipe.");
             }
         }
     }

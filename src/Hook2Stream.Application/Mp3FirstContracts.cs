@@ -34,13 +34,46 @@ public sealed record WorkflowLaneResponse(
     string? ErrorCode,
     Guid? CurrentJobId);
 
+public enum WorkflowNextAction
+{
+    UploadAudio = 1,
+    CompleteSetup = 2,
+    ConfirmRights = 3,
+    ReviewTranscript = 4,
+    ReviewArtwork = 5,
+    ReviewHooks = 6,
+    WaitForCampaign = 7,
+    WaitForPreview = 8,
+    PurchaseRender = 9,
+    StartFinalRender = 10,
+    WaitForFinalRender = 11,
+    DownloadExport = 12,
+    RetryFailedRenders = 13
+}
+
+public static class WorkflowBlockerCodes
+{
+    public const string RightsRequired = "rights.required";
+    public const string VisualRightsRequired = "rights.visual_required";
+    public const string ExternalAiProcessingRequired = "rights.external_ai_processing_required";
+    public const string RightsStale = "rights.stale";
+
+    public static bool RequiresRightsConfirmation(string? blockerCode) => blockerCode is
+        RightsRequired or
+        VisualRightsRequired or
+        ExternalAiProcessingRequired or
+        RightsStale;
+}
+
 public sealed record WorkflowResponse(
     Guid ProjectId,
     FlowKind FlowKind,
     long ProjectVersion,
+    long WorkflowVersion,
     IReadOnlyList<string> Blockers,
-    string? NextAction,
-    IReadOnlyList<WorkflowLaneResponse> Lanes);
+    WorkflowNextAction? NextAction,
+    IReadOnlyList<WorkflowLaneResponse> Lanes,
+    Guid? CurrentRenderBatchId = null);
 
 public sealed record TranscriptWordResponse(
     string Text,

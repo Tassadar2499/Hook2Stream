@@ -5,20 +5,22 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useSyncExternalStore,
 } from "react";
 import {
   buildOAuthLoginUrl,
-  buildOAuthLogoutUrl,
   type AppAuthMode,
 } from "@/lib/auth-config";
 import {
-  clearSessionToken,
-  readSessionToken,
-  subscribeSessionToken,
-  writeSessionToken,
-} from "@/lib/auth-storage";
+  COOKIE_SESSION_MARKER,
+  logoutOAuthSession,
+  readOAuthSession,
+  readServerOAuthSession,
+  refreshOAuthSession,
+  subscribeOAuthSession,
+} from "@/lib/auth-session";
 
 type AppAuthContextValue = {
   mode: AppAuthMode;
@@ -32,7 +34,8 @@ type AppAuthContextValue = {
 const AppAuthContext = createContext<AppAuthContextValue | undefined>(undefined);
 
 const noopSubscribe = () => () => {};
-const noopSnapshot = () => null;
+const localSnapshot = { loaded: true, authenticated: false };
+const noopSnapshot = () => localSnapshot;
 
 type AppAuthProviderProps = {
   children: React.ReactNode;
@@ -43,17 +46,26 @@ type AppAuthProviderProps = {
 export function AppAuthProvider({ children, mode, localToken }: AppAuthProviderProps) {
   const router = useRouter();
 
-  const subscribe = mode === "oauth" ? subscribeSessionToken : noopSubscribe;
-  const getSnapshot = mode === "oauth" ? readSessionToken : noopSnapshot;
-  const oauthToken = useSyncExternalStore(
+  const subscribe = mode === "oauth" ? subscribeOAuthSession : noopSubscribe;
+  const getSnapshot = mode === "oauth" ? readOAuthSession : noopSnapshot;
+  const oauthSession = useSyncExternalStore(
     subscribe,
     getSnapshot,
-    noopSnapshot,
+    mode === "oauth" ? readServerOAuthSession : noopSnapshot,
   );
+
+  useEffect(() => {
+    if (mode === "oauth") void refreshOAuthSession();
+  }, [mode]);
 
   const getToken = useCallback(async (): Promise<string | null> => {
     if (mode === "local") return localToken ?? null;
-    if (mode === "oauth") return readSessionToken();
+    if (mode === "oauth") {
+      const current = readOAuthSession().loaded
+        ? readOAuthSession()
+        : await refreshOAuthSession();
+      return current.authenticated ? COOKIE_SESSION_MARKER : null;
+    }
     return null;
   }, [mode, localToken]);
 
@@ -64,8 +76,10 @@ export function AppAuthProvider({ children, mode, localToken }: AppAuthProviderP
 
   const signOut = useCallback(() => {
     if (mode === "oauth") {
-      clearSessionToken();
-      window.location.href = buildOAuthLogoutUrl();
+      void logoutOAuthSession().finally(() => {
+        router.push("/?auth=signed_out");
+        router.refresh();
+      });
     } else {
       router.push("/");
     }
@@ -75,19 +89,19 @@ export function AppAuthProvider({ children, mode, localToken }: AppAuthProviderP
     mode === "local"
       ? Boolean(localToken)
       : mode === "oauth"
-        ? Boolean(oauthToken)
+        ? oauthSession.authenticated
         : false;
 
   const value = useMemo<AppAuthContextValue>(
     () => ({
       mode,
-      isLoaded: true,
+      isLoaded: mode !== "oauth" || oauthSession.loaded,
       isSignedIn,
       getToken,
       signIn,
       signOut,
     }),
-    [mode, isSignedIn, getToken, signIn, signOut],
+    [mode, oauthSession.loaded, isSignedIn, getToken, signIn, signOut],
   );
 
   return <AppAuthContext.Provider value={value}>{children}</AppAuthContext.Provider>;
@@ -105,5 +119,3 @@ export function useAppAuth() {
   }
   return value;
 }
-
-export { writeSessionToken };
