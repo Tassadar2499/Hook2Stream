@@ -39,7 +39,7 @@
 - transactional outbox/inbox, capability-filtered jobs и lease fencing;
 - S3-compatible direct single/multipart upload;
 - FFmpeg/ffprobe ingest для audio, image и video derivatives;
-- Clerk JWT validation и персональный workspace;
+- Google OAuth + собственный JWT validation и персональный workspace;
 - Next.js App Router, React, TypeScript, Tailwind и Playwright;
 - build-time OpenAPI generation и `openapi-typescript` для frontend contracts;
 - deterministic fixture adapters для tests, OpenRouter adapters для AI stages и deterministic analysis/render providers.

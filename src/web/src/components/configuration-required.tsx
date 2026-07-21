@@ -8,9 +8,10 @@ export function ConfigurationRequired() {
         <h1 className="display mt-3 text-5xl sm:text-7xl">Start with AppHost.</h1>
         <p className="mt-6 max-w-xl text-lg leading-8">
           Start the complete local stack with <code>./scripts/run.sh</code> to
-          use the loopback-only development identity. To test real Clerk, add
-          both <code>Clerk:Issuer</code> and <code>Clerk:PublishableKey</code> to
-          the Aspire AppHost user secrets before starting it.
+          use the loopback-only development identity. To test real Google
+          sign-in, add both <code>Google:ClientId</code> and
+          <code>Google:ClientSecret</code> to the Aspire AppHost user secrets
+          before starting it.
         </p>
         <Link className="button-secondary mt-8" href="/">
           Back to landing

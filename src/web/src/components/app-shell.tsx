@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { UserButton } from "@clerk/nextjs";
 import { usePathname } from "next/navigation";
 import { useAppAuth } from "@/components/app-auth-provider";
 
@@ -13,7 +12,7 @@ const navigation = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { mode } = useAppAuth();
+  const { mode, signOut } = useAppAuth();
 
   return (
     <div className="min-h-screen">
@@ -43,12 +42,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
-          {mode === "clerk" ? (
-            <UserButton />
-          ) : (
+          {mode === "local" ? (
             <span className="rounded-full border border-[var(--line)] bg-[var(--lime)] px-3 py-2 text-xs font-black uppercase">
               Local developer
             </span>
+          ) : (
+            <button
+              type="button"
+              className="button-quiet text-xs"
+              onClick={signOut}
+            >
+              Sign out
+            </button>
           )}
         </div>
       </header>

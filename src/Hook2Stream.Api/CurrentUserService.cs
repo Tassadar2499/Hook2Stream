@@ -22,7 +22,7 @@ public sealed class CurrentUserService(
     {
         var subject = Subject;
         var user = await dbContext.Users
-            .SingleOrDefaultAsync(value => value.ClerkSubject == subject, cancellationToken);
+            .SingleOrDefaultAsync(value => value.ExternalSubject == subject, cancellationToken);
 
         var email = Principal.FindFirstValue("email")
             ?? Principal.FindFirstValue("primary_email_address");
@@ -33,7 +33,7 @@ public sealed class CurrentUserService(
         {
             user = new AppUser
             {
-                ClerkSubject = subject,
+                ExternalSubject = subject,
                 Email = email,
                 DisplayName = displayName
             };

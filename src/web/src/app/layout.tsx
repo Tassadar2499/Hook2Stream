@@ -15,17 +15,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   const authMode = getAppAuthMode();
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
   const localToken = process.env.NEXT_PUBLIC_LOCAL_AUTH_TOKEN;
 
   return (
     <html lang="en" data-scroll-behavior="smooth">
       <body>
-        <AppAuthProvider
-          mode={authMode}
-          clerkPublishableKey={publishableKey}
-          localToken={localToken}
-        >
+        <AppAuthProvider mode={authMode} localToken={localToken}>
           <div className="noise" aria-hidden="true" />
           {children}
         </AppAuthProvider>

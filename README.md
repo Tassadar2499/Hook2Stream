@@ -84,7 +84,7 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, Po
 
 В `src` уже находится первый исполняемый срез self-service MVP:
 
-- англоязычный landing, Clerk onboarding, dashboard, release setup и brand kit;
+- англоязычный landing, Google onboarding, dashboard, release setup и brand kit;
 - ASP.NET Core API с tenant isolation, ETag concurrency, rate limiting и безопасными ошибками;
 - PostgreSQL schema и additive migration для workspaces, releases, revisioned workflow, assets, uploads, jobs, outbox/inbox и audit events;
 - прямые single/multipart uploads в S3-compatible storage;
@@ -114,14 +114,14 @@ npm ci --prefix src/web
 
 Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. CORS для прямой browser upload в MinIO задаётся AppHost.
 
-При запуске через AppHost без Clerk-ключей автоматически включается фиксированный локальный пользователь. Режим доступен только в Development, принимает запросы только через loopback и использует новый случайный bearer token при каждом запуске. Workspace и данные сохраняются между запусками. Чтобы проверить настоящий Clerk flow, задайте оба ключа:
+При запуске через AppHost без `Google:ClientId`/`Google:ClientSecret` автоматически включается фиксированный локальный пользователь. Режим доступен только в Development, принимает запросы только через loopback и использует новый случайный bearer token при каждом запуске. Workspace и данные сохраняются между запусками. Чтобы проверить настоящий Google OAuth flow, задайте оба ключа:
 
 ```bash
-dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:Issuer" "https://your-instance.clerk.accounts.dev"
-dotnet user-secrets --project src/Hook2Stream.AppHost set "Clerk:PublishableKey" "pk_test_..."
+dotnet user-secrets --project src/Hook2Stream.AppHost set "Google:ClientId" "your-google-client-id.apps.googleusercontent.com"
+dotnet user-secrets --project src/Hook2Stream.AppHost set "Google:ClientSecret" "your-google-client-secret"
 ```
 
-Если задан только один из Clerk-ключей, AppHost завершит запуск с подсказкой исправить конфигурацию. Отдельный `npm run dev --prefix src/web` без AppHost не включает Local Auth и показывает экран настройки.
+Если задан только один из Google-ключей, AppHost завершит запуск с подсказкой исправить конфигурацию. Отдельный `npm run dev --prefix src/web` без AppHost не включает Local Auth и показывает экран настройки.
 
 Не удаляйте и не меняйте `Parameters:postgres-password` или `Parameters:minio-password`, сохраняя соответствующие volumes: PostgreSQL применяет пароль только при первой инициализации хранилища. Если использовалась ранняя версия AppHost с глобальными volumes, остановите AppHost и удалите устаревшие `hook2stream-postgres-data` и `hook2stream-minio-data`; при следующем запуске Aspire создаст чистые path-scoped volumes.
 

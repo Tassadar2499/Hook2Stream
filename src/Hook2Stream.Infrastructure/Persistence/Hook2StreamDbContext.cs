@@ -75,8 +75,8 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
 
         modelBuilder.Entity<AppUser>(entity =>
         {
-            entity.HasIndex(value => value.ClerkSubject).IsUnique();
-            entity.Property(value => value.ClerkSubject).HasMaxLength(255);
+            entity.HasIndex(value => value.ExternalSubject).IsUnique();
+            entity.Property(value => value.ExternalSubject).HasMaxLength(255);
             entity.Property(value => value.Email).HasMaxLength(320);
             entity.Property(value => value.DisplayName).HasMaxLength(160);
             entity.HasQueryFilter(value => value.DeletedAt == null);

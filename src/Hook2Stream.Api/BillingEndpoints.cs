@@ -252,7 +252,7 @@ public static class BillingEndpoints
                 checkout.ProductCode,
                 checkout.ProjectId,
                 itemIds,
-                context.User.Email ?? $"{context.User.ClerkSubject}@users.invalid",
+                context.User.Email ?? $"{context.User.ExternalSubject}@users.invalid",
                 successUrl,
                 cancelUrl,
                 $"checkout:{checkout.Id:N}"), cancellationToken);

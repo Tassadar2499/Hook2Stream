@@ -1,16 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import {
-  SignInButton,
-  SignUpButton,
-  Show,
-  UserButton,
-} from "@clerk/nextjs";
 import { useAppAuth } from "@/components/app-auth-provider";
 
 export function AuthActions() {
-  const { mode } = useAppAuth();
+  const { mode, isLoaded, isSignedIn, signIn, signOut } = useAppAuth();
 
   if (mode === "local") {
     return (
@@ -33,26 +27,39 @@ export function AuthActions() {
     );
   }
 
+  if (!isLoaded) {
+    return <span className="text-sm font-bold opacity-60">Loading…</span>;
+  }
+
+  if (!isSignedIn) {
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="button-quiet"
+          onClick={() => signIn("/dashboard")}
+        >
+          Sign in
+        </button>
+        <button
+          type="button"
+          className="button-primary"
+          onClick={() => signIn("/onboarding")}
+        >
+          Make a release pack
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <>
-      <Show when="signed-out">
-        <SignInButton mode="modal">
-          <button className="button-quiet" type="button">
-            Sign in
-          </button>
-        </SignInButton>
-        <SignUpButton mode="modal">
-          <button className="button-primary" type="button">
-            Make a release pack
-          </button>
-        </SignUpButton>
-      </Show>
-      <Show when="signed-in">
-        <Link className="button-primary" href="/dashboard">
-          Dashboard
-        </Link>
-        <UserButton />
-      </Show>
-    </>
+    <div className="flex items-center gap-2">
+      <Link className="button-primary" href="/dashboard">
+        Dashboard
+      </Link>
+      <button type="button" className="button-quiet" onClick={signOut}>
+        Sign out
+      </button>
+    </div>
   );
 }

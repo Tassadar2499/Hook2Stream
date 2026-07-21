@@ -28,6 +28,10 @@ public sealed class Hook2StreamApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
+        builder.UseSetting("Auth:Mode", "OAuth");
+        builder.UseSetting(
+            "Jwt:SigningKey",
+            "hook2stream-testing-signing-key-with-32+-characters-of-entropy");
         builder.UseSetting("Storage:AccessKey", "test-access-key");
         builder.UseSetting("Storage:SecretKey", "test-secret-key");
         builder.ConfigureServices(services =>

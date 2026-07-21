@@ -13,7 +13,7 @@ test("landing communicates the campaign result and pricing", async ({ page }) =>
   await expect(page.getByText(/no virality promise/i)).toBeVisible();
 });
 
-test("unconfigured local build leads to actionable Clerk setup", async ({ page }) => {
+test("unconfigured local build leads to actionable auth setup", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("link", { name: "Configure auth" }).click();
 

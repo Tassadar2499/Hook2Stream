@@ -11,7 +11,7 @@ public abstract class Entity
 
 public sealed class AppUser : Entity
 {
-    public required string ClerkSubject { get; set; }
+    public required string ExternalSubject { get; set; }
     public string? Email { get; set; }
     public string? DisplayName { get; set; }
     public Workspace? Workspace { get; set; }

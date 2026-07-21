@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
@@ -24,16 +25,24 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
 });
 
+builder.Services.Configure<GoogleOAuthOptions>(
+    builder.Configuration.GetSection(GoogleOAuthOptions.SectionName));
+builder.Services.Configure<JwtIssuerOptions>(
+    builder.Configuration.GetSection(JwtIssuerOptions.SectionName));
+builder.Services.AddSingleton<IApplicationJwtIssuer, ApplicationJwtIssuer>();
+builder.Services.AddSingleton<OAuthStateProtector>();
+builder.Services.AddHttpClient<IGoogleOAuthClient, GoogleOAuthClient>();
+
 var authentication = builder.Configuration
     .GetSection(ApplicationAuthenticationOptions.SectionName)
     .Get<ApplicationAuthenticationOptions>() ?? new ApplicationAuthenticationOptions();
 
 if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.LocalMode, StringComparison.OrdinalIgnoreCase))
 {
-    if (!builder.Environment.IsDevelopment())
+    if (!builder.Environment.IsDevelopment() && !builder.Environment.IsEnvironment("Testing"))
     {
         throw new InvalidOperationException(
-            "Local authentication is only available in the Development environment.");
+            "Local authentication is only available in the Development or Testing environment.");
     }
 
     if (string.IsNullOrWhiteSpace(authentication.LocalToken))
@@ -54,38 +63,41 @@ if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.LocalMod
                 options.DisplayName = authentication.LocalDisplayName;
             });
 }
-else if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.ClerkMode, StringComparison.OrdinalIgnoreCase))
+else if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.OAuthMode, StringComparison.OrdinalIgnoreCase))
 {
-    var clerk = builder.Configuration.GetSection(ClerkOptions.SectionName).Get<ClerkOptions>() ?? new ClerkOptions();
-    var issuer = string.IsNullOrWhiteSpace(clerk.Issuer)
-        ? "https://clerk-not-configured.invalid"
-        : clerk.Issuer.TrimEnd('/');
+    var jwt = builder.Configuration.GetSection(JwtIssuerOptions.SectionName)
+        .Get<JwtIssuerOptions>() ?? new JwtIssuerOptions();
+    if (!jwt.IsValid)
+    {
+        throw new InvalidOperationException(
+            "Jwt:SigningKey must be configured with at least 32 characters when Auth:Mode is OAuth.");
+    }
 
     builder.Services
         .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddJwtBearer(options =>
         {
             options.MapInboundClaims = false;
-            options.Authority = issuer;
-            options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
             options.TokenValidationParameters = new TokenValidationParameters
             {
                 ValidateIssuer = true,
-                ValidIssuer = issuer,
-                ValidateAudience = false,
+                ValidIssuer = jwt.Issuer,
+                ValidateAudience = true,
+                ValidAudience = jwt.Audience,
                 ValidateIssuerSigningKey = true,
                 ValidateLifetime = true,
                 RequireExpirationTime = true,
                 RequireSignedTokens = true,
-                ValidAlgorithms = [SecurityAlgorithms.RsaSha256]
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SigningKey)),
+                ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+                ClockSkew = TimeSpan.FromMinutes(1)
             };
-            options.Events = ClerkJwtEvents.Create(clerk);
         });
 }
 else
 {
     throw new InvalidOperationException(
-        $"Unsupported Auth:Mode '{authentication.Mode}'. Use '{ApplicationAuthenticationOptions.ClerkMode}' or '{ApplicationAuthenticationOptions.LocalMode}'.");
+        $"Unsupported Auth:Mode '{authentication.Mode}'. Use '{ApplicationAuthenticationOptions.OAuthMode}' or '{ApplicationAuthenticationOptions.LocalMode}'.");
 }
 builder.Services.AddAuthorization();
 

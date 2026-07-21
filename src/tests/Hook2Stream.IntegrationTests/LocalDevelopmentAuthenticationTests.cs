@@ -74,7 +74,7 @@ public sealed class LocalDevelopmentAuthenticationTests
         var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
 
         Assert.Contains(
-            "Local authentication is only available in the Development environment.",
+            "Local authentication is only available in the Development or Testing environment.",
             exception.ToString(),
             StringComparison.Ordinal);
     }

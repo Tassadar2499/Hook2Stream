@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Hook2Stream.Api.Authentication;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure.Persistence;
@@ -13,6 +14,8 @@ public static class Endpoints
 
     public static IEndpointRouteBuilder MapHook2StreamApi(this IEndpointRouteBuilder endpoints)
     {
+        endpoints.MapAuthApi();
+
         var api = endpoints.MapGroup("/api/v1")
             .RequireAuthorization();
 
@@ -100,7 +103,7 @@ public static class Endpoints
 
         return Results.Ok(new AccountResponse(
             user.Id,
-            user.ClerkSubject,
+            user.ExternalSubject,
             user.Email,
             user.DisplayName,
             workspace is null,
@@ -157,7 +160,7 @@ public static class Endpoints
             ApiEndpointHelpers.SetEtag(response, existing.Version);
             return Results.Ok(new AccountResponse(
                 user.Id,
-                user.ClerkSubject,
+                user.ExternalSubject,
                 user.Email,
                 user.DisplayName,
                 false,
@@ -188,7 +191,7 @@ public static class Endpoints
         dbContext.AuditEvents.Add(new AuditEvent
         {
             WorkspaceId = workspace.Id,
-            ActorSubject = user.ClerkSubject,
+            ActorSubject = user.ExternalSubject,
             Action = "workspace.created",
             ResourceType = "workspace",
             ResourceId = workspace.Id,
@@ -201,7 +204,7 @@ public static class Endpoints
             $"/api/v1/account/me",
             new AccountResponse(
                 user.Id,
-                user.ClerkSubject,
+                user.ExternalSubject,
                 user.Email,
                 user.DisplayName,
                 false,

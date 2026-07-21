@@ -1,70 +1,101 @@
 "use client";
 
-import { ClerkProvider, useAuth as useClerkAuth } from "@clerk/nextjs";
-import { createContext, useContext, useMemo } from "react";
-import type { AppAuthMode } from "@/lib/auth-config";
+import { useRouter } from "next/navigation";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useSyncExternalStore,
+} from "react";
+import {
+  buildOAuthLoginUrl,
+  buildOAuthLogoutUrl,
+  type AppAuthMode,
+} from "@/lib/auth-config";
+import {
+  clearSessionToken,
+  readSessionToken,
+  subscribeSessionToken,
+  writeSessionToken,
+} from "@/lib/auth-storage";
 
 type AppAuthContextValue = {
   mode: AppAuthMode;
   isLoaded: boolean;
   isSignedIn: boolean;
   getToken: () => Promise<string | null>;
+  signIn: (returnPath?: string) => void;
+  signOut: () => void;
 };
 
 const AppAuthContext = createContext<AppAuthContextValue | undefined>(undefined);
 
+const noopSubscribe = () => () => {};
+const noopSnapshot = () => null;
+
 type AppAuthProviderProps = {
   children: React.ReactNode;
   mode: AppAuthMode;
-  clerkPublishableKey?: string;
   localToken?: string;
 };
 
-export function AppAuthProvider({
-  children,
-  mode,
-  clerkPublishableKey,
-  localToken,
-}: AppAuthProviderProps) {
-  if (mode === "clerk" && clerkPublishableKey) {
-    return (
-      <ClerkProvider publishableKey={clerkPublishableKey}>
-        <ClerkAuthBridge>{children}</ClerkAuthBridge>
-      </ClerkProvider>
-    );
-  }
+export function AppAuthProvider({ children, mode, localToken }: AppAuthProviderProps) {
+  const router = useRouter();
 
-  const value: AppAuthContextValue =
-    mode === "local" && localToken
-      ? {
-          mode: "local",
-          isLoaded: true,
-          isSignedIn: true,
-          getToken: async () => localToken,
-        }
-      : {
-          mode: "unconfigured",
-          isLoaded: true,
-          isSignedIn: false,
-          getToken: async () => null,
-        };
+  const subscribe = mode === "oauth" ? subscribeSessionToken : noopSubscribe;
+  const getSnapshot = mode === "oauth" ? readSessionToken : noopSnapshot;
+  const oauthToken = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    noopSnapshot,
+  );
+
+  const getToken = useCallback(async (): Promise<string | null> => {
+    if (mode === "local") return localToken ?? null;
+    if (mode === "oauth") return readSessionToken();
+    return null;
+  }, [mode, localToken]);
+
+  const signIn = useCallback((returnPath?: string) => {
+    const target = returnPath ?? defaultReturnPath();
+    window.location.href = buildOAuthLoginUrl(target);
+  }, []);
+
+  const signOut = useCallback(() => {
+    if (mode === "oauth") {
+      clearSessionToken();
+      window.location.href = buildOAuthLogoutUrl();
+    } else {
+      router.push("/");
+    }
+  }, [mode, router]);
+
+  const isSignedIn =
+    mode === "local"
+      ? Boolean(localToken)
+      : mode === "oauth"
+        ? Boolean(oauthToken)
+        : false;
+
+  const value = useMemo<AppAuthContextValue>(
+    () => ({
+      mode,
+      isLoaded: true,
+      isSignedIn,
+      getToken,
+      signIn,
+      signOut,
+    }),
+    [mode, isSignedIn, getToken, signIn, signOut],
+  );
 
   return <AppAuthContext.Provider value={value}>{children}</AppAuthContext.Provider>;
 }
 
-function ClerkAuthBridge({ children }: { children: React.ReactNode }) {
-  const { getToken, isLoaded, isSignedIn } = useClerkAuth();
-  const value = useMemo<AppAuthContextValue>(
-    () => ({
-      mode: "clerk",
-      isLoaded,
-      isSignedIn: Boolean(isSignedIn),
-      getToken: () => getToken(),
-    }),
-    [getToken, isLoaded, isSignedIn],
-  );
-
-  return <AppAuthContext.Provider value={value}>{children}</AppAuthContext.Provider>;
+function defaultReturnPath() {
+  if (typeof window === "undefined") return "/dashboard";
+  return window.location.pathname + window.location.search;
 }
 
 export function useAppAuth() {
@@ -74,3 +105,5 @@ export function useAppAuth() {
   }
   return value;
 }
+
+export { writeSessionToken };

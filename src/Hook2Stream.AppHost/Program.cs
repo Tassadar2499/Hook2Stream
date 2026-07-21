@@ -3,25 +3,26 @@ using Microsoft.Extensions.Hosting;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
-var clerkIssuer = builder.Configuration["Clerk:Issuer"]?.Trim() ?? "";
-var clerkPublishableKey = builder.Configuration["Clerk:PublishableKey"]?.Trim() ?? "";
-var hasClerkIssuer = !string.IsNullOrWhiteSpace(clerkIssuer);
-var hasClerkPublishableKey = !string.IsNullOrWhiteSpace(clerkPublishableKey);
+var googleClientId = builder.Configuration["Google:ClientId"]?.Trim() ?? "";
+var googleClientSecret = builder.Configuration["Google:ClientSecret"]?.Trim() ?? "";
+var hasGoogleClientId = !string.IsNullOrWhiteSpace(googleClientId);
+var hasGoogleClientSecret = !string.IsNullOrWhiteSpace(googleClientSecret);
 
-if (hasClerkIssuer != hasClerkPublishableKey)
+if (hasGoogleClientId != hasGoogleClientSecret)
 {
     throw new InvalidOperationException(
-        "Clerk configuration is incomplete. Set both Clerk:Issuer and Clerk:PublishableKey, or remove both to use local Development authentication.");
+        "Google configuration is incomplete. Set both Google:ClientId and Google:ClientSecret, or remove both to use local Development authentication.");
 }
 
-var useLocalAuthentication = !hasClerkIssuer;
+var useLocalAuthentication = !hasGoogleClientId;
 if (useLocalAuthentication && !builder.Environment.IsDevelopment())
 {
     throw new InvalidOperationException(
-        "Clerk:Issuer and Clerk:PublishableKey are required outside the Development environment.");
+        "Google:ClientId and Google:ClientSecret are required outside the Development environment.");
 }
 
 IResourceBuilder<ParameterResource>? localAuthenticationToken = null;
+IResourceBuilder<ParameterResource>? jwtSigningKey = null;
 if (useLocalAuthentication)
 {
     localAuthenticationToken = builder.AddParameter(
@@ -38,6 +39,24 @@ if (useLocalAuthentication)
             MinNumeric = 4
         },
         secret: true);
+}
+else
+{
+    jwtSigningKey = builder.AddParameter(
+        "jwt-signing-key",
+        new GenerateParameterDefault
+        {
+            MinLength = 64,
+            Lower = true,
+            Upper = true,
+            Numeric = true,
+            Special = false,
+            MinLower = 8,
+            MinUpper = 8,
+            MinNumeric = 8
+        },
+        secret: true,
+        persist: true);
 }
 
 var minioPassword = builder.AddParameter(
@@ -114,13 +133,18 @@ var api = builder
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
     .WithEnvironment("Storage__ConfigureBucketCors", "false")
-    .WithEnvironment("Auth__Mode", useLocalAuthentication ? "Local" : "Clerk")
-    .WithEnvironment("Clerk__Issuer", clerkIssuer)
+    .WithEnvironment("Auth__Mode", useLocalAuthentication ? "Local" : "OAuth")
+    .WithEnvironment("Google__ClientId", googleClientId)
+    .WithEnvironment("Google__ClientSecret", googleClientSecret)
     .WaitForCompletion(bootstrapper);
 
 if (useLocalAuthentication)
 {
     api.WithEnvironment("Auth__LocalToken", localAuthenticationToken!);
+}
+else
+{
+    api.WithEnvironment("Jwt__SigningKey", jwtSigningKey!);
 }
 
 builder
@@ -140,10 +164,7 @@ var web = builder
     .WithEnvironment("NEXT_PUBLIC_API_BASE_URL", api.GetEndpoint("http"))
     .WithEnvironment(
         "NEXT_PUBLIC_AUTH_MODE",
-        useLocalAuthentication ? "local" : "clerk")
-    .WithEnvironment(
-        "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
-        clerkPublishableKey)
+        useLocalAuthentication ? "local" : "oauth")
     .WithReference(api)
     .WaitFor(api);
 
