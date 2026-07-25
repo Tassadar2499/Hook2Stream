@@ -15,6 +15,7 @@ public sealed class AppHostTopologyTests
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.Hook2Stream_AppHost>();
 
         var resources = builder.Resources.ToDictionary(resource => resource.Name);
+        var childEnvironment = builder.Environment.EnvironmentName;
 
         Assert.Contains("postgres", resources.Keys);
         Assert.Contains("hook2stream", resources.Keys);
@@ -26,6 +27,7 @@ public sealed class AppHostTopologyTests
             .ToArray();
         Assert.All(workerNames, workerName => Assert.Contains(workerName, resources.Keys));
         Assert.DoesNotContain("worker", resources.Keys);
+        Assert.Contains("web-installer", resources.Keys);
         Assert.Contains("web", resources.Keys);
 
         var postgresPassword = Assert.IsType<ParameterResource>(resources["postgres-password"]);
@@ -57,11 +59,15 @@ public sealed class AppHostTopologyTests
         var webEnvironment = webConfiguration.EnvironmentVariables.ToDictionary();
 
         Assert.Equal("Local", apiEnvironment["Auth__Mode"]);
-        Assert.Equal("true", bootstrapperEnvironment["Storage__ConfigureBucketCors"]);
+        Assert.Equal(childEnvironment, bootstrapperEnvironment["DOTNET_ENVIRONMENT"]);
+        Assert.Equal(childEnvironment, apiEnvironment["DOTNET_ENVIRONMENT"]);
+        Assert.Equal("false", bootstrapperEnvironment["Storage__ConfigureBucketCors"]);
         Assert.Equal("true", bootstrapperEnvironment["Storage__ConfigureBucketLifecycle"]);
         Assert.Equal(
-            "http://localhost:3000",
-            bootstrapperEnvironment["Storage__BrowserUploadOrigins__0"]);
+            "false",
+            bootstrapperEnvironment["Storage__ConfigureMultipartAbortLifecycle"]);
+        Assert.DoesNotContain("Storage__BrowserUploadOrigins__0", bootstrapperEnvironment.Keys);
+        Assert.DoesNotContain("Storage__BrowserUploadOrigins__1", bootstrapperEnvironment.Keys);
         Assert.Equal(
             "http://localhost:3000",
             apiEnvironment["Google__PublicWebReturnBaseUrl"]);
@@ -78,6 +84,7 @@ public sealed class AppHostTopologyTests
                 .WithEnvironmentVariablesConfig()
                 .BuildAsync(executionContext, NullLogger.Instance, CancellationToken.None);
             var workerEnvironment = workerConfiguration.EnvironmentVariables.ToDictionary();
+            Assert.Equal(childEnvironment, workerEnvironment["DOTNET_ENVIRONMENT"]);
             Assert.Equal(capability, workerEnvironment["Worker__Capabilities__0"]);
         }
 
@@ -91,16 +98,52 @@ public sealed class AppHostTopologyTests
         Assert.EndsWith("-minio-data", minioVolume.Source, StringComparison.Ordinal);
 
         Assert.Single(resources["minio"].Annotations.OfType<HealthCheckAnnotation>());
+        Assert.Single(resources["api"].Annotations.OfType<HealthCheckAnnotation>());
+        Assert.Single(resources["web"].Annotations.OfType<HealthCheckAnnotation>());
 
-        var minioWait = Assert.Single(
-            resources["bootstrapper"].Annotations.OfType<WaitAnnotation>(),
-            annotation => ReferenceEquals(annotation.Resource, resources["minio"]));
-        Assert.Equal(WaitType.WaitUntilHealthy, minioWait.WaitType);
+        AssertWaitGraph(
+            resources["bootstrapper"],
+            (resources["postgres"], WaitType.WaitUntilHealthy),
+            (resources["hook2stream"], WaitType.WaitUntilHealthy),
+            (resources["minio"], WaitType.WaitUntilHealthy));
+        AssertWaitGraph(
+            resources["api"],
+            (resources["bootstrapper"], WaitType.WaitForCompletion));
+        foreach (var workerName in workerNames)
+        {
+            AssertWaitGraph(
+                resources[workerName],
+                (resources["bootstrapper"], WaitType.WaitForCompletion));
+        }
+
+        AssertWaitGraph(
+            resources["web"],
+            (resources["web-installer"], WaitType.WaitForCompletion),
+            (resources["api"], WaitType.WaitUntilHealthy));
     }
 
     private static ContainerMountAnnotation GetDataVolume(IResource resource)
     {
         Assert.True(resource.TryGetContainerMounts(out var mounts));
         return Assert.Single(mounts, mount => mount.Type == ContainerMountType.Volume);
+    }
+
+    private static void AssertWaitGraph(
+        IResource resource,
+        params (IResource Dependency, WaitType WaitType)[] expected)
+    {
+        var actual = resource.Annotations
+            .OfType<WaitAnnotation>()
+            .ToDictionary(annotation => annotation.Resource.Name);
+
+        Assert.True(
+            actual.Count == expected.Length,
+            $"Unexpected waits for {resource.Name}: {string.Join(", ", actual.Select(pair => $"{pair.Key}:{pair.Value.WaitType}"))}");
+        foreach (var (dependency, waitType) in expected)
+        {
+            var annotation = Assert.Contains(dependency.Name, actual);
+            Assert.Same(dependency, annotation.Resource);
+            Assert.Equal(waitType, annotation.WaitType);
+        }
     }
 }

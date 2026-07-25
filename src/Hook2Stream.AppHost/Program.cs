@@ -3,6 +3,7 @@ using Hook2Stream.Application;
 using Microsoft.Extensions.Hosting;
 
 var builder = DistributedApplication.CreateBuilder(args);
+var childEnvironment = builder.Environment.EnvironmentName;
 
 var googleClientId = builder.Configuration["Google:ClientId"]?.Trim() ?? "";
 var googleClientSecret = builder.Configuration["Google:ClientSecret"]?.Trim() ?? "";
@@ -97,21 +98,22 @@ minio
 var bootstrapper = builder
     .AddProject<Projects.Hook2Stream_Bootstrapper>("bootstrapper")
     .WithReference(database)
+    .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment)
     .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
     .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
-    .WithEnvironment("Storage__ConfigureBucketCors", "true")
+    .WithEnvironment("Storage__ConfigureBucketCors", "false")
     .WithEnvironment("Storage__ConfigureBucketLifecycle", "true")
-    .WithEnvironment("Storage__BrowserUploadOrigins__0", "http://localhost:3000")
-    .WithEnvironment("Storage__BrowserUploadOrigins__1", "http://127.0.0.1:3000")
+    .WithEnvironment("Storage__ConfigureMultipartAbortLifecycle", "false")
     .WaitFor(database)
     .WaitFor(minio);
 
 var api = builder
     .AddProject<Projects.Hook2Stream_Api>("api")
     .WithReference(database)
+    .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment)
     .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
     .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
     .WithEnvironment("Storage__AccessKey", "hook2stream")
@@ -121,6 +123,7 @@ var api = builder
     .WithEnvironment("Auth__Mode", useLocalAuthentication ? "Local" : "OAuth")
     .WithEnvironment("Google__ClientId", googleClientId)
     .WithEnvironment("Google__ClientSecret", googleClientSecret)
+    .WithHttpHealthCheck("/health/ready")
     .WaitForCompletion(bootstrapper);
 
 api.WithEnvironment("Google__PublicApiBaseUrl", api.GetEndpoint("http"));
@@ -137,6 +140,7 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
     builder
         .AddProject<Projects.Hook2Stream_Worker>($"worker-{capability}")
         .WithReference(database)
+        .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment)
         .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
         .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
         .WithEnvironment("Storage__AccessKey", "hook2stream")
@@ -150,6 +154,7 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
 var web = builder
     .AddJavaScriptApp("web", "../web", "dev")
     .WithHttpEndpoint(targetPort: 3000, port: 3000, env: "PORT", isProxied: false)
+    .WithHttpHealthCheck("/")
     .WithEnvironment("NEXT_PUBLIC_API_BASE_URL", api.GetEndpoint("http"))
     .WithEnvironment(
         "NEXT_PUBLIC_AUTH_MODE",

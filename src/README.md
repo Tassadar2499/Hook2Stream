@@ -77,7 +77,7 @@ Production images use the repository root as their build context so `Directory.B
 
 The public API URL is compiled into the browser bundle, so build the web image with an explicit origin: `docker build -f src/web/Dockerfile --build-arg NEXT_PUBLIC_API_BASE_URL=https://api.example.com --build-arg NEXT_PUBLIC_AUTH_MODE=oauth .`.
 
-Set exactly one `Worker__Capabilities__0` value per worker deployment (`media`, `analysis`, `control`, `render`, or `export`). The bootstrapper owns bucket setup; when `Storage__ConfigureBucketCors=true`, provide every public browser origin through `Storage__BrowserUploadOrigins__N` (HTTPS is required in Production).
+Set exactly one `Worker__Capabilities__0` value per worker deployment (`media`, `analysis`, `control`, `render`, or `export`). The bootstrapper owns bucket setup; when `Storage__ConfigureBucketCors=true`, provide every public browser origin through `Storage__BrowserUploadOrigins__N` (HTTPS is required in Production). Providers that do not support the S3 `AbortIncompleteMultipartUpload` lifecycle action must set `Storage__ConfigureMultipartAbortLifecycle=false`; staging-object expiration remains controlled independently by `Storage__ConfigureBucketLifecycle`.
 
 ## MP3-first API flow
 

@@ -30,6 +30,6 @@ else
     await dbContext.Database.EnsureCreatedAsync();
 }
 
-logger.LogInformation("Ensuring the object-storage bucket and browser upload CORS policy.");
+logger.LogInformation("Ensuring the object-storage bucket and configured policies.");
 await scope.ServiceProvider.GetRequiredService<IObjectStorage>().EnsureBucketAsync(CancellationToken.None);
 logger.LogInformation("Hook2Stream bootstrap completed.");

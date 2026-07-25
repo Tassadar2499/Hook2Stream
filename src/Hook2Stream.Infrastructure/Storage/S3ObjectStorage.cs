@@ -329,46 +329,7 @@ public sealed class S3ObjectStorage(
             new PutLifecycleConfigurationRequest
             {
                 BucketName = _options.Bucket,
-                Configuration = new LifecycleConfiguration
-                {
-                    Rules =
-                    [
-                        new LifecycleRule
-                        {
-                            Id = "hook2stream-staging-expiry",
-                            Status = LifecycleRuleStatus.Enabled,
-                            Filter = new LifecycleFilter
-                            {
-                                LifecycleFilterPredicate = new LifecyclePrefixPredicate
-                                {
-                                    Prefix = "staging/"
-                                }
-                            },
-                            Expiration = new LifecycleRuleExpiration
-                            {
-                                Days = Math.Max(1, (int)Math.Ceiling(_policy.StagingHours / 24d))
-                            }
-                        },
-                        new LifecycleRule
-                        {
-                            Id = "hook2stream-abort-incomplete-multipart",
-                            Status = LifecycleRuleStatus.Enabled,
-                            Filter = new LifecycleFilter
-                            {
-                                LifecycleFilterPredicate = new LifecyclePrefixPredicate
-                                {
-                                    Prefix = string.Empty
-                                }
-                            },
-                            AbortIncompleteMultipartUpload = new LifecycleRuleAbortIncompleteMultipartUpload
-                            {
-                                DaysAfterInitiation = Math.Max(
-                                    1,
-                                    (int)Math.Ceiling(_policy.UploadSessionHours / 24d))
-                            }
-                        }
-                    ]
-                }
+                Configuration = S3LifecycleConfigurationBuilder.Build(_options, _policy)
             },
             cancellationToken);
 
@@ -384,4 +345,58 @@ public sealed class S3ObjectStorage(
         };
         return builder.Uri;
     }
+}
+
+internal static class S3LifecycleConfigurationBuilder
+{
+    internal static LifecycleConfiguration Build(
+        StorageOptions storageOptions,
+        OperationalPolicyOptions policyOptions)
+    {
+        var rules = new List<LifecycleRule>
+        {
+            new()
+            {
+                Id = "hook2stream-staging-expiry",
+                Status = LifecycleRuleStatus.Enabled,
+                Filter = new LifecycleFilter
+                {
+                    LifecycleFilterPredicate = new LifecyclePrefixPredicate
+                    {
+                        Prefix = "staging/"
+                    }
+                },
+                Expiration = new LifecycleRuleExpiration
+                {
+                    Days = ToLifecycleDays(policyOptions.StagingHours)
+                }
+            }
+        };
+
+        if (storageOptions.ConfigureMultipartAbortLifecycle)
+        {
+            rules.Add(
+                new LifecycleRule
+                {
+                    Id = "hook2stream-abort-incomplete-multipart",
+                    Status = LifecycleRuleStatus.Enabled,
+                    Filter = new LifecycleFilter
+                    {
+                        LifecycleFilterPredicate = new LifecyclePrefixPredicate
+                        {
+                            Prefix = string.Empty
+                        }
+                    },
+                    AbortIncompleteMultipartUpload = new LifecycleRuleAbortIncompleteMultipartUpload
+                    {
+                        DaysAfterInitiation = ToLifecycleDays(policyOptions.UploadSessionHours)
+                    }
+                });
+        }
+
+        return new LifecycleConfiguration { Rules = rules };
+    }
+
+    private static int ToLifecycleDays(int hours) =>
+        Math.Max(1, (int)Math.Ceiling(hours / 24d));
 }

@@ -43,7 +43,6 @@ public static class JobHandlerServiceCollectionExtensions
             .Select(JobRoutingRegistry.NormalizeCapability)
             .ToHashSet(StringComparer.Ordinal);
 
-        services.TryAddSingleton<DeterministicVideoRenderer>();
         services.AddScoped<IPipelineArtifactStore, PipelineArtifactStore>();
         services.AddScoped<ICleanCoverComposer, CleanCoverComposer>();
 
@@ -67,6 +66,7 @@ public static class JobHandlerServiceCollectionExtensions
 
         if (Includes(JobType.PreviewRender))
         {
+            services.TryAddScoped<DeterministicVideoRenderer>();
             services.AddScoped<IJobHandler>(serviceProvider =>
                 ActivatorUtilities.CreateInstance<VideoRenderJobHandler>(serviceProvider, JobType.PreviewRender));
             services.AddScoped<IJobHandler>(serviceProvider =>

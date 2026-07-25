@@ -1,6 +1,7 @@
 using Hook2Stream.Domain;
 using Hook2Stream.Application;
 using Hook2Stream.Infrastructure;
+using Hook2Stream.Infrastructure.Media;
 using Hook2Stream.Infrastructure.Providers;
 using Microsoft.Extensions.Configuration;
 using Hook2Stream.Worker;
@@ -68,6 +69,35 @@ public sealed class WorkerRegistrationTests
 
         var handlers = services.Count(value => value.ServiceType == typeof(IJobHandler));
         Assert.Equal(expectedHandlerCount, handlers);
+    }
+
+    [Theory]
+    [InlineData(JobRoutingRegistry.Media)]
+    [InlineData(JobRoutingRegistry.Analysis)]
+    [InlineData(JobRoutingRegistry.Control)]
+    [InlineData(JobRoutingRegistry.Export)]
+    public void Non_render_pool_does_not_register_deterministic_video_renderer(string capability)
+    {
+        var services = new ServiceCollection();
+
+        services.AddHook2StreamJobHandlers([capability]);
+
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType == typeof(DeterministicVideoRenderer));
+    }
+
+    [Fact]
+    public void Render_pool_registers_deterministic_video_renderer_as_scoped()
+    {
+        var services = new ServiceCollection();
+
+        services.AddHook2StreamJobHandlers([JobRoutingRegistry.Render]);
+
+        var renderer = Assert.Single(
+            services,
+            descriptor => descriptor.ServiceType == typeof(DeterministicVideoRenderer));
+        Assert.Equal(ServiceLifetime.Scoped, renderer.Lifetime);
     }
 
     [Fact]

@@ -14,6 +14,7 @@ public sealed class StorageOptions
     public bool RequireCredentials { get; set; }
     public bool ConfigureBucketCors { get; set; }
     public bool ConfigureBucketLifecycle { get; set; }
+    public bool ConfigureMultipartAbortLifecycle { get; set; } = true;
     public string[] BrowserUploadOrigins { get; set; } =
         ["http://localhost:3000", "http://127.0.0.1:3000"];
 }
