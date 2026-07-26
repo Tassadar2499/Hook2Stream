@@ -35,7 +35,7 @@ export function NewReleaseClient() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadStage, setUploadStage] = useState("Choose an MP3 to begin");
+  const [uploadStage, setUploadStage] = useState("Choose an MP3 for quick start");
   const [quickStartBusy, setQuickStartBusy] = useState(false);
   const [externalAiConsent, setExternalAiConsent] = useState(false);
   const uploadCancellation = useRef<AbortController | undefined>(undefined);
@@ -57,7 +57,7 @@ export function NewReleaseClient() {
       return;
     }
     if (!file.name.toLowerCase().endsWith(".mp3")) {
-      setError("The one-click flow accepts an MP3. Use Advanced source for WAV.");
+      setError("Quick start accepts MP3. Use Audio-first setup below for WAV.");
       return;
     }
 
@@ -177,14 +177,15 @@ export function NewReleaseClient() {
       <p className="eyebrow text-[var(--orange)]">New release</p>
       <h1 className="display mt-2 text-5xl sm:text-7xl">Drop the song. We build the campaign.</h1>
       <p className="mt-4 max-w-2xl text-lg leading-8">
-        Upload one finished MP3. Transcription and music analysis start
-        automatically; you review the words and artwork before anything is rendered.
+        Start quickly with one finished MP3, or prepare an Audio-first draft for
+        WAV. Transcription and music analysis begin after upload; you review every
+        result before anything is rendered.
       </p>
 
       <section className="paper-card mt-8 overflow-hidden p-6 sm:p-9">
         <div className="grid gap-7 lg:grid-cols-[1fr_.72fr] lg:items-center">
           <div>
-            <p className="eyebrow text-[var(--violet)]">MP3-first</p>
+            <p className="eyebrow text-[var(--violet)]">Audio-first quick start</p>
             <h2 className="display mt-2 text-4xl sm:text-6xl">One file is enough.</h2>
             <p className="mt-4 max-w-xl leading-7">
               We create an unscheduled draft, read its tags, analyse rhythm locally and
@@ -268,7 +269,7 @@ export function NewReleaseClient() {
 
       <details className="paper-card mt-6 p-6 sm:p-8">
         <summary className="cursor-pointer font-black">
-          Advanced source — WAV, prepared lyrics and full release brief
+          Audio-first setup — WAV or MP3, prepared lyrics and full release brief
         </summary>
       <form className="mt-7 grid gap-7" onSubmit={submit}>
         <div className="grid gap-5 md:grid-cols-2">
@@ -281,9 +282,6 @@ export function NewReleaseClient() {
             <select name="language" defaultValue="en">
               <option value="en">English</option>
               <option value="ru">Russian</option>
-              <option value="es">Spanish</option>
-              <option value="de">German</option>
-              <option value="fr">French</option>
             </select>
           </label>
           <label className="field">
@@ -382,7 +380,7 @@ export function NewReleaseClient() {
 
         {error ? <StatusPanel title="Could not create release" message={error} tone="error" /> : null}
         <button className="button-primary justify-self-start" disabled={saving} type="submit">
-          {saving ? "Creating draft…" : "Continue to media"}
+          {saving ? "Creating draft…" : "Create draft and upload WAV or MP3"}
         </button>
       </form>
       </details>

@@ -278,6 +278,14 @@ public static class BillingEndpoints
                     BillingProducts.IsSubscription(checkout.ProductCode) ? timeProvider.GetUtcNow().AddMonths(1) : null),
                 timeProvider,
                 cancellationToken);
+        if (checkout.ProjectId is { } activityProjectId)
+        {
+            var activityProject = await db.Projects.SingleAsync(
+                value => value.Id == activityProjectId &&
+                         value.WorkspaceId == checkout.WorkspaceId,
+                cancellationToken);
+            ProjectActivity.Touch(activityProject, timeProvider);
+        }
         await db.SaveChangesAsync(cancellationToken);
         return Results.Created($"/api/v1/billing/checkouts/{checkout.Id}", ToCheckout(checkout));
     }
@@ -767,6 +775,7 @@ public static class BillingEndpoints
             DataJson = JsonSerializer.Serialize(new { projectId, renderBatchId = batch.Id, request.Kind })
         });
         AddPipelineReconcile(db, context.Workspace.Id, project.Id, "render.queued", batch.Id);
+        ProjectActivity.Touch(project, timeProvider);
         try
         {
             await db.SaveChangesAsync(cancellationToken);

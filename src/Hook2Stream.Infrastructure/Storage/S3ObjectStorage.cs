@@ -1,25 +1,34 @@
 using System.Net;
+using Amazon;
+using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Hook2Stream.Application;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Infrastructure.Storage;
 
 public sealed class S3ObjectStorage(
-    IAmazonS3 client,
+    IAmazonS3 internalClient,
+    [FromKeyedServices(S3ClientFactory.PublicPresignerKey)]
+    IAmazonS3 publicPresigner,
     IOptions<StorageOptions> options,
     IOptions<OperationalPolicyOptions> policyOptions) : IObjectStorage
 {
     private readonly StorageOptions _options = options.Value;
     private readonly OperationalPolicyOptions _policy = policyOptions.Value;
+    private readonly Protocol _publicProtocol =
+        new Uri(options.Value.PublicServiceUrl).Scheme == Uri.UriSchemeHttp
+            ? Protocol.HTTP
+            : Protocol.HTTPS;
 
     public async Task EnsureBucketAsync(CancellationToken cancellationToken)
     {
-        var buckets = await client.ListBucketsAsync(cancellationToken);
+        var buckets = await internalClient.ListBucketsAsync(cancellationToken);
         if (buckets.Buckets?.Any(bucket => string.Equals(bucket.BucketName, _options.Bucket, StringComparison.Ordinal)) != true)
         {
-            await client.PutBucketAsync(
+            await internalClient.PutBucketAsync(
                 new PutBucketRequest { BucketName = _options.Bucket },
                 cancellationToken);
         }
@@ -53,7 +62,7 @@ public sealed class S3ObjectStorage(
             ]
         };
 
-        await client.PutCORSConfigurationAsync(
+        await internalClient.PutCORSConfigurationAsync(
             new PutCORSConfigurationRequest
             {
                 BucketName = _options.Bucket,
@@ -79,11 +88,12 @@ public sealed class S3ObjectStorage(
             BucketName = _options.Bucket,
             Key = objectKey,
             Verb = HttpVerb.PUT,
+            Protocol = _publicProtocol,
             Expires = DateTime.UtcNow.Add(lifetime),
             ContentType = contentType
         };
 
-        return Task.FromResult(ToPublicUri(client.GetPreSignedURL(request)));
+        return Task.FromResult(new Uri(publicPresigner.GetPreSignedURL(request)));
     }
 
     public Task<Uri> CreateReadUrlAsync(
@@ -97,10 +107,11 @@ public sealed class S3ObjectStorage(
             BucketName = _options.Bucket,
             Key = objectKey,
             Verb = HttpVerb.GET,
+            Protocol = _publicProtocol,
             Expires = DateTime.UtcNow.Add(lifetime)
         };
 
-        return Task.FromResult(ToPublicUri(client.GetPreSignedURL(request)));
+        return Task.FromResult(new Uri(publicPresigner.GetPreSignedURL(request)));
     }
 
     public async Task<Hook2Stream.Application.MultipartUpload> CreateMultipartUploadAsync(
@@ -108,7 +119,7 @@ public sealed class S3ObjectStorage(
         string contentType,
         CancellationToken cancellationToken)
     {
-        var response = await client.InitiateMultipartUploadAsync(
+        var response = await internalClient.InitiateMultipartUploadAsync(
             new InitiateMultipartUploadRequest
             {
                 BucketName = _options.Bucket,
@@ -133,12 +144,13 @@ public sealed class S3ObjectStorage(
             BucketName = _options.Bucket,
             Key = objectKey,
             Verb = HttpVerb.PUT,
+            Protocol = _publicProtocol,
             Expires = DateTime.UtcNow.Add(lifetime),
             UploadId = uploadId,
             PartNumber = partNumber
         };
 
-        return Task.FromResult(ToPublicUri(client.GetPreSignedURL(request)));
+        return Task.FromResult(new Uri(publicPresigner.GetPreSignedURL(request)));
     }
 
     public async Task CompleteMultipartUploadAsync(
@@ -158,7 +170,7 @@ public sealed class S3ObjectStorage(
                 .ToList()
         };
 
-        await client.CompleteMultipartUploadAsync(request, cancellationToken);
+        await internalClient.CompleteMultipartUploadAsync(request, cancellationToken);
     }
 
     public async Task AbortMultipartUploadAsync(
@@ -168,7 +180,7 @@ public sealed class S3ObjectStorage(
     {
         try
         {
-            await client.AbortMultipartUploadAsync(
+            await internalClient.AbortMultipartUploadAsync(
                 new AbortMultipartUploadRequest
                 {
                     BucketName = _options.Bucket,
@@ -189,7 +201,7 @@ public sealed class S3ObjectStorage(
     {
         try
         {
-            var response = await client.GetObjectMetadataAsync(
+            var response = await internalClient.GetObjectMetadataAsync(
                 new GetObjectMetadataRequest
                 {
                     BucketName = _options.Bucket,
@@ -210,7 +222,7 @@ public sealed class S3ObjectStorage(
         string destinationPath,
         CancellationToken cancellationToken)
     {
-        using var response = await client.GetObjectAsync(
+        using var response = await internalClient.GetObjectAsync(
             new GetObjectRequest
             {
                 BucketName = _options.Bucket,
@@ -234,7 +246,7 @@ public sealed class S3ObjectStorage(
         string contentType,
         CancellationToken cancellationToken)
     {
-        await client.PutObjectAsync(
+        await internalClient.PutObjectAsync(
             new PutObjectRequest
             {
                 BucketName = _options.Bucket,
@@ -247,7 +259,7 @@ public sealed class S3ObjectStorage(
     }
 
     public Task DeleteAsync(string objectKey, CancellationToken cancellationToken) =>
-        client.DeleteObjectAsync(
+        internalClient.DeleteObjectAsync(
             new DeleteObjectRequest
             {
                 BucketName = _options.Bucket,
@@ -284,7 +296,7 @@ public sealed class S3ObjectStorage(
         string? continuationToken = null;
         do
         {
-            var page = await client.ListObjectsV2Async(
+            var page = await internalClient.ListObjectsV2Async(
                 new ListObjectsV2Request
                 {
                     BucketName = _options.Bucket,
@@ -299,7 +311,7 @@ public sealed class S3ObjectStorage(
                 .ToList() ?? [];
             if (keys.Count > 0)
             {
-                var deleteResponse = await client.DeleteObjectsAsync(
+                var deleteResponse = await internalClient.DeleteObjectsAsync(
                     new DeleteObjectsRequest
                     {
                         BucketName = _options.Bucket,
@@ -325,7 +337,7 @@ public sealed class S3ObjectStorage(
     }
 
     private Task ConfigureLifecycleAsync(CancellationToken cancellationToken) =>
-        client.PutLifecycleConfigurationAsync(
+        internalClient.PutLifecycleConfigurationAsync(
             new PutLifecycleConfigurationRequest
             {
                 BucketName = _options.Bucket,
@@ -333,17 +345,26 @@ public sealed class S3ObjectStorage(
             },
             cancellationToken);
 
-    private Uri ToPublicUri(string signedUrl)
+}
+
+internal static class S3ClientFactory
+{
+    internal const string PublicPresignerKey = "hook2stream-public-s3-presigner";
+
+    internal static IAmazonS3 Create(StorageOptions options, bool usePublicServiceUrl)
     {
-        var signed = new Uri(signedUrl);
-        var publicBase = new Uri(_options.PublicServiceUrl);
-        var builder = new UriBuilder(signed)
+        var serviceUrl = usePublicServiceUrl ? options.PublicServiceUrl : options.ServiceUrl;
+        var credentials = new BasicAWSCredentials(options.AccessKey, options.SecretKey);
+        var config = new AmazonS3Config
         {
-            Scheme = publicBase.Scheme,
-            Host = publicBase.Host,
-            Port = publicBase.IsDefaultPort ? -1 : publicBase.Port
+            ServiceURL = serviceUrl,
+            UseHttp = new Uri(serviceUrl).Scheme == Uri.UriSchemeHttp,
+            ForcePathStyle = options.ForcePathStyle,
+            AuthenticationRegion = options.Region,
+            RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
+            ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
         };
-        return builder.Uri;
+        return new AmazonS3Client(credentials, config);
     }
 }
 

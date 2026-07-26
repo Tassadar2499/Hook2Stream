@@ -41,6 +41,112 @@ public sealed class MediaIngestRightsTests
         Assert.True(processor.Called);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Ready_asset_retry_does_not_reprocess_or_regress_the_asset(bool isActive)
+    {
+        await using var db = Database();
+        var asset = Asset(AssetKind.Audio);
+        asset.State = AssetState.Ready;
+        asset.IsActive = isActive;
+        asset.Sha256 = new string('a', 64);
+        db.MediaAssets.Add(asset);
+        await db.SaveChangesAsync();
+        var processor = new RecordingProcessor();
+        var handler = new MediaIngestJobHandler(processor, db);
+
+        await handler.ProcessAsync(Job(asset), default);
+
+        Assert.False(processor.Called);
+        var persisted = await db.MediaAssets.AsNoTracking().SingleAsync(value => value.Id == asset.Id);
+        Assert.Equal(AssetState.Ready, persisted.State);
+        Assert.Equal(isActive, persisted.IsActive);
+        Assert.Equal(asset.Sha256, persisted.Sha256);
+    }
+
+    [Fact]
+    public async Task Mp3_finalization_reloads_project_after_a_concurrent_setup_edit()
+    {
+        var options = DatabaseOptions();
+        await using var db = new Hook2StreamDbContext(options);
+        var project = Project();
+        var asset = Asset(AssetKind.Audio);
+        asset.ProjectId = project.Id;
+        asset.WorkspaceId = project.WorkspaceId;
+        var leased = Job(asset, project.Id);
+        db.AddRange(project, asset, PersistedJob(leased));
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var processor = new ConcurrentSetupProcessor(
+            db,
+            options,
+            project.Id,
+            asset.Id);
+        var handler = new MediaIngestJobHandler(processor, db);
+
+        await handler.ProcessAsync(leased, default);
+
+        Assert.True(processor.Called);
+        db.ChangeTracker.Clear();
+        var persistedProject = await db.Projects.SingleAsync(value => value.Id == project.Id);
+        var persistedAsset = await db.MediaAssets.SingleAsync(value => value.Id == asset.Id);
+        Assert.Equal("Saved concurrently", persistedProject.TrackTitle);
+        Assert.Equal(ProjectState.Analyzing, persistedProject.State);
+        Assert.Equal(AssetState.Ready, persistedAsset.State);
+        Assert.True(persistedAsset.IsActive);
+        Assert.Equal(new string('b', 64), persistedAsset.Sha256);
+        Assert.Single(await db.OutboxMessages.ToListAsync());
+        Assert.Single(await db.ProjectEvents.ToListAsync());
+
+        var downstreamJob = new Job
+        {
+            WorkspaceId = project.WorkspaceId,
+            ProjectId = project.Id,
+            Type = JobType.AudioAnalysis,
+            State = JobState.Queued,
+            PayloadJson = "{}"
+        };
+        db.Jobs.Add(downstreamJob);
+        await db.SaveChangesAsync();
+
+        await handler.ProcessAsync(leased, default);
+
+        db.ChangeTracker.Clear();
+        Assert.Equal(1, processor.CallCount);
+        Assert.Single(await db.OutboxMessages.ToListAsync());
+        Assert.Single(await db.ProjectEvents.ToListAsync());
+        Assert.Equal(
+            JobState.Queued,
+            (await db.Jobs.SingleAsync(value => value.Id == downstreamJob.Id)).State);
+    }
+
+    [Fact]
+    public async Task Finalizing_ready_cover_reconciles_mp3_first_pipeline_once()
+    {
+        await using var db = Database();
+        var project = Project();
+        var cover = Asset(AssetKind.Cover);
+        cover.ProjectId = project.Id;
+        cover.WorkspaceId = project.WorkspaceId;
+        cover.State = AssetState.Ready;
+        cover.IsActive = true;
+        cover.Sha256 = new string('c', 64);
+        var leased = Job(cover, project.Id);
+        db.AddRange(project, cover, PersistedJob(leased));
+        await db.SaveChangesAsync();
+        var processor = new RecordingProcessor();
+        var handler = new MediaIngestJobHandler(processor, db);
+
+        await handler.ProcessAsync(leased, default);
+        await handler.ProcessAsync(leased, default);
+
+        Assert.False(processor.Called);
+        Assert.Single(await db.OutboxMessages.ToListAsync());
+        Assert.Single(await db.ProjectEvents.ToListAsync());
+    }
+
     [Fact]
     public async Task Validated_mp3_hash_binds_only_the_pending_external_ai_attestation()
     {
@@ -95,10 +201,21 @@ public sealed class MediaIngestRightsTests
         Assert.Equal(existingFingerprint, rights.AudioFingerprint);
     }
 
-    private static Hook2StreamDbContext Database() => new(
+    private static Hook2StreamDbContext Database() => new(DatabaseOptions());
+
+    private static DbContextOptions<Hook2StreamDbContext> DatabaseOptions() =>
         new DbContextOptionsBuilder<Hook2StreamDbContext>()
             .UseInMemoryDatabase($"media-ingest-rights-{Guid.NewGuid():N}")
-            .Options);
+            .Options;
+
+    private static ReleaseProject Project() => new()
+    {
+        WorkspaceId = Guid.CreateVersion7(),
+        ProjectLabel = "Race test",
+        ArtistName = "Artist",
+        TrackTitle = "Original",
+        FlowKind = FlowKind.Mp3First
+    };
 
     private static MediaAsset Asset(AssetKind kind) => new()
     {
@@ -113,10 +230,10 @@ public sealed class MediaIngestRightsTests
         ObjectKey = $"tests/{Guid.CreateVersion7():N}"
     };
 
-    private static LeasedJob Job(MediaAsset asset) => new(
+    private static LeasedJob Job(MediaAsset asset, Guid? projectId = null) => new(
         Guid.CreateVersion7(),
         asset.WorkspaceId,
-        null,
+        projectId,
         asset.Id,
         JobType.MediaIngest,
         "{}",
@@ -130,6 +247,25 @@ public sealed class MediaIngestRightsTests
         DateTimeOffset.UtcNow.AddMinutes(1),
         Guid.CreateVersion7());
 
+    private static Job PersistedJob(LeasedJob leased) => new()
+    {
+        Id = leased.Id,
+        WorkspaceId = leased.WorkspaceId,
+        ProjectId = leased.ProjectId,
+        AssetId = leased.AssetId,
+        Type = leased.Type,
+        State = JobState.Running,
+        PayloadJson = leased.PayloadJson,
+        AttemptCount = leased.AttemptNumber,
+        MaxAttempts = leased.MaxAttempts,
+        RequiredCapability = leased.RequiredCapability,
+        HandlerVersion = leased.HandlerVersion,
+        PayloadSchemaVersion = leased.PayloadSchemaVersion,
+        LeaseOwner = leased.LeaseOwner,
+        LeaseToken = leased.LeaseToken,
+        LeaseExpiresAt = leased.LeaseExpiresAt
+    };
+
     private sealed class RecordingProcessor : IMediaIngestProcessor
     {
         public bool Called { get; private set; }
@@ -138,6 +274,38 @@ public sealed class MediaIngestRightsTests
         {
             Called = true;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class ConcurrentSetupProcessor(
+        Hook2StreamDbContext db,
+        DbContextOptions<Hook2StreamDbContext> options,
+        Guid projectId,
+        Guid assetId) : IMediaIngestProcessor
+    {
+        public int CallCount { get; private set; }
+        public bool Called => CallCount > 0;
+
+        public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            var asset = await db.MediaAssets.SingleAsync(
+                value => value.Id == assetId,
+                cancellationToken);
+            _ = await db.Projects.SingleAsync(
+                value => value.Id == projectId,
+                cancellationToken);
+            asset.State = AssetState.Ready;
+            asset.IsActive = true;
+            asset.Sha256 = new string('b', 64);
+            await db.SaveChangesAsync(cancellationToken);
+
+            await using var concurrentDb = new Hook2StreamDbContext(options);
+            var concurrentlyEdited = await concurrentDb.Projects.SingleAsync(
+                value => value.Id == projectId,
+                cancellationToken);
+            concurrentlyEdited.TrackTitle = "Saved concurrently";
+            await concurrentDb.SaveChangesAsync(cancellationToken);
         }
     }
 }

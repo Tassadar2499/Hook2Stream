@@ -289,6 +289,7 @@ export function UploadManager({
             <input
               className="sr-only"
               type="file"
+              aria-label={`${title} file`}
               accept={accept}
               multiple={multiple}
               disabled={busy}
@@ -303,7 +304,14 @@ export function UploadManager({
           ) : null}
         </div>
       </div>
-      <div className="mt-5 h-2 overflow-hidden rounded-full bg-black/10">
+      <div
+        className="mt-5 h-2 overflow-hidden rounded-full bg-black/10"
+        role="progressbar"
+        aria-label={`${title} upload progress`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+      >
         <div
           className="h-full bg-[var(--violet)] transition-[width]"
           style={{ width: `${progress}%` }}

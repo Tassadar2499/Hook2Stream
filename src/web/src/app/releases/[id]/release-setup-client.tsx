@@ -15,7 +15,6 @@ import {
   apiFetch,
 } from "@/lib/api";
 import { Workflow } from "@/lib/workflow";
-import { workflowCheckpointCanonicalKey } from "@/lib/release-workflow-form-state";
 import { useProjectAutoRefresh } from "@/lib/use-project-auto-refresh";
 import { ReleaseWorkflowHub } from "./release-workflow-hub";
 
@@ -145,7 +144,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
     return (
       <AppShell>
         <ReleaseWorkflowHub
-          key={workflowCheckpointCanonicalKey(release, rights)}
+          key={release.id}
           projectId={projectId}
           release={release}
           rights={rights}

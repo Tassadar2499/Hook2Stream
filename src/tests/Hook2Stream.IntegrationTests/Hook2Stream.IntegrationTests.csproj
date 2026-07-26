@@ -19,6 +19,8 @@
   <ItemGroup>
     <ProjectReference Include="../../Hook2Stream.Api/Hook2Stream.Api.csproj" />
     <ProjectReference Include="../../Hook2Stream.Infrastructure/Hook2Stream.Infrastructure.csproj" />
+    <ProjectReference Include="../../Hook2Stream.Worker/Hook2Stream.Worker.csproj"
+                      Aliases="worker" />
   </ItemGroup>
 
   <ItemGroup>

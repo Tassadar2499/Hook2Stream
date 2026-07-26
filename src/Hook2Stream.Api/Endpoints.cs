@@ -263,6 +263,7 @@ public static class Endpoints
         foreach (var project in affectedProjects)
         {
             project.BrandKitVersion = nextBrandVersion;
+            ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
             if (project.CurrentCampaignPlanRevisionId is { } campaignId)
             {
                 var campaign = await dbContext.CampaignPlanRevisions.SingleOrDefaultAsync(
@@ -353,32 +354,47 @@ public static class Endpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         HttpResponse response,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
-        ApiEndpointHelpers.RequireValid(ReleaseRules.Validate(request, UtcToday()));
+        var validation = ReleaseRules.Validate(request, UtcToday());
+        if (request.Language.Trim().ToLowerInvariant() is not ("en" or "ru"))
+        {
+            validation.Add(
+                "language",
+                "Automatic transcription currently supports English and Russian.");
+        }
+        ApiEndpointHelpers.RequireValid(validation);
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var brandKitVersion = await dbContext.BrandKits
             .Where(value => value.WorkspaceId == context.Workspace.Id)
             .Select(value => value.Version)
             .SingleAsync(cancellationToken);
 
+        var now = timeProvider.GetUtcNow();
         var project = new ReleaseProject
         {
             WorkspaceId = context.Workspace.Id,
             ProjectLabel = request.ProjectLabel.Trim(),
             ArtistName = request.ArtistName.Trim(),
             TrackTitle = request.TrackTitle.Trim(),
-            Language = request.Language.Trim(),
+            Language = request.Language.Trim().ToLowerInvariant(),
             InternalNotes = request.InternalNotes?.Trim(),
             LyricsText = request.LyricsText?.Trim(),
             IsInstrumental = request.IsInstrumental,
+            IsInstrumentalConfirmed = request.IsInstrumental,
             Mode = request.Mode,
             ReleaseDate = request.ReleaseDate,
             CampaignStartDate = request.CampaignStartDate,
-            BrandKitVersion = brandKitVersion
+            BrandKitVersion = brandKitVersion,
+            FlowKind = FlowKind.Mp3First,
+            SetupCompletedAt = now
         };
+        ProjectActivity.Touch(project, now);
+        var pipelineRun = Mp3FirstPipelineFactory.CreateInitial(project, "advanced-audio-draft");
 
         dbContext.Projects.Add(project);
+        dbContext.PipelineRuns.Add(pipelineRun);
         dbContext.AuditEvents.Add(new AuditEvent
         {
             WorkspaceId = context.Workspace.Id,
@@ -386,7 +402,14 @@ public static class Endpoints
             Action = "release.created",
             ResourceType = "release_project",
             ResourceId = project.Id,
-            DataJson = JsonSerializer.Serialize(new { project.Mode })
+            DataJson = JsonSerializer.Serialize(new { project.Mode, project.FlowKind })
+        });
+        dbContext.ProjectEvents.Add(new ProjectEvent
+        {
+            WorkspaceId = project.WorkspaceId,
+            ProjectId = project.Id,
+            EventType = "release.created",
+            DataJson = JsonSerializer.Serialize(new { project.FlowKind, source = "advanced" })
         });
         await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -416,6 +439,7 @@ public static class Endpoints
         Hook2StreamDbContext dbContext,
         HttpRequest httpRequest,
         HttpResponse response,
+        TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         ApiEndpointHelpers.RequireValid(ReleaseRules.Validate(request, UtcToday()));
@@ -423,6 +447,13 @@ public static class Endpoints
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var project = await FindProject(dbContext, context.Workspace.Id, projectId, includeAssets: true, cancellationToken);
         ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
+        if (project.FlowKind == FlowKind.Mp3First)
+        {
+            throw new ApiProblemException(
+                StatusCodes.Status409Conflict,
+                "release.flow_endpoint_mismatch",
+                "Use /api/v1/releases/{projectId}/setup to update an audio-first release.");
+        }
 
         project.ProjectLabel = request.ProjectLabel.Trim();
         project.ArtistName = request.ArtistName.Trim();
@@ -434,6 +465,7 @@ public static class Endpoints
         project.Mode = request.Mode;
         project.ReleaseDate = request.ReleaseDate;
         project.CampaignStartDate = request.CampaignStartDate;
+        ProjectActivity.Touch(project, timeProvider);
         await dbContext.SaveChangesAsync(cancellationToken);
 
         ApiEndpointHelpers.SetEtag(response, project.Version);
@@ -456,6 +488,7 @@ public static class Endpoints
 
         var now = timeProvider.GetUtcNow();
         project.Archive();
+        ProjectActivity.Touch(project, now);
         await ProjectArchiveCoordinator.PauseAsync(dbContext, project, now, cancellationToken);
         dbContext.ProjectEvents.Add(new ProjectEvent
         {
@@ -485,6 +518,7 @@ public static class Endpoints
         ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
         var now = timeProvider.GetUtcNow();
         project.Restore();
+        ProjectActivity.Touch(project, now);
         await ProjectArchiveCoordinator.ResumeAsync(
             dbContext,
             project,
@@ -709,6 +743,7 @@ public static class Endpoints
         }
         attestation.SyntheticContentStatus = request.SyntheticContentStatus;
         attestation.AcceptedAt = DateTimeOffset.UtcNow;
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         dbContext.AuditEvents.Add(new AuditEvent
         {
             WorkspaceId = project.WorkspaceId,
@@ -1061,6 +1096,7 @@ public static class Endpoints
             ExpiresAt = sessionExpiresAt
         };
         dbContext.UploadSessions.Add(session);
+        ProjectActivity.Touch(project, now);
         try
         {
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -1202,6 +1238,10 @@ public static class Endpoints
             cancellationToken);
         session.State = UploadState.Uploading;
         session.Asset.State = AssetState.Uploading;
+        var project = await dbContext.Projects.SingleAsync(
+            value => value.Id == session.ProjectId,
+            cancellationToken);
+        ProjectActivity.Touch(project, now);
         await dbContext.SaveChangesAsync(cancellationToken);
         return Results.Ok(new UploadPartResponse(request.PartNumber, url.ToString(), expiresAt));
     }
@@ -1276,6 +1316,10 @@ public static class Endpoints
         session.State = UploadState.Completed;
         session.CompletedAt = timeProvider.GetUtcNow();
         session.Asset.State = AssetState.Uploaded;
+        var project = await dbContext.Projects.SingleAsync(
+            value => value.Id == session.ProjectId,
+            cancellationToken);
+        ProjectActivity.Touch(project, session.CompletedAt.Value);
         dbContext.OutboxMessages.Add(new OutboxMessage
         {
             WorkspaceId = session.WorkspaceId,
@@ -1378,6 +1422,10 @@ public static class Endpoints
         session.Asset.State = AssetState.Rejected;
         session.Asset.FailureCode = "upload.aborted";
         session.Asset.FailureMessage = "Upload cancelled by the user.";
+        var project = await dbContext.Projects.SingleAsync(
+            value => value.Id == session.ProjectId,
+            cancellationToken);
+        ProjectActivity.Touch(project, now);
         var cleanupJob = new Job
         {
             WorkspaceId = session.WorkspaceId,
@@ -1440,6 +1488,7 @@ public static class Endpoints
             now,
             "asset.deleted",
             cancellationToken);
+        ProjectActivity.Touch(project, now);
 
         if (project.FlowKind == FlowKind.Mp3First)
         {
@@ -1523,6 +1572,7 @@ public static class Endpoints
             visuals.Single(value => value.Id == request.AssetIds[index]).SortOrder = index;
         }
 
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         dbContext.Entry(project).Property(value => value.Version).IsModified = true;
         await dbContext.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, project.Version);
@@ -1723,6 +1773,7 @@ public static class Endpoints
     private static ReleaseResponse ToResponse(ReleaseProject value, IEnumerable<MediaAsset> assets) =>
         new(
             value.Id,
+            value.FlowKind,
             value.ProjectLabel,
             value.ArtistName,
             value.TrackTitle,

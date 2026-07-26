@@ -1,9 +1,11 @@
+using System.Data;
 using System.Text.Json;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Worker;
@@ -24,8 +26,12 @@ public sealed class RetentionSweepService(
     {
         if (!workerOptions.Value.Capabilities.Contains(
                 JobRoutingRegistry.Control,
-                StringComparer.OrdinalIgnoreCase))
+                StringComparer.OrdinalIgnoreCase) ||
+            !policyOptions.Value.RetentionSweepEnabled)
         {
+            logger.LogInformation(
+                "Retention sweep is disabled for this worker (enabled: {Enabled}).",
+                policyOptions.Value.RetentionSweepEnabled);
             return;
         }
 
@@ -51,13 +57,59 @@ public sealed class RetentionSweepService(
 
     internal async Task SweepAsync(CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
-        var queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
         var policy = policyOptions.Value;
-        var now = timeProvider.GetUtcNow();
+        if (!policy.RetentionSweepEnabled)
+        {
+            return;
+        }
 
+        var now = timeProvider.GetUtcNow();
+        await using var strategyScope = scopeFactory.CreateAsyncScope();
+        var strategyDb =
+            strategyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var strategy = strategyDb.Database.CreateExecutionStrategy();
+        var result = await strategy.ExecuteAsync(
+            async token =>
+            {
+                // A failed attempt can leave tracked entities in an unknown
+                // state. Give every execution-strategy retry a fresh scope and
+                // DbContext so the whole transaction is replayed atomically.
+                await using var attemptScope = scopeFactory.CreateAsyncScope();
+                var attemptDb =
+                    attemptScope.ServiceProvider
+                        .GetRequiredService<Hook2StreamDbContext>();
+                return await SweepOnceAsync(
+                    attemptDb,
+                    now,
+                    policy,
+                    token);
+            },
+            cancellationToken);
+
+        if (result.HasWork)
+        {
+            logger.LogInformation(
+                "Retention sweep expired {UploadCount} uploads, {IdempotencyCount} idempotency records, {SessionCount} sessions and {LoginStateCount} OAuth states; {CleanupCount} durable cleanup deliveries are ensured.",
+                result.ExpiredUploadCount,
+                result.ExpiredIdempotencyCount,
+                result.ExpiredAuthSessionCount,
+                result.ExpiredLoginStateCount,
+                result.CleanupRequestCount);
+        }
+    }
+
+    private static async Task<SweepResult> SweepOnceAsync(
+        Hook2StreamDbContext db,
+        DateTimeOffset now,
+        OperationalPolicyOptions policy,
+        CancellationToken cancellationToken)
+    {
         var cleanupRequests = new List<CleanupRequest>();
+        await using var transaction = db.Database.IsRelational()
+            ? await db.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable,
+                cancellationToken)
+            : null;
 
         var expiredUploads = await db.UploadSessions
             .Include(value => value.Asset)
@@ -125,64 +177,20 @@ public sealed class RetentionSweepService(
                 now));
         }
 
+        await QueueFencedAssetRecoveryAsync(db, cleanupRequests, now, cancellationToken);
+        await EnsureCleanupDeliveriesAsync(db, cleanupRequests, now, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
-
-        foreach (var request in cleanupRequests
-                     .DistinctBy(value => value.IdempotencyKey))
+        if (transaction is not null)
         {
-            var existing = await db.Jobs.IgnoreQueryFilters().SingleOrDefaultAsync(
-                value => value.IdempotencyKey == request.IdempotencyKey,
-                cancellationToken);
-            if (existing is null)
-            {
-                await queue.EnqueueAsync(
-                    new JobEnqueueRequest(
-                        request.WorkspaceId,
-                        request.ProjectId,
-                        request.AssetId,
-                        JobType.AssetCleanup,
-                        JsonSerializer.Serialize(request.Payload, PipelineHandlerData.Json),
-                        request.IdempotencyKey,
-                        RequiredCapability: JobRoutingRegistry.Control,
-                        AvailableAt: request.AvailableAt),
-                    cancellationToken);
-            }
-            else if (existing.State is JobState.Failed or JobState.Cancelled)
-            {
-                existing.DeletedAt = null;
-                existing.State = JobState.Queued;
-                existing.AvailableAt = request.AvailableAt is { } availableAt && availableAt > now
-                    ? availableAt
-                    : now;
-                existing.MaxAttempts = Math.Max(existing.MaxAttempts, existing.AttemptCount + 1);
-                existing.CompletedAt = null;
-                existing.ErrorCode = null;
-                existing.ErrorMessage = null;
-                existing.LeaseOwner = null;
-                existing.LeaseToken = null;
-                existing.LeaseExpiresAt = null;
-                db.JobEvents.Add(new JobEvent
-                {
-                    JobId = existing.Id,
-                    EventType = "requeued",
-                    DataJson = "{\"reason\":\"retention.deadline\"}"
-                });
-                await db.SaveChangesAsync(cancellationToken);
-            }
+            await transaction.CommitAsync(cancellationToken);
         }
 
-        if (expiredUploads.Count > 0 || expiredIdempotency.Count > 0 ||
-            expiredAuthSessions.Count > 0 || expiredLoginStates.Count > 0 ||
-            cleanupRequests.Count > 0)
-        {
-            logger.LogInformation(
-                "Retention sweep expired {UploadCount} uploads, {IdempotencyCount} idempotency records, {SessionCount} sessions and {LoginStateCount} OAuth states; {CleanupCount} cleanup jobs are ensured.",
-                expiredUploads.Count,
-                expiredIdempotency.Count,
-                expiredAuthSessions.Count,
-                expiredLoginStates.Count,
-                cleanupRequests.Count);
-        }
+        return new SweepResult(
+            expiredUploads.Count,
+            expiredIdempotency.Count,
+            expiredAuthSessions.Count,
+            expiredLoginStates.Count,
+            cleanupRequests.Count);
     }
 
     private static async Task QueueUnpaidProjectRetentionAsync(
@@ -193,29 +201,41 @@ public sealed class RetentionSweepService(
         CancellationToken cancellationToken)
     {
         var cutoff = now.AddDays(-policy.UnpaidProjectDays);
-        var candidates = await db.Projects
-            .Where(project => project.CreatedAt <= cutoff &&
+        var candidateIds = await db.Projects
+            .Where(project => project.LastActivityAt <= cutoff &&
                               !db.Entitlements.Any(entitlement =>
                                   entitlement.ProjectId == project.Id &&
                                   (entitlement.State == EntitlementState.Active ||
                                    entitlement.State == EntitlementState.Exhausted)) &&
                               !db.BillingCheckouts.Any(checkout =>
                                   checkout.ProjectId == project.Id &&
-                                  checkout.State == CheckoutState.Pending))
-            .OrderBy(value => value.CreatedAt)
+                                  checkout.State == CheckoutState.Pending) &&
+                              !db.Jobs.Any(job =>
+                                  job.ProjectId == project.Id &&
+                                  job.Type != JobType.AssetCleanup &&
+                                  (job.State == JobState.Queued ||
+                                   job.State == JobState.Running)))
+            .OrderBy(value => value.LastActivityAt)
+            .Select(value => value.Id)
             .Take(100)
             .ToListAsync(cancellationToken);
-        if (candidates.Count == 0) return;
+        if (candidateIds.Count == 0) return;
 
-        var candidateIds = candidates.Select(value => value.Id).ToArray();
         var existing = await db.ProjectDeletionTombstones
             .Where(value => candidateIds.Contains(value.ProjectId))
             .Select(value => value.ProjectId)
             .ToListAsync(cancellationToken);
         var existingIds = existing.ToHashSet();
 
-        foreach (var project in candidates.Where(value => !existingIds.Contains(value.Id)))
+        foreach (var projectId in candidateIds.Where(value => !existingIds.Contains(value)))
         {
+            var project = await LockProjectAsync(db, projectId, cancellationToken);
+            if (project is null ||
+                !await IsUnpaidProjectEligibleAsync(db, project, cutoff, cancellationToken))
+            {
+                continue;
+            }
+
             await ProjectDeletionCoordinator.FenceAsync(
                 db,
                 project,
@@ -241,6 +261,59 @@ public sealed class RetentionSweepService(
                 $"retention:project:{tombstone.Id:N}",
                 now.AddMinutes(policy.DeletionFenceMinutes)));
         }
+    }
+
+    private static async Task<ReleaseProject?> LockProjectAsync(
+        Hook2StreamDbContext db,
+        Guid projectId,
+        CancellationToken cancellationToken)
+    {
+        if (db.Database.IsNpgsql())
+        {
+            return await db.Projects
+                .FromSqlInterpolated(
+                    $"""
+                     SELECT *
+                     FROM release_projects
+                     WHERE id = {projectId}
+                       AND deleted_at IS NULL
+                     FOR UPDATE SKIP LOCKED
+                     """)
+                .SingleOrDefaultAsync(cancellationToken);
+        }
+
+        return await db.Projects.SingleOrDefaultAsync(
+            value => value.Id == projectId,
+            cancellationToken);
+    }
+
+    private static async Task<bool> IsUnpaidProjectEligibleAsync(
+        Hook2StreamDbContext db,
+        ReleaseProject project,
+        DateTimeOffset cutoff,
+        CancellationToken cancellationToken)
+    {
+        if (project.LastActivityAt > cutoff)
+        {
+            return false;
+        }
+
+        var protectedByEntitlement = await db.Entitlements.AnyAsync(
+            value => value.ProjectId == project.Id &&
+                     (value.State == EntitlementState.Active ||
+                      value.State == EntitlementState.Exhausted),
+            cancellationToken);
+        var protectedByCheckout = await db.BillingCheckouts.AnyAsync(
+            value => value.ProjectId == project.Id &&
+                     value.State == CheckoutState.Pending,
+            cancellationToken);
+        var protectedByWork = await db.Jobs.AnyAsync(
+            value => value.ProjectId == project.Id &&
+                     value.Type != JobType.AssetCleanup &&
+                     (value.State == JobState.Queued ||
+                      value.State == JobState.Running),
+            cancellationToken);
+        return !protectedByEntitlement && !protectedByCheckout && !protectedByWork;
     }
 
     private static async Task QueueAssetRetentionAsync(
@@ -358,6 +431,157 @@ public sealed class RetentionSweepService(
         }
     }
 
+    private static async Task QueueFencedAssetRecoveryAsync(
+        Hook2StreamDbContext db,
+        ICollection<CleanupRequest> cleanupRequests,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var fencedAssets = await db.MediaAssets
+            .IgnoreQueryFilters()
+            .Where(asset =>
+                asset.DeletedAt != null &&
+                asset.State == AssetState.Deleted &&
+                asset.OriginalFileName != "[deleted]" &&
+                !db.ProjectDeletionTombstones.Any(tombstone =>
+                    tombstone.ProjectId == asset.ProjectId &&
+                    tombstone.ContentPurgedAt == null))
+            .OrderBy(value => value.DeletedAt)
+            .Take(500)
+            .ToListAsync(cancellationToken);
+
+        foreach (var asset in fencedAssets)
+        {
+            cleanupRequests.Add(new CleanupRequest(
+                asset.WorkspaceId,
+                asset.ProjectId,
+                asset.Id,
+                new AssetCleanupPayload(
+                    asset.ProjectId,
+                    AssetId: asset.Id,
+                    NotBefore: now),
+                $"retention:asset:{asset.Id:N}",
+                now));
+        }
+    }
+
+    private static async Task EnsureCleanupDeliveriesAsync(
+        Hook2StreamDbContext db,
+        IEnumerable<CleanupRequest> cleanupRequests,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var requests = cleanupRequests
+            .DistinctBy(value => value.IdempotencyKey)
+            .ToArray();
+        if (requests.Length == 0)
+        {
+            return;
+        }
+
+        var dedupeKeys = requests.Select(value => value.IdempotencyKey).ToArray();
+        var jobKeys = dedupeKeys
+            .Concat(dedupeKeys.Select(value => $"outbox:{value}"))
+            .ToArray();
+        var assetIds = requests
+            .Where(value => value.AssetId is not null)
+            .Select(value => value.AssetId!.Value)
+            .Distinct()
+            .ToArray();
+        var existingJobs = await db.Jobs
+            .IgnoreQueryFilters()
+            .Where(value =>
+                value.Type == JobType.AssetCleanup &&
+                ((value.IdempotencyKey != null && jobKeys.Contains(value.IdempotencyKey)) ||
+                 (value.AssetId != null && assetIds.Contains(value.AssetId.Value))))
+            .ToListAsync(cancellationToken);
+        var existingOutbox = await db.OutboxMessages
+            .IgnoreQueryFilters()
+            .Where(value => dedupeKeys.Contains(value.DedupeKey))
+            .ToListAsync(cancellationToken);
+
+        foreach (var request in requests)
+        {
+            var outboxJobKey = $"outbox:{request.IdempotencyKey}";
+            var existingJob = existingJobs.FirstOrDefault(value =>
+                value.IdempotencyKey == request.IdempotencyKey ||
+                value.IdempotencyKey == outboxJobKey ||
+                request.AssetId is { } assetId && value.AssetId == assetId);
+            if (existingJob is not null)
+            {
+                if (existingJob.State is not (JobState.Queued or JobState.Running))
+                {
+                    existingJob.DeletedAt = null;
+                    existingJob.State = JobState.Queued;
+                    existingJob.AvailableAt =
+                        request.AvailableAt is { } availableAt && availableAt > now
+                            ? availableAt
+                            : now;
+                    existingJob.MaxAttempts = Math.Max(
+                        existingJob.MaxAttempts,
+                        existingJob.AttemptCount + 1);
+                    existingJob.CompletedAt = null;
+                    existingJob.ErrorCode = null;
+                    existingJob.ErrorMessage = null;
+                    existingJob.LeaseOwner = null;
+                    existingJob.LeaseToken = null;
+                    existingJob.LeaseExpiresAt = null;
+                    db.JobEvents.Add(new JobEvent
+                    {
+                        JobId = existingJob.Id,
+                        EventType = "requeued",
+                        DataJson = "{\"reason\":\"retention.recovery\"}"
+                    });
+                }
+
+                continue;
+            }
+
+            var enqueueRequest = new JobEnqueueRequest(
+                request.WorkspaceId,
+                request.ProjectId,
+                request.AssetId,
+                JobType.AssetCleanup,
+                JsonSerializer.Serialize(request.Payload, PipelineHandlerData.Json),
+                request.IdempotencyKey,
+                RequiredCapability: JobRoutingRegistry.Control,
+                AvailableAt: request.AvailableAt);
+            var message = existingOutbox.FirstOrDefault(
+                value => value.DedupeKey == request.IdempotencyKey);
+            if (message is null)
+            {
+                db.OutboxMessages.Add(new OutboxMessage
+                {
+                    WorkspaceId = request.WorkspaceId,
+                    AggregateId = request.ProjectId,
+                    Destination = "job",
+                    MessageType = "job.asset_cleanup",
+                    DedupeKey = request.IdempotencyKey,
+                    PayloadJson = JsonSerializer.Serialize(
+                        enqueueRequest,
+                        PipelineHandlerData.Json)
+                });
+                continue;
+            }
+
+            if (message.ProcessedAt is null && message.DeletedAt is null)
+            {
+                continue;
+            }
+
+            // A processed delivery without its deduplicated job indicates a
+            // historical or manually repaired partial state. Reopening the
+            // same outbox row preserves the unique dedupe key.
+            message.DeletedAt = null;
+            message.ProcessedAt = null;
+            message.AttemptCount = 0;
+            message.LastError = null;
+            message.PayloadJson = JsonSerializer.Serialize(
+                enqueueRequest,
+                PipelineHandlerData.Json);
+        }
+    }
+
     internal static bool IsAssetPastRetention(
         MediaAsset asset,
         DateTimeOffset? latestPaidAt,
@@ -393,4 +617,19 @@ public sealed class RetentionSweepService(
         AssetCleanupPayload Payload,
         string IdempotencyKey,
         DateTimeOffset? AvailableAt = null);
+
+    private sealed record SweepResult(
+        int ExpiredUploadCount,
+        int ExpiredIdempotencyCount,
+        int ExpiredAuthSessionCount,
+        int ExpiredLoginStateCount,
+        int CleanupRequestCount)
+    {
+        public bool HasWork =>
+            ExpiredUploadCount > 0 ||
+            ExpiredIdempotencyCount > 0 ||
+            ExpiredAuthSessionCount > 0 ||
+            ExpiredLoginStateCount > 0 ||
+            CleanupRequestCount > 0;
+    }
 }

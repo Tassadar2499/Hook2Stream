@@ -34,6 +34,7 @@ public sealed class OperationalPolicyOptions
     public int DeletionFenceMinutes { get; set; } = 15;
     public int IdempotencyDays { get; set; } = 7;
     public int RetentionSweepMinutes { get; set; } = 60;
+    public bool RetentionSweepEnabled { get; set; }
 }
 
 public sealed class MediaToolsOptions

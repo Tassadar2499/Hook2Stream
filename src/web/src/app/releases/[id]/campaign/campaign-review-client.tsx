@@ -62,6 +62,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
   const [workflowBatchId, setWorkflowBatchId] = useState<string | null>();
   const [previewUrl, setPreviewUrl] = useState<string>();
   const [previewState, setPreviewState] = useState<string>();
+  const [previewJobId, setPreviewJobId] = useState<string>();
   const [initialBatchId, setInitialBatchId] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -117,9 +118,11 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
     setHookDrafts(hookResult?.data.hooks ?? []);
     setCampaign(campaignResult?.data);
     setBilling(billingResult.data);
-    setPreviewState(
-      workflowResult.data.lanes.find((lane) => lane.lane === "preview")?.state,
+    const previewLane = workflowResult.data.lanes.find(
+      (lane) => lane.lane === "preview",
     );
+    setPreviewState(previewLane?.state);
+    setPreviewJobId(previewLane?.currentJobId ?? undefined);
     setWorkflowBatchId(workflowResult.data.currentRenderBatchId ?? null);
     setPreviewUrl(previewResult?.data.url);
     setBackgroundAssetIds([
@@ -354,7 +357,16 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       setNotice("Hook revision saved. The campaign is being refreshed for the new timings.");
       await load();
     } catch (caught) {
-      setError(messageFor(caught, "Could not save hooks."));
+      if (caught instanceof ApiRequestError && caught.status === 412) {
+        const unsavedDrafts = hookDrafts;
+        await load();
+        setHookDrafts(unsavedDrafts);
+        setError(
+          "The release changed in another tab. Your hook edits are still open against the latest version; review and save again.",
+        );
+      } else {
+        setError(messageFor(caught, "Could not save hooks."));
+      }
     } finally {
       setBusy(false);
     }
@@ -413,8 +425,56 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
           hookId: selectedItem.hookId,
         } : current);
         setError("Template and hook are fixed for this campaign slot. Your other composition edits are still open.");
+      } else if (caught instanceof ApiRequestError && caught.status === 412) {
+        await load();
+        setError(
+          "This campaign changed in another tab. Your card edits are still open against the latest version; review and save again.",
+        );
       } else {
         setError(messageFor(caught, "Could not update this campaign item."));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryPreview() {
+    if (!projectEtag || !previewJobId) return;
+    setBusy(true);
+    setError(undefined);
+    setNotice(undefined);
+    const storageKey = `hook2stream:preview-retry:${projectId}:${previewJobId}`;
+    const idempotencyKey =
+      window.localStorage.getItem(storageKey) ??
+      createIdempotencyKey("preview-retry");
+    window.localStorage.setItem(storageKey, idempotencyKey);
+
+    try {
+      const token = await requireToken();
+      await apiFetch<{ jobId: string; revisionId?: string | null }>(
+        `/api/v1/releases/${projectId}/preview/retries`,
+        token,
+        {
+          method: "POST",
+          headers: {
+            "If-Match": projectEtag,
+            "Idempotency-Key": idempotencyKey,
+          },
+          body: JSON.stringify({ failedJobId: previewJobId }),
+        },
+      );
+      window.localStorage.removeItem(storageKey);
+      setPreviewState("retrying");
+      setNotice("Preview retry queued. This does not consume another free preview.");
+      await load();
+    } catch (caught) {
+      if (caught instanceof ApiRequestError && caught.status === 412) {
+        await load();
+        setError(
+          "The release changed before the retry was queued. The latest preview state is loaded; retry again if it is still failed.",
+        );
+      } else {
+        setError(messageFor(caught, "Could not retry the preview render."));
       }
     } finally {
       setBusy(false);
@@ -556,12 +616,24 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
                   <div className="grid aspect-[9/16] place-items-center p-8 text-center font-black">
                     {previewState === "stale"
                       ? "The free preview belongs to an earlier release revision. Paid renders use the current approved campaign."
-                      : previewState === "failed" || previewState === "cancelled"
-                        ? "Preview rendering needs attention. Edit a campaign card to create a fresh revision."
+                      : previewState === "failed"
+                        ? "Preview rendering stopped before a video was produced. Retry the current approved campaign without spending another free preview."
+                        : previewState === "cancelled"
+                          ? "Preview rendering was cancelled because the campaign changed. The current campaign will start a fresh preview when it is ready."
                         : "The watermarked preview is rendering automatically…"}
                   </div>
                 )}
               </div>
+              {previewState === "failed" ? (
+                <button
+                  className="button-secondary mt-4"
+                  type="button"
+                  disabled={busy || !previewJobId || !projectEtag}
+                  onClick={retryPreview}
+                >
+                  {busy ? "Queueing preview…" : "Retry preview"}
+                </button>
+              ) : null}
               <div className="mt-6 grid gap-4 md:grid-cols-3">
                 <PlanCard title="Mini Release" price="$5" description={`Exactly six clean videos · ${miniSelection.length}/6 selected`} action="Choose Mini" disabled={miniSelection.length !== 6 || busy} onClick={() => checkout("mini_release")} />
                 <PlanCard title="Release Pack" price="$9.90" description="All 18 clean videos, copy and calendar" action="Unlock full pack" disabled={busy} onClick={() => checkout("release_pack")} />

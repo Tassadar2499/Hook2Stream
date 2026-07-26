@@ -76,7 +76,14 @@ export function ReleaseWorkflowHub({
       setNotice("Release details confirmed. Artwork can start after rights are saved.");
       await onRefresh();
     } catch (caught) {
-      setError(messageFor(caught, "Could not save release details."));
+      if (caught instanceof ApiRequestError && caught.status === 412) {
+        await onRefresh();
+        setError(
+          "This release changed in another tab. The latest version is loaded; review the fields and save again.",
+        );
+      } else {
+        setError(messageFor(caught, "Could not save release details."));
+      }
     } finally {
       setSetupSaving(false);
     }
@@ -106,7 +113,14 @@ export function ReleaseWorkflowHub({
       setNotice("Rights confirmed. OpenRouter transcription, artwork and campaign generation may now run.");
       await onRefresh();
     } catch (caught) {
-      setError(messageFor(caught, "Could not save rights confirmation."));
+      if (caught instanceof ApiRequestError && caught.status === 412) {
+        await onRefresh();
+        setError(
+          "This release changed in another tab. The latest rights state is loaded; review it and save again.",
+        );
+      } else {
+        setError(messageFor(caught, "Could not save rights confirmation."));
+      }
     } finally {
       setRightsSaving(false);
     }
@@ -123,12 +137,18 @@ export function ReleaseWorkflowHub({
       laneOrder.map(normalizeLane).indexOf(normalizeLane(left.lane)) -
       laneOrder.map(normalizeLane).indexOf(normalizeLane(right.lane)),
   );
+  const hasAcceptedAudio = release.assets.some(
+    (asset) =>
+      asset.kind === "audio" &&
+      asset.isActive &&
+      ["uploaded", "processing", "ready"].includes(asset.state),
+  );
 
   return (
     <>
       <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
         <div>
-          <p className="eyebrow text-[var(--orange)]">MP3-first release</p>
+          <p className="eyebrow text-[var(--orange)]">Audio-first release</p>
           <h1 className="display mt-2 text-5xl sm:text-7xl">
             {release.trackTitle || "Analysing your track"}
           </h1>
@@ -153,6 +173,29 @@ export function ReleaseWorkflowHub({
         <div className="mt-6">
           <StatusPanel title="Saved" message={notice} tone="success" />
         </div>
+      ) : null}
+
+      {!hasAcceptedAudio ? (
+        <section className="paper-card mt-8 p-6 sm:p-8" aria-labelledby="audio-upload-title">
+          <p className="eyebrow text-[var(--violet)]">Next: audio master</p>
+          <h2 id="audio-upload-title" className="display mt-2 text-4xl sm:text-5xl">
+            Upload the finished track.
+          </h2>
+          <p className="mt-3 max-w-3xl leading-7">
+            Choose one MP3 or WAV. The original goes directly to secure storage;
+            validation, analysis and RU / EN transcription start after the upload.
+          </p>
+          <div className="mt-6">
+            <UploadManager
+              projectId={projectId}
+              kind="audio"
+              title="Master audio"
+              description="One MP3 or WAV, up to 250 MB and 10 minutes."
+              accept=".mp3,.wav,audio/mpeg,audio/wav,audio/x-wav"
+              onCompleted={onRefresh}
+            />
+          </div>
+        </section>
       ) : null}
 
       <section className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4" aria-label="Release workflow">
@@ -349,14 +392,16 @@ export function ReleaseWorkflowHub({
       <details id="sources" className="paper-card mt-6 p-6 sm:p-8">
         <summary className="cursor-pointer font-black">Advanced sources and manual overrides</summary>
         <div className="mt-6 grid gap-4">
-          <UploadManager
-            projectId={projectId}
-            kind="audio"
-            title="Replace master"
-            description="MP3 or WAV. Replacing audio invalidates analysis and dependent revisions."
-            accept=".mp3,.wav,audio/mpeg,audio/wav"
-            onCompleted={onRefresh}
-          />
+          {hasAcceptedAudio ? (
+            <UploadManager
+              projectId={projectId}
+              kind="audio"
+              title="Replace master"
+              description="MP3 or WAV. Replacing audio invalidates analysis and dependent revisions."
+              accept=".mp3,.wav,audio/mpeg,audio/wav,audio/x-wav"
+              onCompleted={onRefresh}
+            />
+          ) : null}
           <UploadManager
             projectId={projectId}
             kind="cover"

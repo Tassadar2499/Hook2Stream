@@ -1506,6 +1506,55 @@
         ]
       }
     },
+    "/api/v1/releases/{projectId}/preview/retries": {
+      "post": {
+        "tags": [
+          "Mp3FirstEndpoints"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetryPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobAcceptedResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "oauthSession": [ ],
+            "csrf": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
+      }
+    },
     "/api/v1/releases/{projectId}/assets/{assetId}/view-url": {
       "get": {
         "tags": [
@@ -3405,6 +3454,7 @@
       "ReleaseResponse": {
         "required": [
           "id",
+          "flowKind",
           "projectLabel",
           "artistName",
           "trackTitle",
@@ -3427,6 +3477,9 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "flowKind": {
+            "$ref": "#/components/schemas/FlowKind"
           },
           "projectLabel": {
             "type": "string"
@@ -3638,6 +3691,18 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        }
+      },
+      "RetryPreviewRequest": {
+        "required": [
+          "failedJobId"
+        ],
+        "type": "object",
+        "properties": {
+          "failedJobId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -4340,6 +4405,7 @@
           "waitForFinalRender",
           "downloadExport",
           "retryFailedRenders",
+          "retryPreview",
           null
         ]
       },

@@ -3,6 +3,7 @@ using System;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Hook2Stream.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(Hook2StreamDbContext))]
-    partial class Hook2StreamDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260725150204_RetentionActivity")]
+    partial class RetentionActivity
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1643,10 +1646,6 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("original_file_name");
 
-                    b.Property<Guid?>("ProducerJobId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("producer_job_id");
-
                     b.Property<Guid>("ProjectId")
                         .HasColumnType("uuid")
                         .HasColumnName("project_id");
@@ -1714,11 +1713,6 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                     b.HasIndex("ObjectKey")
                         .IsUnique()
                         .HasDatabaseName("ix_media_assets_object_key");
-
-                    b.HasIndex("ProducerJobId")
-                        .IsUnique()
-                        .HasDatabaseName("ix_media_assets_producer_job_id")
-                        .HasFilter("producer_job_id IS NOT NULL");
 
                     b.HasIndex("ProjectId", "ArtworkPackRevisionId", "Purpose")
                         .HasDatabaseName("ix_media_assets_project_id_artwork_pack_revision_id_purpose");

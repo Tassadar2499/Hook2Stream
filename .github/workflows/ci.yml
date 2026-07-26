@@ -26,8 +26,30 @@ jobs:
           --health-retries 10
     env:
       HOOK2STREAM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
+      HOOK2STREAM_TEST_MINIO: http://localhost:9000
+      HOOK2STREAM_TEST_MINIO_PUBLIC: http://127.0.0.1:9000
+      HOOK2STREAM_TEST_MINIO_ACCESS_KEY: hook2stream-ci
+      HOOK2STREAM_TEST_MINIO_SECRET_KEY: hook2stream-ci-secret
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start MinIO acceptance dependency
+        run: |
+          docker run --detach --rm \
+            --name hook2stream-ci-minio \
+            --publish 127.0.0.1:9000:9000 \
+            --env MINIO_ROOT_USER=hook2stream-ci \
+            --env MINIO_ROOT_PASSWORD=hook2stream-ci-secret \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z \
+            server /data
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs hook2stream-ci-minio
+          exit 1
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -43,13 +65,57 @@ jobs:
 
       - run: dotnet restore src/Hook2Stream.slnx
       - run: npm ci --prefix src/web
+      - run: npm audit --prefix src/web --omit=dev --audit-level=high
       - run: src/ci/verify.sh
 
+      - run: npx --prefix src/web playwright install --with-deps chromium firefox webkit
+      - run: npm run test:e2e:fast --prefix src/web
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-fast
+          path: |
+            src/web/playwright-report/fast
+            src/web/test-results/fast
+          if-no-files-found: ignore
+          retention-days: 14
+
+  full-stack:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: "**/*.csproj"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: src/web/package-lock.json
+
+      - run: npm ci --prefix src/web
       - run: npx --prefix src/web playwright install --with-deps chromium
-      - run: npm run test:e2e --prefix src/web
+      - run: src/ci/run-full-stack-e2e.sh
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-full-stack
+          path: |
+            src/web/playwright-report/full-stack
+            src/web/test-results/full-stack
+          if-no-files-found: ignore
+          retention-days: 14
 
   containers:
-    needs: verify
+    needs: [verify, full-stack]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

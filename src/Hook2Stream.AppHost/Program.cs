@@ -4,6 +4,16 @@ using Microsoft.Extensions.Hosting;
 
 var builder = DistributedApplication.CreateBuilder(args);
 var childEnvironment = builder.Environment.EnvironmentName;
+var isE2e = string.Equals(
+    builder.Configuration["HOOK2STREAM_E2E"],
+    "1",
+    StringComparison.OrdinalIgnoreCase);
+var webPort = isE2e ? 3100 : 3000;
+var webBaseUrl = isE2e
+    ? $"http://127.0.0.1:{webPort}"
+    : "http://localhost:3000";
+var minioBrowserOrigins =
+    "http://localhost:" + webPort + ",http://127.0.0.1:" + webPort;
 
 var googleClientId = builder.Configuration["Google:ClientId"]?.Trim() ?? "";
 var googleClientSecret = builder.Configuration["Google:ClientSecret"]?.Trim() ?? "";
@@ -17,7 +27,9 @@ if (hasGoogleClientId != hasGoogleClientSecret)
 }
 
 var useLocalAuthentication = !hasGoogleClientId;
-if (useLocalAuthentication && !builder.Environment.IsDevelopment())
+if (useLocalAuthentication &&
+    !builder.Environment.IsDevelopment() &&
+    !builder.Environment.IsEnvironment("Testing"))
 {
     throw new InvalidOperationException(
         "Google:ClientId and Google:ClientSecret are required outside the Development environment.");
@@ -26,20 +38,26 @@ if (useLocalAuthentication && !builder.Environment.IsDevelopment())
 IResourceBuilder<ParameterResource>? localAuthenticationToken = null;
 if (useLocalAuthentication)
 {
-    localAuthenticationToken = builder.AddParameter(
-        "local-auth-token",
-        new GenerateParameterDefault
-        {
-            MinLength = 48,
-            Lower = true,
-            Upper = true,
-            Numeric = true,
-            Special = false,
-            MinLower = 4,
-            MinUpper = 4,
-            MinNumeric = 4
-        },
-        secret: true);
+    localAuthenticationToken = isE2e
+        ? builder.AddParameter(
+            "local-auth-token",
+            builder.Configuration["HOOK2STREAM_E2E_AUTH_TOKEN"]?.Trim()
+                ?? "hook2stream-e2e-local-auth-token-20260725-fixed",
+            secret: true)
+        : builder.AddParameter(
+            "local-auth-token",
+            new GenerateParameterDefault
+            {
+                MinLength = 48,
+                Lower = true,
+                Upper = true,
+                Numeric = true,
+                Special = false,
+                MinLower = 4,
+                MinUpper = 4,
+                MinNumeric = 4
+            },
+            secret: true);
 }
 
 var minioPassword = builder.AddParameter(
@@ -56,7 +74,7 @@ var minioPassword = builder.AddParameter(
         MinNumeric = 2
     },
     secret: true,
-    persist: true);
+    persist: !isE2e);
 
 var postgresPassword = builder.AddParameter(
     "postgres-password",
@@ -72,10 +90,13 @@ var postgresPassword = builder.AddParameter(
         MinNumeric = 2
     },
     secret: true,
-    persist: true);
+    persist: !isE2e);
 
-var postgres = builder.AddPostgres("postgres", password: postgresPassword)
-    .WithDataVolume();
+var postgres = builder.AddPostgres("postgres", password: postgresPassword);
+if (!isE2e)
+{
+    postgres.WithDataVolume();
+}
 var database = postgres.AddDatabase("hook2stream");
 
 var minio = builder.AddContainer(
@@ -89,18 +110,32 @@ minio
     .WithEnvironment("MINIO_ROOT_PASSWORD", minioPassword)
     .WithEnvironment(
         "MINIO_API_CORS_ALLOW_ORIGIN",
-        "http://localhost:3000,http://127.0.0.1:3000")
-    .WithHttpEndpoint(targetPort: 9000, name: "s3")
+        minioBrowserOrigins)
+    .WithHttpEndpoint(port: isE2e ? 9000 : null, targetPort: 9000, name: "s3")
     .WithHttpEndpoint(targetPort: 9001, name: "console")
-    .WithVolume(VolumeNameGenerator.Generate(minio, "data"), "/data")
     .WithHttpHealthCheck("/minio/health/ready", endpointName: "s3");
+if (!isE2e)
+{
+    minio.WithVolume(VolumeNameGenerator.Generate(minio, "data"), "/data");
+}
 
 var bootstrapper = builder
     .AddProject<Projects.Hook2Stream_Bootstrapper>("bootstrapper")
     .WithReference(database)
-    .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment)
-    .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-    .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
+    .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment);
+if (isE2e)
+{
+    bootstrapper
+        .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000")
+        .WithEnvironment("Storage__PublicServiceUrl", "http://127.0.0.1:9000");
+}
+else
+{
+    bootstrapper
+        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
+        .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
+}
+bootstrapper
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
@@ -113,9 +148,21 @@ var bootstrapper = builder
 var api = builder
     .AddProject<Projects.Hook2Stream_Api>("api")
     .WithReference(database)
-    .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment)
-    .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-    .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
+    .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment);
+if (isE2e)
+{
+    api
+        .WithEndpoint("http", endpoint => endpoint.Port = 5100)
+        .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000")
+        .WithEnvironment("Storage__PublicServiceUrl", "http://127.0.0.1:9000");
+}
+else
+{
+    api
+        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
+        .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
+}
+api
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
@@ -127,8 +174,15 @@ var api = builder
     .WaitForCompletion(bootstrapper);
 
 api.WithEnvironment("Google__PublicApiBaseUrl", api.GetEndpoint("http"));
-api.WithEnvironment("Google__PublicWebReturnBaseUrl", "http://localhost:3000");
-api.WithEnvironment("Cors__Origins__0", "http://localhost:3000");
+api.WithEnvironment("Google__PublicWebReturnBaseUrl", webBaseUrl);
+api.WithEnvironment("Cors__Origins__0", webBaseUrl);
+if (isE2e)
+{
+    api
+        .WithEnvironment("Stripe__Mode", "Fixture")
+        .WithEnvironment("Stripe__PublicWebBaseUrl", webBaseUrl)
+        .WithEnvironment("OperationalPolicy__RetentionSweepEnabled", "false");
+}
 
 if (useLocalAuthentication)
 {
@@ -137,12 +191,38 @@ if (useLocalAuthentication)
 
 foreach (var capability in JobRoutingRegistry.Capabilities)
 {
-    builder
+    var worker = builder
         .AddProject<Projects.Hook2Stream_Worker>($"worker-{capability}")
         .WithReference(database)
-        .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment)
-        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-        .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"))
+        .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment);
+    if (isE2e)
+    {
+        worker
+            .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000")
+            .WithEnvironment("Storage__PublicServiceUrl", "http://127.0.0.1:9000")
+            .WithEnvironment("PipelineProviders__AudioAnalysis__Mode", "Deterministic")
+            .WithEnvironment("PipelineProviders__Transcription__Mode", "Fixture")
+            .WithEnvironment("PipelineProviders__Artwork__Mode", "Fixture")
+            .WithEnvironment("PipelineProviders__CampaignPlanning__Mode", "Fixture")
+            .WithEnvironment("PipelineProviders__VideoRendering__Mode", "Deterministic")
+            .WithEnvironment("OperationalPolicy__RetentionSweepEnabled", "false");
+    }
+    else
+    {
+        worker
+            .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
+            .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
+        if (string.Equals(
+                capability,
+                JobRoutingRegistry.Control,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            worker.WithEnvironment(
+                "OperationalPolicy__RetentionSweepEnabled",
+                "true");
+        }
+    }
+    worker
         .WithEnvironment("Storage__AccessKey", "hook2stream")
         .WithEnvironment("Storage__SecretKey", minioPassword)
         .WithEnvironment("Storage__RequireCredentials", "true")
@@ -152,8 +232,9 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
 }
 
 var web = builder
-    .AddJavaScriptApp("web", "../web", "dev")
-    .WithHttpEndpoint(targetPort: 3000, port: 3000, env: "PORT", isProxied: false)
+    .AddJavaScriptApp("web", "../web", isE2e ? "start" : "dev")
+    .WithNpm(install: !isE2e, installCommand: "ci", installArgs: [])
+    .WithHttpEndpoint(targetPort: webPort, port: webPort, env: "PORT", isProxied: false)
     .WithHttpHealthCheck("/")
     .WithEnvironment("NEXT_PUBLIC_API_BASE_URL", api.GetEndpoint("http"))
     .WithEnvironment(

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure.Persistence;
+using Hook2Stream.Infrastructure.Pipeline;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
@@ -450,6 +451,19 @@ public sealed class PipelineReconciler(
         var current = project.CurrentTranscriptRevisionId is { } currentId
             ? await db.TranscriptRevisions.SingleOrDefaultAsync(value => value.Id == currentId, cancellationToken)
             : null;
+        if (project.IsInstrumental && project.IsInstrumentalConfirmed)
+        {
+            await InstrumentalTranscriptCoordinator.EnsureAsync(
+                db,
+                project,
+                audio,
+                "system:pipeline",
+                DateTimeOffset.UtcNow,
+                cancellationToken);
+            SetStage(run, WorkflowLane.Transcript, PipelineStageState.Succeeded);
+            return;
+        }
+
         if (current is not null && current.SourceFingerprint == audio.Sha256)
         {
             if (current.State == RevisionState.Processing)
@@ -480,12 +494,6 @@ public sealed class PipelineReconciler(
                 current.State == RevisionState.ReadyForReview ? "transcript.review_required" : null,
                 job?.ErrorCode,
                 job?.Id);
-            return;
-        }
-
-        if (project.IsInstrumental && project.IsInstrumentalConfirmed && current?.State == RevisionState.Approved)
-        {
-            SetStage(run, WorkflowLane.Transcript, PipelineStageState.Succeeded);
             return;
         }
 
@@ -916,6 +924,25 @@ public sealed class PipelineReconciler(
             return;
         }
 
+        var failedCandidates = await db.Jobs
+            .Where(value => value.ProjectId == project.Id &&
+                            value.Type == JobType.PreviewRender &&
+                            value.State == JobState.Failed)
+            .OrderByDescending(value => value.CreatedAt)
+            .ToListAsync(cancellationToken);
+        var failed = failedCandidates.FirstOrDefault(value =>
+            PayloadGuid(value.PayloadJson, "campaignRevisionId") == campaign.Id);
+        if (failed is not null)
+        {
+            SetStage(
+                run,
+                WorkflowLane.Preview,
+                PipelineStageState.Failed,
+                errorCode: failed.ErrorCode,
+                currentJobId: failed.Id);
+            return;
+        }
+
         var items = Deserialize<List<CampaignItemRequest>>(campaign.ItemsJson) ?? [];
         if (items.Count != 18)
         {
@@ -1211,6 +1238,12 @@ public sealed class PipelineReconciler(
 
 public static class PipelineOutbox
 {
+    public static string CreateReconcileDedupeKey(
+        Guid projectId,
+        string reason,
+        Guid? causationId = null) =>
+        $"pipeline.reconcile:{projectId:N}:{reason}:{causationId?.ToString("N") ?? Guid.CreateVersion7().ToString("N")}";
+
     public static void Reconcile(
         Hook2StreamDbContext db,
         ReleaseProject project,
@@ -1223,7 +1256,7 @@ public static class PipelineOutbox
             AggregateId = project.Id,
             Destination = "pipeline",
             MessageType = "pipeline.reconcile",
-            DedupeKey = $"pipeline.reconcile:{project.Id:N}:{reason}:{causationId?.ToString("N") ?? Guid.CreateVersion7().ToString("N")}",
+            DedupeKey = CreateReconcileDedupeKey(project.Id, reason, causationId),
             PayloadJson = JsonSerializer.Serialize(new { projectId = project.Id, reason })
         });
         db.ProjectEvents.Add(new ProjectEvent

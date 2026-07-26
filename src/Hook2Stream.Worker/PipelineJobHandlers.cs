@@ -86,6 +86,15 @@ public sealed class TranscriptionJobHandler(
             cancellationToken);
         if (project.IsInstrumental && project.IsInstrumentalConfirmed)
         {
+            await InstrumentalTranscriptCoordinator.EnsureAsync(
+                db,
+                project,
+                asset,
+                "system:pipeline",
+                DateTimeOffset.UtcNow,
+                cancellationToken);
+            PipelineOutbox.Reconcile(db, project, "transcript.instrumental_confirmed", job.Id);
+            await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
             return;
         }
         var rights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
@@ -940,12 +949,18 @@ public sealed class VideoRenderJobHandler(
             }
         }
 
+        var legacyProvenance = JsonSerializer.Serialize(
+            new { jobId = job.Id.ToString("N") },
+            PipelineHandlerData.Json);
         var existing = await db.MediaAssets.SingleOrDefaultAsync(
             value => value.ProjectId == project.Id &&
                      value.RenderBatchId == payload.RenderBatchId &&
                      value.CampaignItemId == payload.CampaignItemId &&
                      value.Purpose == (job.Type == JobType.PreviewRender ? AssetPurpose.PreviewVideo : AssetPurpose.CampaignVideo) &&
-                     value.ProvenanceJson != null && value.ProvenanceJson.Contains(job.Id.ToString("N")),
+                     (value.ProducerJobId == job.Id ||
+                      value.ProducerJobId == null &&
+                      value.ProvenanceJson != null &&
+                      EF.Functions.JsonContains(value.ProvenanceJson, legacyProvenance)),
             cancellationToken);
         if (existing is not null) return;
         var item = (PipelineHandlerData.Deserialize<List<CampaignItemRequest>>(campaign.ItemsJson) ?? [])
@@ -1092,6 +1107,7 @@ public sealed class VideoRenderJobHandler(
             IsActive = true,
             CampaignItemId = item.Id,
             RenderBatchId = payload.RenderBatchId,
+            ProducerJobId = job.Id,
             Sha256 = promoted.Sha256,
             DurationMilliseconds = promoted.DurationMilliseconds,
             Width = promoted.Width,

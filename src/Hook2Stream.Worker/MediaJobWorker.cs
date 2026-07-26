@@ -165,11 +165,12 @@ public sealed class MediaJobWorker(
         catch (Exception exception)
         {
             logger.LogError(exception, "Job {JobId} failed and may be retried.", job.Id);
+            var failure = JobFailureClassifier.Classify(exception, job);
             await FailAsync(
                 job,
-                "job.processing_failed",
-                "Processing failed. The operation will be retried when possible.",
-                retryable: true,
+                failure.Code,
+                failure.SafeMessage,
+                failure.Retryable,
                 stoppingToken);
         }
         finally

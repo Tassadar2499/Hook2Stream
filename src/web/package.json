@@ -13,10 +13,12 @@
     "check": "tsc --noEmit",
     "lint": "eslint .",
     "test:unit": "node --test unit-tests/*.test.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "npm run test:e2e:fast",
+    "test:e2e:fast": "playwright test --config playwright.config.ts",
+    "test:e2e:full-stack": "playwright test --config playwright.full-stack.config.ts"
   },
   "dependencies": {
-    "next": "16.2.10",
+    "next": "16.2.11",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
@@ -27,12 +29,13 @@
     "@types/react": "19.2.6",
     "@types/react-dom": "19.2.3",
     "eslint": "9.39.2",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.2.11",
     "openapi-typescript": "^7.13.0",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3"
   },
   "overrides": {
-    "postcss": "8.5.19"
+    "postcss": "8.5.19",
+    "sharp": "0.35.3"
   }
 }

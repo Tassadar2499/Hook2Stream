@@ -1,4 +1,3 @@
-using Amazon.Runtime;
 using Amazon.S3;
 using Hook2Stream.Application;
 using Hook2Stream.Infrastructure.Billing;
@@ -34,8 +33,12 @@ public static class DependencyInjection
 
         services.AddOptions<StorageOptions>()
             .Bind(configuration.GetSection(StorageOptions.SectionName))
-            .Validate(options => Uri.TryCreate(options.ServiceUrl, UriKind.Absolute, out _), "Storage ServiceUrl is invalid.")
-            .Validate(options => Uri.TryCreate(options.PublicServiceUrl, UriKind.Absolute, out _), "Storage PublicServiceUrl is invalid.")
+            .Validate(
+                options => IsValidOrigin(options.ServiceUrl, requireHttps: false),
+                "Storage ServiceUrl must be an absolute HTTP(S) origin without credentials, paths, queries, or fragments.")
+            .Validate(
+                options => IsValidOrigin(options.PublicServiceUrl, environment.IsProduction()),
+                "Storage PublicServiceUrl must be an absolute HTTPS origin without credentials, paths, queries, or fragments in Production.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.Bucket), "Storage Bucket is required.")
             .Validate(
                 options => !options.RequireCredentials ||
@@ -110,19 +113,14 @@ public static class DependencyInjection
         }
 
         services.AddSingleton<IAmazonS3>(serviceProvider =>
-        {
-            var options = serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value;
-            var credentials = new BasicAWSCredentials(options.AccessKey, options.SecretKey);
-            var config = new AmazonS3Config
-            {
-                ServiceURL = options.ServiceUrl,
-                ForcePathStyle = options.ForcePathStyle,
-                AuthenticationRegion = options.Region,
-                RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
-                ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
-            };
-            return new AmazonS3Client(credentials, config);
-        });
+            S3ClientFactory.Create(
+                serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value,
+                usePublicServiceUrl: false));
+        services.AddKeyedSingleton<IAmazonS3>(
+            S3ClientFactory.PublicPresignerKey,
+            (serviceProvider, _) => S3ClientFactory.Create(
+                serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value,
+                usePublicServiceUrl: true));
 
         services.AddScoped<IObjectStorage, S3ObjectStorage>();
         services.AddSingleton<IAiProviderInvocationWriter, AiProviderInvocationWriter>();
@@ -137,7 +135,10 @@ public static class DependencyInjection
         return services;
     }
 
-    private static bool IsValidBrowserOrigin(string value, bool requireHttps)
+    private static bool IsValidBrowserOrigin(string value, bool requireHttps) =>
+        IsValidOrigin(value, requireHttps);
+
+    private static bool IsValidOrigin(string value, bool requireHttps)
     {
         if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var origin) ||
             origin.Scheme is not ("http" or "https") ||

@@ -12,7 +12,7 @@ const steps = [
   {
     number: "01",
     title: "Drop the song",
-    copy: "Upload one finished MP3. Audio analysis and RU / EN transcription start automatically.",
+    copy: "Upload one finished MP3 or WAV. Audio analysis and RU / EN transcription start automatically.",
   },
   {
     number: "02",
@@ -80,7 +80,7 @@ export default function Home() {
               of shorts.
             </h1>
             <p className="mt-7 max-w-2xl text-xl leading-8 sm:text-2xl">
-              Turn one finished MP3 into an editable transcript, cover and a
+              Turn one finished MP3 or WAV into an editable transcript, cover and a
               coherent 21-day campaign of ready-to-post vertical videos.
             </p>
             <div className="mt-9 flex flex-wrap gap-3">

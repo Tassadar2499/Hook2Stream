@@ -50,6 +50,7 @@ public sealed class ReleaseProject : Entity
 {
     public Guid WorkspaceId { get; set; }
     public Workspace Workspace { get; set; } = null!;
+    public DateTimeOffset LastActivityAt { get; set; } = DateTimeOffset.UtcNow;
     public required string ProjectLabel { get; set; }
     public required string ArtistName { get; set; }
     public required string TrackTitle { get; set; }
@@ -140,6 +141,7 @@ public sealed class MediaAsset : Entity
     public string? FailureCode { get; set; }
     public string? FailureMessage { get; set; }
     public string? ProvenanceJson { get; set; }
+    public Guid? ProducerJobId { get; set; }
     public Guid? CampaignItemId { get; set; }
     public Guid? RenderBatchId { get; set; }
     public Guid? ArtworkPackRevisionId { get; set; }

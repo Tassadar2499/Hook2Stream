@@ -72,6 +72,7 @@ public sealed record UpdateReleaseRequest(
 
 public sealed record ReleaseResponse(
     Guid Id,
+    FlowKind FlowKind,
     string ProjectLabel,
     string ArtistName,
     string TrackTitle,

@@ -115,6 +115,8 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
         modelBuilder.Entity<ReleaseProject>(entity =>
         {
             entity.HasIndex(value => new { value.WorkspaceId, value.CreatedAt });
+            entity.HasIndex(value => new { value.LastActivityAt, value.Id })
+                .HasFilter("deleted_at IS NULL");
             entity.Property(value => value.ProjectLabel).HasMaxLength(160);
             entity.Property(value => value.ArtistName).HasMaxLength(160);
             entity.Property(value => value.TrackTitle).HasMaxLength(160);
@@ -139,6 +141,9 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
         {
             entity.HasIndex(value => new { value.WorkspaceId, value.ProjectId, value.Kind, value.IsActive });
             entity.HasIndex(value => value.ObjectKey).IsUnique();
+            entity.HasIndex(value => value.ProducerJobId)
+                .IsUnique()
+                .HasFilter("producer_job_id IS NOT NULL");
             entity.Property(value => value.OriginalFileName).HasMaxLength(255);
             entity.Property(value => value.DeclaredContentType).HasMaxLength(128);
             entity.Property(value => value.DetectedContentType).HasMaxLength(128);

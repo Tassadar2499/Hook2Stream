@@ -28,6 +28,7 @@ export type WorkflowNextAction =
   | "reviewHooks"
   | "waitForCampaign"
   | "waitForPreview"
+  | "retryPreview"
   | "purchaseRender"
   | "startFinalRender"
   | "waitForFinalRender"

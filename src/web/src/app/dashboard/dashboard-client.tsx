@@ -101,7 +101,7 @@ export function DashboardClient() {
                 Bring one finished track.
               </h2>
               <p className="mt-5 max-w-xl text-lg leading-8">
-                Upload one finished MP3. We create an editable transcript,
+                Upload one finished MP3 or WAV. We create an editable transcript,
                 artwork and an 18-video campaign automatically.
               </p>
               <Link className="button-secondary mt-7" href="/releases/new">
@@ -111,7 +111,7 @@ export function DashboardClient() {
             <div className="rounded-3xl bg-[var(--ink)] p-6 text-white">
               <p className="eyebrow text-[var(--lime)]">The flow</p>
               <ul className="mt-5 grid gap-4 font-bold">
-                <li>01 · Upload one MP3</li>
+                <li>01 · Upload one MP3 or WAV</li>
                 <li>02 · Review the transcript</li>
                 <li>03 · Choose the official cover</li>
                 <li>04 · Tune hooks and storyboard</li>

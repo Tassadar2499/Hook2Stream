@@ -9,6 +9,16 @@
         "ASPNETCORE_ENVIRONMENT": "Development",
         "DOTNET_ENVIRONMENT": "Development"
       }
+    },
+    "Hook2Stream.AppHost E2E": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": false,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Testing",
+        "DOTNET_ENVIRONMENT": "Testing",
+        "HOOK2STREAM_E2E": "1"
+      }
     }
   }
 }

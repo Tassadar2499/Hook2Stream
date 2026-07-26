@@ -18,64 +18,125 @@ public sealed class MediaIngestJobHandler(
     IMediaIngestProcessor processor,
     Hook2Stream.Infrastructure.Persistence.Hook2StreamDbContext db) : IJobHandler
 {
+    private const int MaxFinalizationAttempts = 3;
+
     public JobType Type => JobType.MediaIngest;
     public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
     public async Task ProcessAsync(LeasedJob job, CancellationToken cancellationToken)
     {
+        MediaAsset? candidateAsset = null;
         if (job.AssetId is { } candidateAssetId)
         {
-            var candidateAsset = await db.MediaAssets.AsNoTracking().SingleOrDefaultAsync(
+            candidateAsset = await db.MediaAssets.AsNoTracking().SingleOrDefaultAsync(
                 value => value.Id == candidateAssetId && value.WorkspaceId == job.WorkspaceId,
                 cancellationToken);
-            if (candidateAsset is
-                {
-                    Origin: AssetOrigin.Uploaded,
-                    Kind: AssetKind.Cover or AssetKind.Visual
-                })
+        }
+
+        var isAlreadyIngested = candidateAsset is
+        {
+            State: AssetState.Ready,
+            Sha256.Length: > 0
+        };
+        if (!isAlreadyIngested &&
+            candidateAsset is
             {
-                var ownsVisualRights = await db.RightsAttestations.AsNoTracking()
-                    .Where(value => value.ProjectId == candidateAsset.ProjectId)
-                    .Select(value => value.OwnsVisualRights)
-                    .SingleOrDefaultAsync(cancellationToken);
-                if (!ownsVisualRights)
-                {
-                    throw new JobBlockedException(
-                        "rights.visual_required",
-                        "Visual processing is paused until rights to the uploaded cover or video are confirmed.");
-                }
+                Origin: AssetOrigin.Uploaded,
+                Kind: AssetKind.Cover or AssetKind.Visual
+            })
+        {
+            var ownsVisualRights = await db.RightsAttestations.AsNoTracking()
+                .Where(value => value.ProjectId == candidateAsset.ProjectId)
+                .Select(value => value.OwnsVisualRights)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (!ownsVisualRights)
+            {
+                throw new JobBlockedException(
+                    "rights.visual_required",
+                    "Visual processing is paused until rights to the uploaded cover or video are confirmed.");
             }
         }
 
         try
         {
-            await processor.ProcessAsync(job, cancellationToken);
-            if (job.ProjectId is { } projectId)
+            if (!isAlreadyIngested)
             {
-                var project = await db.Projects.SingleOrDefaultAsync(
-                    value => value.Id == projectId,
-                    cancellationToken);
-                if (project?.FlowKind == FlowKind.Mp3First)
-                {
-                    if (job.AssetId is { } assetId)
-                    {
-                        var audio = await db.MediaAssets.SingleOrDefaultAsync(
-                            value => value.Id == assetId && value.ProjectId == project.Id,
-                            cancellationToken);
-                        if (audio?.Kind == AssetKind.Audio)
-                        {
-                            await InvalidateAudioDependantsAsync(project, audio, cancellationToken);
-                        }
-                    }
-
-                    PipelineOutbox.Reconcile(db, project, "audio.ingested", job.Id);
-                    await JobLeaseFence.CommitAsync(db, job, cancellationToken);
-                }
+                await processor.ProcessAsync(job, cancellationToken);
             }
+
+            // Media ingest persists the ready asset before pipeline
+            // finalization. A concurrent setup edit may therefore advance the
+            // project concurrency token while the processor still has the old
+            // project in this scoped context. Always finalize from a fresh
+            // snapshot; a worker retry must also treat Ready (including a
+            // Ready asset superseded by a newer upload) as idempotent and
+            // never put the asset back into Processing.
+            await FinalizeMp3FirstAsync(job, cancellationToken);
         }
         catch (MediaRejectedException exception)
         {
             throw new JobHandlerException(exception.Code, exception.SafeMessage, retryable: false, exception);
+        }
+    }
+
+    private async Task FinalizeMp3FirstAsync(
+        LeasedJob job,
+        CancellationToken cancellationToken)
+    {
+        if (job.ProjectId is not { } projectId) return;
+
+        for (var attempt = 1; attempt <= MaxFinalizationAttempts; attempt++)
+        {
+            db.ChangeTracker.Clear();
+            var project = await db.Projects.SingleOrDefaultAsync(
+                value => value.Id == projectId,
+                cancellationToken);
+            if (project?.FlowKind != FlowKind.Mp3First) return;
+
+            try
+            {
+                var markerKey = PipelineOutbox.CreateReconcileDedupeKey(
+                    project.Id,
+                    "audio.ingested",
+                    job.Id);
+                if (await db.OutboxMessages
+                        .IgnoreQueryFilters()
+                        .AnyAsync(value => value.DedupeKey == markerKey, cancellationToken))
+                {
+                    return;
+                }
+
+                if (job.AssetId is not { } assetId) return;
+                var targetAsset = await db.MediaAssets.SingleOrDefaultAsync(
+                    value => value.Id == assetId && value.ProjectId == project.Id,
+                    cancellationToken);
+                if (targetAsset is not
+                    {
+                        State: AssetState.Ready,
+                        IsActive: true,
+                        Sha256.Length: > 0
+                    })
+                {
+                    // A newer upload already won activation. Finishing this
+                    // stale job must not invalidate dependants for the current
+                    // media revision or move the project backwards.
+                    return;
+                }
+
+                if (targetAsset.Kind == AssetKind.Audio)
+                {
+                    await InvalidateAudioDependantsAsync(project, targetAsset, cancellationToken);
+                }
+
+                PipelineOutbox.Reconcile(db, project, "audio.ingested", job.Id);
+                await JobLeaseFence.CommitAsync(db, job, cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxFinalizationAttempts)
+            {
+                // Rebuild invalidations and the outbox event from the winning
+                // project revision. The lease fence keeps each attempt atomic.
+            }
         }
     }
 

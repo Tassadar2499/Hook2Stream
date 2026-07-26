@@ -48,7 +48,8 @@ public enum WorkflowNextAction
     StartFinalRender = 10,
     WaitForFinalRender = 11,
     DownloadExport = 12,
-    RetryFailedRenders = 13
+    RetryFailedRenders = 13,
+    RetryPreview = 14
 }
 
 public static class WorkflowBlockerCodes
@@ -74,6 +75,8 @@ public sealed record WorkflowResponse(
     WorkflowNextAction? NextAction,
     IReadOnlyList<WorkflowLaneResponse> Lanes,
     Guid? CurrentRenderBatchId = null);
+
+public sealed record RetryPreviewRequest(Guid FailedJobId);
 
 public sealed record TranscriptWordResponse(
     string Text,

@@ -5,6 +5,7 @@ using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure;
 using Hook2Stream.Infrastructure.Persistence;
+using Hook2Stream.Infrastructure.Pipeline;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -59,6 +60,8 @@ public static class Mp3FirstEndpoints
             .Produces<CampaignResponse>();
         api.MapPut("/releases/{projectId:guid}/campaign/items/{itemId:guid}", PutCampaignItem)
             .Produces<CampaignResponse>(StatusCodes.Status201Created);
+        api.MapPost("/releases/{projectId:guid}/preview/retries", RetryPreview)
+            .Produces<JobAcceptedResponse>(StatusCodes.Status202Accepted);
 
         api.MapGet("/releases/{projectId:guid}/assets/{assetId:guid}/view-url", GetAssetReadUrl)
             .Produces<AssetReadUrlResponse>();
@@ -141,6 +144,7 @@ public static class Mp3FirstEndpoints
             FlowKind = FlowKind.Mp3First,
             BrandKitVersion = brandVersion
         };
+        ProjectActivity.Touch(project, now);
         var asset = new MediaAsset
         {
             WorkspaceId = context.Workspace.Id,
@@ -201,25 +205,7 @@ public static class Mp3FirstEndpoints
             PartSizeBytes = multipart ? MediaPolicy.MultipartPartSizeBytes : request.SizeBytes,
             ExpiresAt = now.Add(uploadSessionLifetime)
         };
-        var pipelineRun = new PipelineRun
-        {
-            WorkspaceId = context.Workspace.Id,
-            ProjectId = project.Id,
-            Project = project,
-            Number = 1,
-            State = PipelineStageState.WaitingUser,
-            Trigger = "audio-upload"
-        };
-        pipelineRun.Stages = Enum.GetValues<WorkflowLane>()
-            .Select(lane => new PipelineStage
-            {
-                PipelineRun = pipelineRun,
-                PipelineRunId = pipelineRun.Id,
-                Lane = lane,
-                State = lane == WorkflowLane.Audio ? PipelineStageState.WaitingUser : PipelineStageState.NotStarted,
-                BlockerCode = lane == WorkflowLane.Audio ? "audio.upload_required" : "audio.not_ready"
-            })
-            .ToList();
+        var pipelineRun = Mp3FirstPipelineFactory.CreateInitial(project, "audio-upload");
 
         db.Projects.Add(project);
         db.RightsAttestations.Add(rights);
@@ -350,11 +336,13 @@ public static class Mp3FirstEndpoints
         SetupReleaseRequest request,
         CurrentUserService currentUser,
         Hook2StreamDbContext db,
+        TimeProvider timeProvider,
         HttpRequest httpRequest,
         HttpResponse httpResponse,
         CancellationToken cancellationToken)
     {
-        ApiEndpointHelpers.RequireValid(ReleaseRules.ValidateSetup(request, DateOnly.FromDateTime(DateTime.UtcNow)));
+        var now = timeProvider.GetUtcNow();
+        ApiEndpointHelpers.RequireValid(ReleaseRules.ValidateSetup(request, DateOnly.FromDateTime(now.UtcDateTime)));
         var expected = ApiEndpointHelpers.RequireIfMatch(httpRequest);
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var project = await Project(db, context.Workspace.Id, projectId, true, cancellationToken);
@@ -384,7 +372,7 @@ public static class Mp3FirstEndpoints
         project.IsInstrumental = request.IsInstrumental;
         project.IsInstrumentalConfirmed = request.IsInstrumentalConfirmed;
         project.InternalNotes = request.InternalNotes?.Trim();
-        project.SetupCompletedAt = DateTimeOffset.UtcNow;
+        project.SetupCompletedAt = now;
 
         if (transcriptInputsChanged && !(project.IsInstrumental && project.IsInstrumentalConfirmed))
         {
@@ -467,7 +455,7 @@ public static class Mp3FirstEndpoints
                 staleJob.State = JobState.Cancelled;
                 staleJob.ErrorCode = "setup.changed";
                 staleJob.ErrorMessage = "The job was cancelled because release setup changed.";
-                staleJob.CompletedAt = DateTimeOffset.UtcNow;
+                staleJob.CompletedAt = now;
                 staleJob.LeaseOwner = null;
                 staleJob.LeaseToken = null;
                 staleJob.LeaseExpiresAt = null;
@@ -482,56 +470,26 @@ public static class Mp3FirstEndpoints
 
         if (project.IsInstrumental && project.IsInstrumentalConfirmed)
         {
-            var current = project.CurrentTranscriptRevisionId is { } currentId
-                ? await db.TranscriptRevisions.SingleOrDefaultAsync(value => value.Id == currentId, cancellationToken)
-                : null;
-            if (current?.Source == TranscriptSource.Instrumental)
-            {
-                current.State = RevisionState.Approved;
-                current.Language = project.Language;
-                current.PhrasesJson = "[]";
-                current.ApprovedBySubject = currentUser.Subject;
-                current.ApprovedAt ??= DateTimeOffset.UtcNow;
-            }
-            else
-            {
-                if (current is not null) current.State = RevisionState.Superseded;
-                var number = await db.TranscriptRevisions
-                    .Where(value => value.ProjectId == project.Id)
-                    .Select(value => value.Number)
-                    .DefaultIfEmpty()
-                    .MaxAsync(cancellationToken) + 1;
-                var transcript = new TranscriptRevision
-                {
-                    WorkspaceId = project.WorkspaceId,
-                    ProjectId = project.Id,
-                    Number = number,
-                    Source = TranscriptSource.Instrumental,
-                    State = RevisionState.Approved,
-                    Language = project.Language,
-                    PhrasesJson = "[]",
-                    ApprovedBySubject = currentUser.Subject,
-                    ApprovedAt = DateTimeOffset.UtcNow
-                };
-                db.TranscriptRevisions.Add(transcript);
-                project.CurrentTranscriptRevisionId = transcript.Id;
-                if (project.CurrentHookSetRevisionId is { } hookId)
-                {
-                    var hooks = await db.HookSetRevisions.SingleOrDefaultAsync(value => value.Id == hookId, cancellationToken);
-                    if (hooks is not null) hooks.State = RevisionState.Superseded;
-                    project.CurrentHookSetRevisionId = null;
-                }
-                if (project.CurrentCampaignPlanRevisionId is { } campaignId)
-                {
-                    var campaign = await db.CampaignPlanRevisions.SingleOrDefaultAsync(value => value.Id == campaignId, cancellationToken);
-                    if (campaign is not null) campaign.State = RevisionState.Superseded;
-                    project.CurrentCampaignPlanRevisionId = null;
-                }
-            }
-            project.LyricsText = null;
+            var audio = await db.MediaAssets.AsNoTracking()
+                .Where(value =>
+                    value.ProjectId == project.Id &&
+                    value.Kind == AssetKind.Audio &&
+                    value.State == AssetState.Ready &&
+                    value.IsActive &&
+                    value.Sha256 != null)
+                .OrderByDescending(value => value.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
+            await InstrumentalTranscriptCoordinator.EnsureAsync(
+                db,
+                project,
+                audio,
+                currentUser.Subject,
+                now,
+                cancellationToken);
         }
 
         AddReconcile(db, project, "setup.updated");
+        ProjectActivity.Touch(project, now);
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(httpResponse, project.Version);
         return Results.Ok(ToRelease(project));
@@ -664,6 +622,7 @@ public static class Mp3FirstEndpoints
             cancellationToken);
         await InvalidateAfterTranscript(db, project, cancellationToken);
         AddReconcile(db, project, "transcript.updated");
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, revision.Version);
         return Results.Created($"/api/v1/releases/{project.Id}/transcript", ToTranscript(revision, project.IsInstrumental));
@@ -696,6 +655,7 @@ public static class Mp3FirstEndpoints
         revision.ApprovedAt = DateTimeOffset.UtcNow;
         db.Entry(project).Property(value => value.Version).IsModified = true;
         AddReconcile(db, project, "transcript.approved");
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, revision.Version);
         return Results.Ok(ToTranscript(revision, project.IsInstrumental));
@@ -715,6 +675,7 @@ public static class Mp3FirstEndpoints
         var audio = project.Assets.SingleOrDefault(value => value.Kind == AssetKind.Audio && value.IsActive && value.State == AssetState.Ready)
             ?? throw Problem(409, "audio.not_ready", "A processed audio master is required.");
         await RequireExternalAiProcessingConsent(db, project, audio, cancellationToken);
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
             project.WorkspaceId, project.Id, audio.Id, JobType.Transcription,
             JsonSerializer.Serialize(new { projectId, assetId = audio.Id }),
@@ -812,6 +773,7 @@ public static class Mp3FirstEndpoints
         }
         db.ArtworkPackRevisions.Add(revision);
         project.CurrentArtworkPackRevisionId = revision.Id;
+        ProjectActivity.Touch(project, timeProvider);
         var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
             project.WorkspaceId, project.Id, null, JobType.ArtworkGeneration,
             JsonSerializer.Serialize(new { projectId, artworkPackRevisionId = revision.Id, prompt = revision.Prompt, request.Style }),
@@ -851,6 +813,7 @@ public static class Mp3FirstEndpoints
         pack.SelectedAssetId = asset.Id;
         pack.CompositionJson = request.CompositionJson;
         pack.State = RevisionState.ReadyForReview;
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, pack.Version);
         return Results.Ok(ToArtwork(pack));
@@ -888,6 +851,7 @@ public static class Mp3FirstEndpoints
         asset.Purpose = AssetPurpose.ApprovedCover;
         db.Entry(project).Property(value => value.Version).IsModified = true;
         AddReconcile(db, project, "artwork.approved");
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
 
         var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
             project.WorkspaceId, project.Id, selectedId, JobType.ArtworkGeneration,
@@ -955,6 +919,7 @@ public static class Mp3FirstEndpoints
             project.CurrentCampaignPlanRevisionId = null;
         }
         AddReconcile(db, project, "hooks.updated");
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, revision.Version);
         return Results.Created($"/api/v1/releases/{project.Id}/hooks", ToHooks(revision));
@@ -1106,9 +1071,226 @@ public static class Mp3FirstEndpoints
             ],
             cancellationToken);
         AddReconcile(db, project, "campaign.item_updated");
+        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
         await db.SaveChangesAsync(cancellationToken);
         ApiEndpointHelpers.SetEtag(response, revision.Version);
         return Results.Created($"/api/v1/releases/{project.Id}/campaign", ToCampaign(revision));
+    }
+
+    private static async Task<IResult> RetryPreview(
+        Guid projectId,
+        RetryPreviewRequest request,
+        CurrentUserService currentUser,
+        Hook2StreamDbContext db,
+        IOptions<OperationalPolicyOptions> policyOptions,
+        TimeProvider timeProvider,
+        HttpRequest httpRequest,
+        HttpResponse httpResponse,
+        CancellationToken cancellationToken)
+    {
+        var key = RequireIdempotencyKey(httpRequest);
+        var expectedVersion = ApiEndpointHelpers.RequireIfMatch(httpRequest);
+        var now = timeProvider.GetUtcNow();
+        var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
+        var requestHash = Hash($"{projectId:N}\n{request.FailedJobId:N}");
+        var existingRequest = await db.ApiIdempotencyRecords.SingleOrDefaultAsync(
+            value => value.WorkspaceId == context.Workspace.Id &&
+                     value.Scope == "preview.retry" &&
+                     value.Key == key,
+            cancellationToken);
+        if (existingRequest is not null && existingRequest.ExpiresAt <= now)
+        {
+            db.ApiIdempotencyRecords.Remove(existingRequest);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                existingRequest = null;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // Another request may have removed the expired row first and
+                // already claimed the same key. Re-read instead of exposing
+                // the cleanup race as an unrelated ETag conflict.
+                db.ChangeTracker.Clear();
+                existingRequest = await db.ApiIdempotencyRecords
+                    .AsNoTracking()
+                    .SingleOrDefaultAsync(
+                        value => value.WorkspaceId == context.Workspace.Id &&
+                                 value.Scope == "preview.retry" &&
+                                 value.Key == key &&
+                                 value.ExpiresAt > now,
+                        cancellationToken);
+            }
+        }
+
+        if (existingRequest is not null)
+        {
+            EnsurePreviewRetryIdempotencyMatch(
+                existingRequest,
+                requestHash,
+                projectId,
+                request.FailedJobId);
+
+            return Results.Accepted(
+                $"/api/v1/jobs/{request.FailedJobId}",
+                new JobAcceptedResponse(request.FailedJobId, null));
+        }
+
+        var project = await Project(db, context.Workspace.Id, projectId, false, cancellationToken);
+        ApiEndpointHelpers.EnsureVersion(expectedVersion, project.Version);
+        if (project.FlowKind != FlowKind.Mp3First)
+            throw Problem(409, "release.flow_endpoint_mismatch", "Preview retry is available only for the audio-first workflow.");
+        if (project.CurrentCampaignPlanRevisionId is not { } campaignRevisionId)
+            throw Problem(409, "campaign.required", "A current campaign is required before retrying preview.");
+
+        var job = await db.Jobs.SingleOrDefaultAsync(
+            value => value.Id == request.FailedJobId &&
+                     value.WorkspaceId == context.Workspace.Id &&
+                     value.ProjectId == project.Id &&
+                     value.Type == JobType.PreviewRender,
+            cancellationToken) ?? throw NotFound();
+        if (job.State != JobState.Failed)
+            throw Problem(409, "preview.retry_not_allowed", "Only a failed preview job can be retried.");
+
+        Guid payloadCampaignRevisionId;
+        try
+        {
+            using var payload = JsonDocument.Parse(job.PayloadJson);
+            payloadCampaignRevisionId = payload.RootElement
+                .GetProperty("campaignRevisionId")
+                .GetGuid();
+        }
+        catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
+        {
+            throw Problem(409, "preview.job_invalid", "The failed preview does not contain a valid campaign snapshot.");
+        }
+        if (payloadCampaignRevisionId != campaignRevisionId)
+            throw Problem(409, "preview.revision_stale", "Only the failed preview for the current campaign can be retried.");
+
+        var successfulPreviewExists = await db.Jobs.AsNoTracking().AnyAsync(
+            value => value.ProjectId == project.Id &&
+                     value.Type == JobType.PreviewRender &&
+                     value.State == JobState.Succeeded,
+            cancellationToken);
+        if (successfulPreviewExists)
+            throw Problem(409, "preview.allowance_consumed", "The free project preview has already been rendered.");
+
+        var run = await db.PipelineRuns
+            .Include(value => value.Stages)
+            .Where(value => value.ProjectId == project.Id)
+            .OrderByDescending(value => value.Number)
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw Problem(409, "workflow.not_initialized", "The release workflow has not been initialized yet.");
+        var stage = run.Stages.Single(value => value.Lane == WorkflowLane.Preview);
+        if (stage.CurrentJobId != job.Id || stage.State != PipelineStageState.Failed)
+            throw Problem(409, "preview.job_stale", "The selected preview job is no longer the current failed operation.");
+
+        job.State = JobState.Queued;
+        job.AvailableAt = now;
+        job.MaxAttempts = Math.Max(job.MaxAttempts, job.AttemptCount + 3);
+        job.CompletedAt = null;
+        job.ProgressPercent = 0;
+        job.ProgressStage = "manual_retry";
+        job.ErrorCode = null;
+        job.ErrorMessage = null;
+        job.LeaseOwner = null;
+        job.LeaseToken = null;
+        job.LeaseExpiresAt = null;
+        db.JobEvents.Add(new JobEvent
+        {
+            JobId = job.Id,
+            EventType = "requeued",
+            DataJson = JsonSerializer.Serialize(new
+            {
+                reason = "preview.manual_retry",
+                actorSubject = currentUser.Subject,
+                availableAt = now
+            })
+        });
+
+        stage.State = PipelineStageState.Queued;
+        stage.ProgressPercent = 0;
+        stage.BlockerCode = null;
+        stage.ErrorCode = null;
+        stage.CurrentJobId = job.Id;
+        run.State = PipelineStageState.Running;
+        run.CompletedAt = null;
+        ProjectActivity.Touch(project, now);
+        db.ApiIdempotencyRecords.Add(new ApiIdempotencyRecord
+        {
+            WorkspaceId = context.Workspace.Id,
+            Scope = "preview.retry",
+            Key = key,
+            RequestHash = requestHash,
+            ResourceId = project.Id,
+            SecondaryResourceId = job.Id,
+            ExpiresAt = now.AddDays(policyOptions.Value.IdempotencyDays)
+        });
+        db.ProjectEvents.Add(NewProjectEvent(project, "preview.retry_requested", new
+        {
+            jobId = job.Id,
+            campaignRevisionId
+        }));
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            // Concurrent requests can both observe an unused key. The unique
+            // idempotency row and entity concurrency tokens choose one winner;
+            // the loser must replay that result instead of leaking a database
+            // conflict as a 409/500.
+            db.ChangeTracker.Clear();
+            var winner = await db.ApiIdempotencyRecords
+                .AsNoTracking()
+                .SingleOrDefaultAsync(
+                    value => value.WorkspaceId == context.Workspace.Id &&
+                             value.Scope == "preview.retry" &&
+                             value.Key == key &&
+                             value.ExpiresAt > now,
+                    cancellationToken);
+            if (winner is null)
+            {
+                throw;
+            }
+
+            EnsurePreviewRetryIdempotencyMatch(
+                winner,
+                requestHash,
+                projectId,
+                request.FailedJobId);
+            return Results.Accepted(
+                $"/api/v1/jobs/{winner.SecondaryResourceId}",
+                new JobAcceptedResponse(winner.SecondaryResourceId!.Value, null));
+        }
+
+        ApiEndpointHelpers.SetEtag(httpResponse, project.Version);
+        return Results.Accepted(
+            $"/api/v1/jobs/{job.Id}",
+            new JobAcceptedResponse(job.Id, null));
+    }
+
+    private static void EnsurePreviewRetryIdempotencyMatch(
+        ApiIdempotencyRecord record,
+        string requestHash,
+        Guid projectId,
+        Guid failedJobId)
+    {
+        if (string.Equals(
+                record.RequestHash,
+                requestHash,
+                StringComparison.Ordinal) &&
+            record.ResourceId == projectId &&
+            record.SecondaryResourceId == failedJobId)
+        {
+            return;
+        }
+
+        throw Problem(
+            409,
+            "idempotency.payload_mismatch",
+            "This idempotency key was used with a different preview retry.");
     }
 
     private static async Task<IResult> GetAssetReadUrl(
@@ -1208,6 +1390,8 @@ public static class Mp3FirstEndpoints
         var campaign = Lane(WorkflowLane.Campaign);
         if (campaign.State != PipelineStageState.Succeeded) return WorkflowNextAction.WaitForCampaign;
         var preview = Lane(WorkflowLane.Preview);
+        if (preview.State == PipelineStageState.Failed)
+            return WorkflowNextAction.RetryPreview;
         if (preview.State != PipelineStageState.Succeeded &&
             !(preview.State == PipelineStageState.Stale && preview.BlockerCode == "preview.allowance_consumed"))
             return WorkflowNextAction.WaitForPreview;
@@ -1523,7 +1707,7 @@ public static class Mp3FirstEndpoints
     }
 
     private static ReleaseResponse ToRelease(ReleaseProject value) => new(
-        value.Id, value.ProjectLabel, value.ArtistName, value.TrackTitle, value.Language, value.InternalNotes,
+        value.Id, value.FlowKind, value.ProjectLabel, value.ArtistName, value.TrackTitle, value.Language, value.InternalNotes,
         value.LyricsText, value.IsInstrumental, value.IsInstrumentalConfirmed, value.Mode, value.ReleaseDate, value.CampaignStartDate,
         value.State, value.IsArchived, value.Version, value.CreatedAt,
         value.Assets.OrderBy(asset => asset.Kind).ThenBy(asset => asset.SortOrder).Select(asset => new AssetResponse(

@@ -12,6 +12,50 @@ namespace Hook2Stream.IntegrationTests;
 public sealed class DataLifecycleTests
 {
     [Fact]
+    public async Task Reads_do_not_extend_retention_but_archive_does()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var quick = await QuickUpload(client, "lifecycle-activity-1");
+        quick.EnsureSuccessStatusCode();
+        var body = await quick.Content.ReadFromJsonAsync<JsonElement>();
+        var projectId = body.GetProperty("project").GetProperty("id").GetGuid();
+        var oldActivity = DateTimeOffset.UtcNow.AddDays(-29);
+
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            var project = await db.Projects.SingleAsync(value => value.Id == projectId);
+            project.LastActivityAt = oldActivity;
+            await db.SaveChangesAsync();
+        }
+
+        var read = await client.GetAsync($"/api/v1/releases/{projectId}");
+        read.EnsureSuccessStatusCode();
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            Assert.Equal(
+                oldActivity,
+                (await db.Projects.SingleAsync(value => value.Id == projectId)).LastActivityAt);
+        }
+
+        using var archive = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/v1/releases/{projectId}/archive");
+        archive.Headers.TryAddWithoutValidation("If-Match", read.Headers.ETag!.Tag);
+        var archived = await client.SendAsync(archive);
+        archived.EnsureSuccessStatusCode();
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.True(
+            (await verifyDb.Projects.SingleAsync(value => value.Id == projectId)).LastActivityAt >
+            oldActivity);
+    }
+
+    [Fact]
     public async Task Expired_idempotency_key_can_start_a_new_command()
     {
         await using var factory = new Hook2StreamApiFactory();

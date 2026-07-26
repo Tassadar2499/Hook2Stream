@@ -29,7 +29,7 @@ function SignUpClient() {
           Create your Hook2Stream account
         </h1>
         <p className="mt-5 text-lg leading-7 opacity-80">
-          Sign in with Google to upload your first MP3 and generate a 21-day
+          Sign in with Google to upload your first MP3 or WAV and generate a 21-day
           short-form campaign.
         </p>
         <div className="mt-8 flex flex-col gap-3">

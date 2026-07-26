@@ -1402,6 +1402,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/releases/{projectId}/preview/retries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["RetryPreviewRequest"];
+                };
+            };
+            responses: {
+                /** @description Accepted */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JobAcceptedResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/releases/{projectId}/assets/{assetId}/view-url": {
         parameters: {
             query?: never;
@@ -2203,6 +2244,7 @@ export interface components {
         ReleaseResponse: {
             /** Format: uuid */
             id: string;
+            flowKind: components["schemas"]["FlowKind"];
             projectLabel: string;
             artistName: string;
             trackTitle: string;
@@ -2258,6 +2300,10 @@ export interface components {
         RenderRequestKind: "initial" | "contentChange" | "technicalRetry";
         ReorderAssetsRequest: {
             assetIds: string[];
+        };
+        RetryPreviewRequest: {
+            /** Format: uuid */
+            failedJobId: string;
         };
         /** @enum {unknown} */
         RevisionState: "draft" | "processing" | "readyForReview" | "approved" | "failed" | "superseded";
@@ -2430,7 +2476,7 @@ export interface components {
             currentJobId: null | string;
         };
         /** @enum {unknown} */
-        WorkflowNextAction: "uploadAudio" | "completeSetup" | "confirmRights" | "reviewTranscript" | "reviewArtwork" | "reviewHooks" | "waitForCampaign" | "waitForPreview" | "purchaseRender" | "startFinalRender" | "waitForFinalRender" | "downloadExport" | "retryFailedRenders" | null;
+        WorkflowNextAction: "uploadAudio" | "completeSetup" | "confirmRights" | "reviewTranscript" | "reviewArtwork" | "reviewHooks" | "waitForCampaign" | "waitForPreview" | "purchaseRender" | "startFinalRender" | "waitForFinalRender" | "downloadExport" | "retryFailedRenders" | "retryPreview" | null;
         WorkflowResponse: {
             /** Format: uuid */
             projectId: string;

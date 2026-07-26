@@ -70,11 +70,6 @@ public sealed class MediaIngestProcessor(
             asset.VideoCodec = inspection.VideoCodec;
             asset.AudioCodec = inspection.AudioCodec;
             asset.Sha256 = await ComputeSha256Async(originalPath, cancellationToken);
-            if (asset.Kind == AssetKind.Audio)
-            {
-                await BindPendingExternalAiConsentAsync(dbContext, asset, cancellationToken);
-                await ApplyMp3FirstMetadataSuggestionsAsync(asset, inspection, cancellationToken);
-            }
 
             await Heartbeat(job, 35, "normalizing", cancellationToken);
             var outputs = await CreateDerivativesAsync(asset, originalPath, workDirectory, cancellationToken);
@@ -89,6 +84,14 @@ public sealed class MediaIngestProcessor(
                     cancellationToken);
                 progress += Math.Max(1, 35 / outputs.Count);
                 await Heartbeat(job, Math.Min(progress, 90), "uploading_derivatives", cancellationToken);
+            }
+
+            if (asset.Kind == AssetKind.Audio)
+            {
+                // Keep consent inside the atomic ready-asset commit, but load
+                // it only after expensive media work to minimize the window
+                // for a concurrent revoke.
+                await BindPendingExternalAiConsentAsync(dbContext, asset, cancellationToken);
             }
 
             foreach (var derivative in asset.Derivatives)
@@ -136,6 +139,16 @@ public sealed class MediaIngestProcessor(
                 })
             });
             await JobLeaseFence.CommitAsync(dbContext, job, cancellationToken);
+            if (asset.Kind == AssetKind.Audio)
+            {
+                await ApplyMp3FirstMetadataSuggestionsBestEffortAsync(
+                    job,
+                    asset.WorkspaceId,
+                    asset.ProjectId,
+                    inspection,
+                    Path.GetFileNameWithoutExtension(asset.OriginalFileName),
+                    cancellationToken);
+            }
             await Heartbeat(job, 98, "finalizing", cancellationToken);
         }
         catch (MediaRejectedException exception)
@@ -317,20 +330,55 @@ public sealed class MediaIngestProcessor(
         }
     }
 
-    private async Task ApplyMp3FirstMetadataSuggestionsAsync(
-        MediaAsset asset,
+    private async Task ApplyMp3FirstMetadataSuggestionsBestEffortAsync(
+        LeasedJob job,
+        Guid workspaceId,
+        Guid projectId,
         MediaInspection inspection,
+        string fallbackTrackTitle,
         CancellationToken cancellationToken)
     {
-        var project = await dbContext.Projects.SingleOrDefaultAsync(
-            value => value.Id == asset.ProjectId && value.WorkspaceId == asset.WorkspaceId,
-            cancellationToken);
-        if (project is not null)
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            // The asset and derivatives are already durable. Metadata is only
+            // a draft suggestion, so it must never hold the long-running
+            // ingest unit of work open or overwrite a concurrent setup save.
+            dbContext.ChangeTracker.Clear();
+            var project = await dbContext.Projects.SingleOrDefaultAsync(
+                value => value.Id == projectId && value.WorkspaceId == workspaceId,
+                cancellationToken);
+            if (project is null) return;
+
+            var artistBefore = project.ArtistName;
+            var titleBefore = project.TrackTitle;
             MediaMetadataSuggestions.ApplyMp3FirstDraft(
                 project,
                 inspection,
-                Path.GetFileNameWithoutExtension(asset.OriginalFileName));
+                fallbackTrackTitle);
+            if (string.Equals(artistBefore, project.ArtistName, StringComparison.Ordinal) &&
+                string.Equals(titleBefore, project.TrackTitle, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            try
+            {
+                await JobLeaseFence.CommitAsync(dbContext, job, cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < maxAttempts)
+            {
+                // Re-read the winning setup revision. Suggestions only fill
+                // blank, unconfirmed fields and therefore never overwrite it.
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // User-authored setup is authoritative. Losing an optional
+                // ID3 suggestion must not fail an otherwise valid ingest.
+                dbContext.ChangeTracker.Clear();
+                return;
+            }
         }
     }
 
