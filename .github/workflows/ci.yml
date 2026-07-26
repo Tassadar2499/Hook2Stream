@@ -101,6 +101,10 @@ jobs:
           cache-dependency-path: src/web/package-lock.json
 
       - run: npm ci --prefix src/web
+      - name: Install full-stack media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
       - run: npx --prefix src/web playwright install --with-deps chromium
       - run: src/ci/run-full-stack-e2e.sh
 

@@ -46,10 +46,13 @@ wait_for_url() {
   return 1
 }
 
-command -v docker >/dev/null
-command -v ffmpeg >/dev/null
-command -v ffprobe >/dev/null
-command -v unzip >/dev/null
+required_commands=(docker ffmpeg ffprobe unzip)
+for required_command in "${required_commands[@]}"; do
+  if ! command -v "$required_command" >/dev/null 2>&1; then
+    echo "Missing required command: $required_command" >&2
+    exit 1
+  fi
+done
 
 "$source_root/ci/generate-e2e-media.sh" "$runtime_root"
 
