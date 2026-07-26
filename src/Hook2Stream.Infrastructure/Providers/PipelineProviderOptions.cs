@@ -28,6 +28,7 @@ public sealed class OpenRouterOptions
     public bool RequireZeroDataRetention { get; set; } = true;
     public bool DenyDataCollection { get; set; } = true;
     public bool RequireParameters { get; set; } = true;
+    public bool AccountOrGuardrailZdrEnforced { get; set; }
 }
 
 public sealed class PipelineProviderOptions

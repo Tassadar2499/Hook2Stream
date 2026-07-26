@@ -6,6 +6,13 @@ const uploadAssetId = "33333333-3333-4333-8333-333333333333";
 const ingestJobId = "44444444-4444-4444-8444-444444444444";
 const previewJobId = "55555555-5555-4555-8555-555555555555";
 const previewRetryJobId = "66666666-6666-4666-8666-666666666666";
+const artworkRevisionId = "77777777-7777-4777-8777-777777777777";
+const approvedCoverAssetId = "88888888-8888-4888-8888-888888888881";
+const campaignBackgroundIds = [
+  "88888888-8888-4888-8888-888888888882",
+  "88888888-8888-4888-8888-888888888883",
+  "88888888-8888-4888-8888-888888888884",
+];
 
 test("advanced Audio-first setup accepts a WAV master", async ({ page }) => {
   let createdPayload: Record<string, unknown> | undefined;
@@ -148,6 +155,90 @@ test("advanced Audio-first setup accepts a WAV master", async ({ page }) => {
     page.getByRole("progressbar", { name: "Audio progress" }),
   ).toHaveAttribute("aria-valuenow", "100");
   await expect(page.getByLabel("Master audio file")).toHaveCount(0);
+});
+
+test("approved artwork can retry missing campaign backgrounds once locally", async ({
+  page,
+}) => {
+  let approvalCalls = 0;
+  let backgroundsReady = false;
+  let approvalRequest:
+    | {
+        headers: Record<string, string>;
+        body: Record<string, unknown>;
+      }
+    | undefined;
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (request.method() === "GET" && path === `/api/v1/releases/${projectId}`) {
+      return json(route, releaseResponse([]), 200, '"7"');
+    }
+    if (request.method() === "GET" && path === "/api/v1/billing/summary") {
+      return json(route, {
+        workspaceArtworkCredits: 0,
+        activeSubscription: null,
+        entitlements: [],
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/artwork`
+    ) {
+      return json(
+        route,
+        artworkReviewResponse(backgroundsReady),
+        200,
+        backgroundsReady ? '"3"' : '"2"',
+      );
+    }
+    if (
+      request.method() === "GET" &&
+      path.startsWith(`/api/v1/releases/${projectId}/assets/`) &&
+      path.endsWith("/view-url")
+    ) {
+      const assetId = path.split("/").at(-2)!;
+      return json(route, {
+        assetId,
+        url: `https://media.example.test/${assetId}`,
+        expiresAt: "2030-01-01T00:10:00Z",
+      });
+    }
+    if (
+      request.method() === "POST" &&
+      path === `/api/v1/releases/${projectId}/artwork/cover-approval`
+    ) {
+      approvalCalls += 1;
+      approvalRequest = {
+        headers: request.headers(),
+        body: request.postDataJSON() as Record<string, unknown>,
+      };
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      backgroundsReady = true;
+      return json(route, artworkReviewResponse(true), 200, '"3"');
+    }
+    return problem(route, 404, "test.unhandled_route", `${request.method()} ${path}`);
+  });
+
+  await page.goto(`/releases/${projectId}/artwork`);
+  const retry = page.getByRole("button", { name: "Retry campaign backgrounds" });
+  await expect(retry).toBeEnabled();
+
+  await retry.evaluate((button: HTMLButtonElement) => {
+    button.click();
+    button.click();
+  });
+
+  await expect(page.getByText(/Campaign background retry queued/i)).toBeVisible();
+  expect(approvalCalls).toBe(1);
+  expect(approvalRequest?.headers["if-match"]).toBe('"2"');
+  expect(approvalRequest?.headers["idempotency-key"]).toMatch(/^cover-approval:/);
+  expect(approvalRequest?.body).toEqual({ revisionId: artworkRevisionId });
+  await expect(
+    page.getByRole("button", { name: "Campaign backgrounds complete" }),
+  ).toBeDisabled();
 });
 
 test("terminal preview can be retried with concurrency and idempotency guards", async ({
@@ -336,6 +427,23 @@ function releaseResponse(assets: Record<string, unknown>[]) {
     version: 7,
     createdAt: "2030-01-01T00:00:00Z",
     assets,
+  };
+}
+
+function artworkReviewResponse(backgroundsReady: boolean) {
+  return {
+    revisionId: artworkRevisionId,
+    number: 1,
+    operationNumber: 1,
+    state: "approved",
+    version: backgroundsReady ? 3 : 2,
+    prompt: "Fixture artwork",
+    candidateAssetIds: [approvedCoverAssetId],
+    backgroundAssetIds: backgroundsReady ? campaignBackgroundIds : [],
+    selectedAssetId: approvedCoverAssetId,
+    approvedCoverAssetId,
+    compositionJson: "{}",
+    approvedAt: "2030-01-01T00:00:00Z",
   };
 }
 

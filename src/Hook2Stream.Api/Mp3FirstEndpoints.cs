@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Globalization;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure;
@@ -734,7 +735,19 @@ public static class Mp3FirstEndpoints
                 value => value.Id == previousPackId,
                 cancellationToken);
             if (previousPack.State == RevisionState.Processing)
-                throw Problem(409, "artwork.generation_in_progress", "Wait for the current artwork generation to finish before starting another one.");
+            {
+                if (await ArtworkGenerationRecovery.TryFailProcessingCoverAsync(
+                        db,
+                        previousPack,
+                        cancellationToken) is null)
+                {
+                    throw Problem(409, "artwork.generation_in_progress", "Wait for the current artwork generation to finish before starting another one.");
+                }
+
+                // The recovery and its credit compensation must be visible to
+                // the SQL eligibility checks that create the replacement pack.
+                await db.SaveChangesAsync(cancellationToken);
+            }
         }
 
         var operation = await db.ArtworkPackRevisions.CountAsync(value => value.ProjectId == project.Id, cancellationToken) + 1;
@@ -845,21 +858,166 @@ public static class Mp3FirstEndpoints
                      value.State == AssetState.Ready,
             cancellationToken) ?? throw Problem(409, "audio.not_ready", "A processed audio master is required.");
         await RequireExternalAiProcessingConsent(db, project, audio, cancellationToken);
-        pack.State = RevisionState.Approved;
-        pack.ApprovedBySubject = currentUser.Subject;
-        pack.ApprovedAt = DateTimeOffset.UtcNow;
-        asset.Purpose = AssetPurpose.ApprovedCover;
-        db.Entry(project).Property(value => value.Version).IsModified = true;
-        AddReconcile(db, project, "artwork.approved");
-        ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
+        var assetPurposeChanges = asset.Purpose != AssetPurpose.ApprovedCover;
+        var backgroundFingerprint = $"cover:{selectedId:N}:v{asset.Version + (assetPurposeChanges ? 1 : 0)}";
+        var exactJobs = await ExactBackgroundJobsAsync(
+            db,
+            project,
+            pack,
+            selectedId,
+            cancellationToken);
+        var activeJob = exactJobs.FirstOrDefault(value => value.State is JobState.Queued or JobState.Running);
+        var latestJob = exactJobs.FirstOrDefault();
 
-        var jobId = await jobs.EnqueueAsync(new JobEnqueueRequest(
-            project.WorkspaceId, project.Id, selectedId, JobType.ArtworkGeneration,
-            JsonSerializer.Serialize(new { projectId, artworkPackRevisionId = pack.Id, mode = "backgrounds", count = 3 }),
-            $"artwork-backgrounds:{pack.Id:N}", JobRoutingRegistry.Control, "openrouter-image-v1", $"cover:{selectedId:N}:v{asset.Version}"), cancellationToken);
+        if (pack.State != RevisionState.Approved)
+        {
+            pack.State = RevisionState.Approved;
+            pack.ApprovedBySubject = currentUser.Subject;
+            pack.ApprovedAt = DateTimeOffset.UtcNow;
+            db.Entry(project).Property(value => value.Version).IsModified = true;
+            AddReconcile(db, project, "artwork.approved");
+            ProjectActivity.Touch(project, DateTimeOffset.UtcNow);
+        }
+        if (assetPurposeChanges)
+        {
+            asset.Purpose = AssetPurpose.ApprovedCover;
+        }
+
+        Guid jobId;
+        if (activeJob is not null)
+        {
+            // The immutable background command is already polling or leased.
+            // Persist a first-time approval, but never enqueue a parallel copy.
+            await db.SaveChangesAsync(cancellationToken);
+            jobId = activeJob.Id;
+        }
+        else if (latestJob is { State: JobState.Failed } failedJob &&
+                 (Deserialize<IReadOnlyList<Guid>>(pack.BackgroundAssetIdsJson) ?? []).Count == 0)
+        {
+            jobId = await EnqueueBackgroundGenerationAsync(
+                jobs,
+                project,
+                pack,
+                selectedId,
+                backgroundFingerprint,
+                $"artwork-backgrounds:{pack.Id:N}:retry:{failedJob.Id:N}",
+                failedJob.Id,
+                cancellationToken);
+        }
+        else if (latestJob is not null)
+        {
+            // A waiting-user command is resumed by the rights workflow. A
+            // succeeded command remains authoritative even if its artifacts
+            // need separate reconciliation. Neither case spends another call.
+            await db.SaveChangesAsync(cancellationToken);
+            jobId = latestJob.Id;
+        }
+        else
+        {
+            jobId = await EnqueueBackgroundGenerationAsync(
+                jobs,
+                project,
+                pack,
+                selectedId,
+                backgroundFingerprint,
+                $"artwork-backgrounds:{pack.Id:N}",
+                retryOfJobId: null,
+                cancellationToken);
+        }
         ApiEndpointHelpers.SetEtag(response, pack.Version);
         response.Headers.Location = $"/api/v1/jobs/{jobId}";
         return Results.Ok(ToArtwork(pack));
+    }
+
+    private static async Task<IReadOnlyList<Job>> ExactBackgroundJobsAsync(
+        Hook2StreamDbContext db,
+        ReleaseProject project,
+        ArtworkPackRevision pack,
+        Guid selectedAssetId,
+        CancellationToken cancellationToken)
+    {
+        var candidates = await db.Jobs.AsNoTracking()
+            .Where(value => value.WorkspaceId == project.WorkspaceId &&
+                            value.ProjectId == project.Id &&
+                            value.Type == JobType.ArtworkGeneration &&
+                            value.AssetId == selectedAssetId)
+            .OrderByDescending(value => value.CreatedAt)
+            .ThenByDescending(value => value.Id)
+            .ToListAsync(cancellationToken);
+        return candidates
+            .Where(value => TargetsBackgroundPack(value.PayloadJson, pack.Id) &&
+                            TargetsSelectedCoverFingerprint(value.InputFingerprint, selectedAssetId))
+            .ToArray();
+    }
+
+    private static bool TargetsSelectedCoverFingerprint(string? inputFingerprint, Guid selectedAssetId)
+    {
+        var prefix = $"cover:{selectedAssetId:N}:v";
+        return inputFingerprint is not null &&
+               inputFingerprint.StartsWith(prefix, StringComparison.Ordinal) &&
+               long.TryParse(
+                   inputFingerprint.AsSpan(prefix.Length),
+                   NumberStyles.None,
+                   CultureInfo.InvariantCulture,
+                   out var assetVersion) &&
+               assetVersion > 0;
+    }
+
+    private static bool TargetsBackgroundPack(string payloadJson, Guid packId)
+    {
+        try
+        {
+            using var payload = JsonDocument.Parse(payloadJson);
+            var root = payload.RootElement;
+            return root.TryGetProperty("artworkPackRevisionId", out var revision) &&
+                   revision.TryGetGuid(out var revisionId) &&
+                   revisionId == packId &&
+                   root.TryGetProperty("mode", out var mode) &&
+                   mode.ValueKind == JsonValueKind.String &&
+                   string.Equals(mode.GetString(), "backgrounds", StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException)
+        {
+            return false;
+        }
+    }
+
+    private static Task<Guid> EnqueueBackgroundGenerationAsync(
+        IJobQueue jobs,
+        ReleaseProject project,
+        ArtworkPackRevision pack,
+        Guid selectedAssetId,
+        string inputFingerprint,
+        string idempotencyKey,
+        Guid? retryOfJobId,
+        CancellationToken cancellationToken)
+    {
+        var payloadJson = retryOfJobId is { } failedJobId
+            ? JsonSerializer.Serialize(new
+            {
+                projectId = project.Id,
+                artworkPackRevisionId = pack.Id,
+                mode = "backgrounds",
+                count = 3,
+                retryOfJobId = failedJobId
+            })
+            : JsonSerializer.Serialize(new
+            {
+                projectId = project.Id,
+                artworkPackRevisionId = pack.Id,
+                mode = "backgrounds",
+                count = 3
+            });
+        return jobs.EnqueueAsync(new JobEnqueueRequest(
+            project.WorkspaceId,
+            project.Id,
+            selectedAssetId,
+            JobType.ArtworkGeneration,
+            payloadJson,
+            idempotencyKey,
+            JobRoutingRegistry.Control,
+            "openrouter-image-v1",
+            inputFingerprint), cancellationToken);
     }
 
     private static async Task<IResult> GetHooks(

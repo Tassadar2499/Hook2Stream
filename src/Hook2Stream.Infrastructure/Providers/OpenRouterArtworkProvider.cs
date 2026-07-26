@@ -93,133 +93,146 @@ public sealed class OpenRouterArtworkProvider : IArtworkProvider
         var usages = new List<ProviderUsage>();
         string? resolvedModel = null;
         string? resolvedProvider = null;
-        for (var candidateNumber = 1; candidateNumber <= request.CandidateCount; candidateNumber++)
+        var completed = false;
+        try
         {
-            var payload = BuildPayload(request, candidateNumber, referenceDataUrl);
-            var response = await _client.PostJsonAsync(
-                "images",
-                payload,
-                $"{request.Context.OperationId:N}:image:{candidateNumber}",
-                _options.ImageTimeoutSeconds,
-                outcomeCanBeRetried: false,
-                cancellationToken);
-            if (!response.IsSuccess)
+            for (var candidateNumber = 1; candidateNumber <= request.CandidateCount; candidateNumber++)
             {
-                return Failed(
-                    request.Context,
-                    startedAt,
-                    response.Failure!,
-                    requestIds,
-                    generationIds,
-                    resolvedModel,
-                    resolvedProvider,
-                    usages);
+                var payload = BuildPayload(request, candidateNumber, referenceDataUrl);
+                var response = await _client.PostJsonAsync(
+                    "images",
+                    payload,
+                    $"{request.Context.OperationId:N}:image:{candidateNumber}",
+                    _options.ImageTimeoutSeconds,
+                    outcomeCanBeRetried: false,
+                    cancellationToken);
+                if (!response.IsSuccess)
+                {
+                    return Failed(
+                        request.Context,
+                        startedAt,
+                        response.Failure!,
+                        requestIds,
+                        generationIds,
+                        resolvedModel,
+                        resolvedProvider,
+                        usages);
+                }
+
+                if (response.RequestId is not null) requestIds.Add(response.RequestId);
+                if (response.GenerationId is not null) generationIds.Add(response.GenerationId);
+                try
+                {
+                    using var json = JsonDocument.Parse(response.Body);
+                    resolvedModel ??= OpenRouterProviderData.String(json.RootElement, "model");
+                    resolvedProvider ??= OpenRouterProviderData.String(json.RootElement, "provider");
+                    usages.Add(OpenRouterProviderData.Usage(json.RootElement, generatedImages: 1));
+                    var image = ReadImage(json.RootElement);
+                    var artifact = await MaterializeAsync(
+                        request,
+                        candidateNumber,
+                        image.Bytes,
+                        image.ContentType,
+                        cancellationToken);
+                    candidates.Add(new ArtworkCandidate(
+                        OpenRouterProviderData.StableId(request.Context.OperationId, $"candidate:{candidateNumber}"),
+                        candidateNumber,
+                        artifact));
+                }
+                catch (JsonException)
+                {
+                    return Failed(
+                        request.Context,
+                        startedAt,
+                        InvalidResponse(),
+                        requestIds,
+                        generationIds,
+                        resolvedModel,
+                        resolvedProvider,
+                        usages);
+                }
+                catch (InvalidDataException)
+                {
+                    return Failed(
+                        request.Context,
+                        startedAt,
+                        InvalidResponse(),
+                        requestIds,
+                        generationIds,
+                        resolvedModel,
+                        resolvedProvider,
+                        usages);
+                }
+                catch (TimeoutException)
+                {
+                    return Failed(
+                        request.Context,
+                        startedAt,
+                        new ProviderFailure(
+                            ProviderFailureKind.Transient,
+                            "openrouter.image_normalization_timeout",
+                            "The generated image could not be normalized in time."),
+                        requestIds,
+                        generationIds,
+                        resolvedModel,
+                        resolvedProvider,
+                        usages);
+                }
+                catch (IOException)
+                {
+                    return Failed(
+                        request.Context,
+                        startedAt,
+                        new ProviderFailure(
+                            ProviderFailureKind.Transient,
+                            "openrouter.image_artifact_io_failure",
+                            "The generated artwork could not be staged."),
+                        requestIds,
+                        generationIds,
+                        resolvedModel,
+                        resolvedProvider,
+                        usages);
+                }
+                catch (InvalidOperationException)
+                {
+                    return Failed(
+                        request.Context,
+                        startedAt,
+                        new ProviderFailure(
+                            ProviderFailureKind.Permanent,
+                            "openrouter.image_normalizer_unavailable",
+                            "The generated image normalizer is unavailable."),
+                        requestIds,
+                        generationIds,
+                        resolvedModel,
+                        resolvedProvider,
+                        usages);
+                }
             }
 
-            if (response.RequestId is not null) requestIds.Add(response.RequestId);
-            if (response.GenerationId is not null) generationIds.Add(response.GenerationId);
-            try
-            {
-                using var json = JsonDocument.Parse(response.Body);
-                resolvedModel ??= OpenRouterProviderData.String(json.RootElement, "model");
-                resolvedProvider ??= OpenRouterProviderData.String(json.RootElement, "provider");
-                usages.Add(OpenRouterProviderData.Usage(json.RootElement, generatedImages: 1));
-                var image = ReadImage(json.RootElement);
-                var artifact = await MaterializeAsync(
-                    request,
-                    candidateNumber,
-                    image.Bytes,
-                    image.ContentType,
-                    cancellationToken);
-                candidates.Add(new ArtworkCandidate(
-                    OpenRouterProviderData.StableId(request.Context.OperationId, $"candidate:{candidateNumber}"),
-                    candidateNumber,
-                    artifact));
-            }
-            catch (JsonException)
-            {
-                return Failed(
+            var result = new ArtworkGenerationResult(
+                candidates,
+                candidates.Select(value => value.Artwork).ToArray());
+            var succeeded = ProviderResult<ArtworkGenerationResult>.Succeeded(
+                result,
+                Provenance(
                     request.Context,
                     startedAt,
-                    InvalidResponse(),
                     requestIds,
                     generationIds,
                     resolvedModel,
                     resolvedProvider,
-                    usages);
-            }
-            catch (InvalidDataException)
+                    usages));
+            completed = true;
+            return succeeded;
+        }
+        finally
+        {
+            if (!completed)
             {
-                return Failed(
-                    request.Context,
-                    startedAt,
-                    InvalidResponse(),
-                    requestIds,
-                    generationIds,
-                    resolvedModel,
-                    resolvedProvider,
-                    usages);
-            }
-            catch (TimeoutException)
-            {
-                return Failed(
-                    request.Context,
-                    startedAt,
-                    new ProviderFailure(
-                        ProviderFailureKind.Transient,
-                        "openrouter.image_normalization_timeout",
-                        "The generated image could not be normalized in time."),
-                    requestIds,
-                    generationIds,
-                    resolvedModel,
-                    resolvedProvider,
-                    usages);
-            }
-            catch (IOException)
-            {
-                return Failed(
-                    request.Context,
-                    startedAt,
-                    new ProviderFailure(
-                        ProviderFailureKind.Transient,
-                        "openrouter.image_artifact_io_failure",
-                        "The generated artwork could not be staged."),
-                    requestIds,
-                    generationIds,
-                    resolvedModel,
-                    resolvedProvider,
-                    usages);
-            }
-            catch (InvalidOperationException)
-            {
-                return Failed(
-                    request.Context,
-                    startedAt,
-                    new ProviderFailure(
-                        ProviderFailureKind.Permanent,
-                        "openrouter.image_normalizer_unavailable",
-                        "The generated image normalizer is unavailable."),
-                    requestIds,
-                    generationIds,
-                    resolvedModel,
-                    resolvedProvider,
-                    usages);
+                await CleanupAsync(candidates.Select(value => value.Artwork), CancellationToken.None);
             }
         }
-
-        var result = new ArtworkGenerationResult(
-            candidates,
-            candidates.Select(value => value.Artwork).ToArray());
-        return ProviderResult<ArtworkGenerationResult>.Succeeded(
-            result,
-            Provenance(
-                request.Context,
-                startedAt,
-                requestIds,
-                generationIds,
-                resolvedModel,
-                resolvedProvider,
-                usages));
     }
 
     private object BuildPayload(
@@ -232,15 +245,16 @@ public sealed class OpenRouterArtworkProvider : IArtworkProvider
             ["model"] = _options.ImageModel,
             ["prompt"] = BuildPrompt(request, candidateNumber),
             ["n"] = 1,
-            ["resolution"] = "2K",
+            // Seedream 4.5 rejects the 2K portrait/landscape mapping because
+            // 1152x2048 is below its minimum output pixel count. Square covers
+            // remain 2K; campaign backgrounds use the supported 4K tier and are
+            // normalized to the canonical app dimensions after generation.
+            ["resolution"] = request.Width == request.Height ? "2K" : "4K",
             ["aspect_ratio"] = AspectRatio(request.Width, request.Height),
-            ["output_format"] = "png",
             ["provider"] = new
             {
-                zdr = _options.RequireZeroDataRetention,
-                data_collection = _options.DenyDataCollection ? "deny" : "allow",
-                require_parameters = _options.RequireParameters,
-                allow_fallbacks = true
+                only = new[] { "seed" },
+                allow_fallbacks = false
             }
         };
         if (referenceDataUrl is not null)
@@ -350,7 +364,25 @@ public sealed class OpenRouterArtworkProvider : IArtworkProvider
                 : $"campaign-background-{candidateNumber}";
             var prefix = request.Context.StagingPrefix.Trim().Trim('/');
             var objectKey = $"{prefix}/{role}.png";
-            await _storage.UploadAsync(objectKey, outputPath, "image/png", cancellationToken);
+            try
+            {
+                await _storage.UploadAsync(objectKey, outputPath, "image/png", cancellationToken);
+            }
+            catch
+            {
+                await CleanupAsync(
+                    [new ProviderArtifactManifest(
+                        Guid.Empty,
+                        role,
+                        objectKey,
+                        "",
+                        "image/png",
+                        0,
+                        Materialized: true)],
+                    CancellationToken.None);
+                throw;
+            }
+
             return new ProviderArtifactManifest(
                 OpenRouterProviderData.StableId(request.Context.OperationId, role),
                 role,
@@ -365,6 +397,23 @@ public sealed class OpenRouterArtworkProvider : IArtworkProvider
         finally
         {
             OpenRouterProviderData.TryDelete(workDirectory);
+        }
+    }
+
+    private async Task CleanupAsync(
+        IEnumerable<ProviderArtifactManifest> artifacts,
+        CancellationToken cancellationToken)
+    {
+        foreach (var artifact in artifacts.Where(value => value.Materialized))
+        {
+            try
+            {
+                await _storage.DeleteAsync(artifact.ObjectKey, cancellationToken);
+            }
+            catch
+            {
+                // Provider failure wins; staging cleanup is best effort.
+            }
         }
     }
 

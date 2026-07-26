@@ -11,6 +11,8 @@ namespace Hook2Stream.Infrastructure.Jobs;
 
 public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
 {
+    private const int MaxConcurrencyAttempts = 3;
+
     public async Task<Guid> EnqueueAsync(
         JobEnqueueRequest request,
         CancellationToken cancellationToken)
@@ -153,10 +155,10 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
                     errorCode = "job.lease_expired",
                     exhausted = expired.Exhausted,
                     expiredAt = now
-                }));
+            }));
             if (expired.ProjectId is { } projectId &&
                 expired.PipelineRunId is not null &&
-                string.Equals(expired.PipelineStage, "finalRender", StringComparison.OrdinalIgnoreCase))
+                !string.IsNullOrWhiteSpace(expired.PipelineStage))
             {
                 dbContext.OutboxMessages.Add(new OutboxMessage
                 {
@@ -442,7 +444,26 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         return expiredLeases;
     }
 
-    public async Task<bool> HeartbeatAsync(
+    public Task<bool> HeartbeatAsync(
+        Guid jobId,
+        string workerId,
+        Guid leaseToken,
+        TimeSpan leaseDuration,
+        int progressPercent,
+        string stage,
+        CancellationToken cancellationToken)
+        => ExecuteWithConcurrencyRetryAsync(
+            token => HeartbeatOnceAsync(
+                jobId,
+                workerId,
+                leaseToken,
+                leaseDuration,
+                progressPercent,
+                stage,
+                token),
+            cancellationToken);
+
+    private async Task<bool> HeartbeatOnceAsync(
         Guid jobId,
         string workerId,
         Guid leaseToken,
@@ -489,7 +510,16 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         return true;
     }
 
-    public async Task CompleteAsync(
+    public Task CompleteAsync(
+        Guid jobId,
+        string workerId,
+        Guid leaseToken,
+        CancellationToken cancellationToken)
+        => ExecuteWithConcurrencyRetryAsync(
+            token => CompleteOnceAsync(jobId, workerId, leaseToken, token),
+            cancellationToken);
+
+    private async Task CompleteOnceAsync(
         Guid jobId,
         string workerId,
         Guid leaseToken,
@@ -536,7 +566,22 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task FailAsync(
+    public Task FailAsync(
+        LeasedJob leasedJob,
+        string errorCode,
+        string safeMessage,
+        bool retryable,
+        CancellationToken cancellationToken)
+        => ExecuteWithConcurrencyRetryAsync(
+            token => FailOnceAsync(
+                leasedJob,
+                errorCode,
+                safeMessage,
+                retryable,
+                token),
+            cancellationToken);
+
+    private async Task FailOnceAsync(
         LeasedJob leasedJob,
         string errorCode,
         string safeMessage,
@@ -602,6 +647,41 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    private async Task<TResult> ExecuteWithConcurrencyRetryAsync<TResult>(
+        Func<CancellationToken, Task<TResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaxConcurrencyAttempts; attempt++)
+        {
+            try
+            {
+                return await operation(cancellationToken);
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < MaxConcurrencyAttempts)
+            {
+                // SaveChanges is transactional, so clearing removes every
+                // stale aggregate member plus any uncommitted event/outbox
+                // entities before the next attempt re-reads job/stage/run.
+                dbContext.ChangeTracker.Clear();
+            }
+        }
+
+        throw new InvalidOperationException("The concurrency retry loop completed unexpectedly.");
+    }
+
+    private async Task ExecuteWithConcurrencyRetryAsync(
+        Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken)
+    {
+        await ExecuteWithConcurrencyRetryAsync(
+            async token =>
+            {
+                await operation(token);
+                return true;
+            },
+            cancellationToken);
+    }
+
     public async Task DeferAsync(
         LeasedJob leasedJob,
         TimeSpan delay,
@@ -613,6 +693,17 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
             throw new ArgumentOutOfRangeException(nameof(delay));
         }
 
+        await ExecuteWithConcurrencyRetryAsync(
+            token => DeferOnceAsync(leasedJob, delay, reasonCode, token),
+            cancellationToken);
+    }
+
+    private async Task DeferOnceAsync(
+        LeasedJob leasedJob,
+        TimeSpan delay,
+        string reasonCode,
+        CancellationToken cancellationToken)
+    {
         var now = DateTimeOffset.UtcNow;
         var job = await dbContext.Jobs.SingleOrDefaultAsync(
             value => value.Id == leasedJob.Id &&
@@ -654,7 +745,16 @@ public sealed class PostgresJobQueue(Hook2StreamDbContext dbContext) : IJobQueue
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task BlockAsync(
+    public Task BlockAsync(
+        LeasedJob leasedJob,
+        string reasonCode,
+        string safeMessage,
+        CancellationToken cancellationToken)
+        => ExecuteWithConcurrencyRetryAsync(
+            token => BlockOnceAsync(leasedJob, reasonCode, safeMessage, token),
+            cancellationToken);
+
+    private async Task BlockOnceAsync(
         LeasedJob leasedJob,
         string reasonCode,
         string safeMessage,

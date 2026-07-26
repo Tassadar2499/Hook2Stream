@@ -129,8 +129,7 @@ public sealed class OpenRouterTranscriptionProvider(
                     language,
                     temperature = 0,
                     response_format = "verbose_json",
-                    timestamp_granularities = new[] { "segment", "word" },
-                    provider = Routing()
+                    timestamp_granularities = new[] { "word" }
                 };
                 var response = await client.PostJsonAsync(
                     "audio/transcriptions",
@@ -244,13 +243,6 @@ public sealed class OpenRouterTranscriptionProvider(
             OpenRouterProviderData.TryDelete(workDirectory);
         }
     }
-
-    private object Routing() => new
-    {
-        zdr = _options.RequireZeroDataRetention,
-        data_collection = _options.DenyDataCollection ? "deny" : "allow",
-        require_parameters = _options.RequireParameters
-    };
 
     private async Task<long> ProbeDurationAsync(
         string sourcePath,

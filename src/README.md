@@ -61,6 +61,26 @@ dotnet user-secrets --project src/Hook2Stream.AppHost set "Google:ClientSecret" 
 
 A partial Google configuration fails fast. Running the Next.js app by itself does not enable local authentication.
 
+### Local OpenRouter smoke
+
+The Development profile uses fixtures by default. The dedicated transcription and image endpoints do not support per-request ZDR routing. Before enabling them, configure OpenRouter **Settings > Privacy** or a guardrail assigned to the inference key so ZDR is enforced for both OpenAI and non-frontier model groups. Keep **Private Input & Output Logging** and **OpenRouter Use of Inputs/Outputs** disabled as well. `AccountOrGuardrailZdrEnforced` is a local fail-fast acknowledgement of the remote ZDR policy; it does not change the OpenRouter account.
+
+Keep the plaintext inference key (`sk-or-v1-` followed by 64 hexadecimal characters) in the Worker user-secrets store and switch only the AI stages:
+
+```bash
+read -rs hook2stream_openrouter_key
+dotnet user-secrets set --project src/Hook2Stream.Worker "OpenRouter:ApiKey" "$hook2stream_openrouter_key"
+unset hook2stream_openrouter_key
+dotnet user-secrets set --project src/Hook2Stream.Worker "OpenRouter:AccountOrGuardrailZdrEnforced" "true"
+dotnet user-secrets set --project src/Hook2Stream.Worker "PipelineProviders:AudioAnalysis:Mode" "Deterministic"
+dotnet user-secrets set --project src/Hook2Stream.Worker "PipelineProviders:Transcription:Mode" "OpenRouter"
+dotnet user-secrets set --project src/Hook2Stream.Worker "PipelineProviders:Artwork:Mode" "OpenRouter"
+dotnet user-secrets set --project src/Hook2Stream.Worker "PipelineProviders:CampaignPlanning:Mode" "OpenRouter"
+dotnet user-secrets set --project src/Hook2Stream.Worker "PipelineProviders:VideoRendering:Mode" "Deterministic"
+```
+
+Restart AppHost after changing secrets, upload a short MP3 you are allowed to process, and confirm the external-AI rights gate in the UI. The pinned defaults are `openai/whisper-large-v3`, `bytedance-seed/seedream-4.5`, and `openai/gpt-oss-120b`. The campaign adapter additionally enforces ZDR, denies provider data collection, and requires declared parameter support per request; the dedicated endpoints rely on the account or key guardrail asserted above. Do not put the API key in `appsettings*.json` or commit it.
+
 Keep each generated storage password paired with its volume. PostgreSQL only applies `POSTGRES_PASSWORD` while initializing an empty data directory, so changing or deleting `Parameters:postgres-password` while retaining its volume prevents the dependency gate from becoming ready. Legacy installs can remove the unused `hook2stream-postgres-data` and `hook2stream-minio-data` volumes after stopping AppHost; the next run creates clean path-scoped replacements.
 
 The media worker expects `ffmpeg` and `ffprobe` in `PATH`. Originals are never rewritten; derivatives and provider staging objects use versioned keys. Default development configuration uses deterministic fixture providers. Production uses separate capability pools without local neural models:

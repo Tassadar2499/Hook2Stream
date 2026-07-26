@@ -33,7 +33,7 @@ public sealed class OpenRouterClient
     {
     }
 
-    public OpenRouterClient(
+    internal OpenRouterClient(
         HttpClient httpClient,
         OpenRouterOptions options,
         TimeProvider timeProvider)
@@ -218,6 +218,16 @@ public sealed class OpenRouterClient
                 "The OpenRouter spending limit or credit balance has been exhausted.");
         }
 
+        if (errorCode.Contains("content_policy_violation", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("moderation", StringComparison.OrdinalIgnoreCase) ||
+            errorCode.Contains("safety", StringComparison.OrdinalIgnoreCase))
+        {
+            return new ProviderFailure(
+                ProviderFailureKind.Moderation,
+                "openrouter.moderation_blocked",
+                "The request was blocked by the provider safety policy.");
+        }
+
         if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
             return new ProviderFailure(
@@ -235,15 +245,6 @@ public sealed class OpenRouterClient
                 "openrouter.temporarily_unavailable",
                 "OpenRouter is temporarily unavailable.",
                 retryAfter);
-        }
-
-        if (errorCode.Contains("moderation", StringComparison.OrdinalIgnoreCase) ||
-            errorCode.Contains("safety", StringComparison.OrdinalIgnoreCase))
-        {
-            return new ProviderFailure(
-                ProviderFailureKind.Moderation,
-                "openrouter.moderation_blocked",
-                "The request was blocked by the provider safety policy.");
         }
 
         if (statusCode is HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity)
@@ -273,21 +274,53 @@ public sealed class OpenRouterClient
         try
         {
             using var json = JsonDocument.Parse(body.ToArray());
-            if (!json.RootElement.TryGetProperty("error", out var error) ||
-                !error.TryGetProperty("code", out var code))
+            var root = json.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
             {
                 return "";
             }
 
-            return code.ValueKind == JsonValueKind.String
-                ? code.GetString() ?? ""
-                : code.GetRawText();
+            if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+            {
+                if (error.TryGetProperty("metadata", out var metadata) &&
+                    metadata.ValueKind == JsonValueKind.Object &&
+                    StringValue(metadata, "error_type") is { } metadataErrorType)
+                {
+                    return metadataErrorType;
+                }
+
+                if (StringValue(error, "error_type") is { } nestedErrorType)
+                {
+                    return nestedErrorType;
+                }
+
+                if (StringValue(root, "error_type") is { } rootErrorType)
+                {
+                    return rootErrorType;
+                }
+
+                if (error.TryGetProperty("code", out var code))
+                {
+                    return code.ValueKind == JsonValueKind.String
+                        ? code.GetString() ?? ""
+                        : code.GetRawText();
+                }
+            }
+
+            return StringValue(root, "error_type") ?? "";
         }
         catch (JsonException)
         {
             return "";
         }
     }
+
+    private static string? StringValue(JsonElement parent, string property) =>
+        parent.TryGetProperty(property, out var value) &&
+        value.ValueKind == JsonValueKind.String &&
+        !string.IsNullOrWhiteSpace(value.GetString())
+            ? value.GetString()
+            : null;
 
     private static string? Header(HttpResponseMessage response, string name) =>
         response.Headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;

@@ -561,6 +561,21 @@ public sealed class PipelineReconciler(
             : null;
         if (current is not null)
         {
+            if (current.State == RevisionState.Processing &&
+                await ArtworkGenerationRecovery.TryFailProcessingCoverAsync(
+                    db,
+                    current,
+                    cancellationToken) is { } terminalGeneration)
+            {
+                SetStage(
+                    run,
+                    WorkflowLane.Artwork,
+                    PipelineStageState.Failed,
+                    errorCode: terminalGeneration.ErrorCode ?? "artwork.generation_failed",
+                    currentJobId: terminalGeneration.JobId);
+                return;
+            }
+
             if (current.State == RevisionState.Approved)
             {
                 var backgroundIds = Deserialize<List<Guid>>(current.BackgroundAssetIdsJson) ?? [];

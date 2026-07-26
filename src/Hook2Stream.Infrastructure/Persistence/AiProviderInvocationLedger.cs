@@ -2,7 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Hook2Stream.Infrastructure.Persistence;
 
@@ -129,6 +131,8 @@ public static class AiProviderInvocationLedger
 /// <summary>
 /// Persists usage in an independent scope so a provider failure can be audited
 /// without committing partially-mutated workflow state from the job handler.
+/// Persistence is best effort: implementations preserve caller cancellation,
+/// but audit-storage failures must not change the paid provider workflow.
 /// </summary>
 public interface IAiProviderInvocationWriter
 {
@@ -142,9 +146,15 @@ public interface IAiProviderInvocationWriter
         CancellationToken cancellationToken);
 }
 
-public sealed class AiProviderInvocationWriter(IServiceScopeFactory scopeFactory)
+public sealed class AiProviderInvocationWriter(
+    IServiceScopeFactory scopeFactory,
+    ILogger<AiProviderInvocationWriter> logger)
     : IAiProviderInvocationWriter
 {
+    private const int MaxWriteAttempts = 3;
+    private static readonly EventId PersistenceFailedEvent =
+        new(1002, "AiProviderInvocationPersistenceFailed");
+
     public async Task RecordAsync(
         LeasedJob job,
         string stage,
@@ -159,23 +169,90 @@ public sealed class AiProviderInvocationWriter(IServiceScopeFactory scopeFactory
             return;
         }
 
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
-        var invocation = AiProviderInvocationLedger.Record(
-            db,
-            job.WorkspaceId,
-            job.ProjectId,
-            job.Id,
-            job.AttemptNumber,
-            stage,
-            context.OperationId,
-            provenance,
-            failure);
-        if (!string.IsNullOrWhiteSpace(status))
+        for (var attempt = 1; attempt <= MaxWriteAttempts; attempt++)
         {
-            invocation.Status = status;
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                // A failed SaveChanges leaves its DbContext unsuitable for a
+                // reliable retry. Recreate the entire unit of work each time.
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+                var normalizedStage = NormalizeStage(stage);
+                var alreadyRecorded = await db.AiProviderInvocations
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .AnyAsync(
+                        value => value.JobId == job.Id &&
+                                 value.AttemptNumber == job.AttemptNumber &&
+                                 value.Stage == normalizedStage,
+                        cancellationToken);
+                if (alreadyRecorded)
+                {
+                    return;
+                }
+
+                var invocation = AiProviderInvocationLedger.Record(
+                    db,
+                    job.WorkspaceId,
+                    job.ProjectId,
+                    job.Id,
+                    job.AttemptNumber,
+                    normalizedStage,
+                    context.OperationId,
+                    provenance,
+                    failure);
+                if (!string.IsNullOrWhiteSpace(status))
+                {
+                    invocation.Status = status;
+                }
+
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+            }
         }
 
-        await db.SaveChangesAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            logger.LogError(
+                PersistenceFailedEvent,
+                "Could not persist OpenRouter invocation metadata for job {JobId}, attempt {AttemptNumber}, stage {Stage}, operation {OperationId} after {WriteAttempts} attempts.",
+                job.Id,
+                job.AttemptNumber,
+                SafeStage(stage),
+                context.OperationId,
+                MaxWriteAttempts);
+        }
+        catch
+        {
+            // Audit telemetry must never control the paid provider workflow,
+            // including when a custom logging sink itself is unavailable.
+        }
+    }
+
+    private static string NormalizeStage(string stage)
+    {
+        var normalized = stage?.Trim();
+        if (string.IsNullOrEmpty(normalized))
+        {
+            throw new ArgumentException("Provider invocation stage must not be empty.", nameof(stage));
+        }
+
+        return normalized.Length <= 64 ? normalized : normalized[..64];
+    }
+
+    private static string SafeStage(string stage)
+    {
+        if (string.IsNullOrWhiteSpace(stage)) return "missing";
+        var safe = new string(stage.Trim().Where(value => !char.IsControl(value)).Take(64).ToArray());
+        return safe.Length == 0 ? "missing" : safe;
     }
 }

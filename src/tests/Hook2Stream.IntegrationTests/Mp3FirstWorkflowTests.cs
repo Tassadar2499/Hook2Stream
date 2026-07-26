@@ -576,6 +576,195 @@ public sealed class Mp3FirstWorkflowTests
         Assert.Equal("release.timing_required", problem.GetProperty("code").GetString());
     }
 
+    [Fact]
+    public async Task Failed_cover_job_releases_its_credit_and_allows_one_idempotent_replacement()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var quick = await QuickUpload(client, "artwork-recovery-upload", "recovery.mp3", 1024);
+        var quickJson = await quick.Content.ReadFromJsonAsync<JsonElement>();
+        var projectId = quickJson.GetProperty("project").GetProperty("id").GetGuid();
+
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            var asset = await db.MediaAssets.SingleAsync(value => value.ProjectId == projectId);
+            asset.State = AssetState.Ready;
+            asset.IsActive = true;
+            asset.Sha256 = new string('c', 64);
+            asset.DurationMilliseconds = 180_000;
+            await db.SaveChangesAsync();
+        }
+
+        var setup = await PutSetup(
+            client,
+            projectId,
+            quick.Headers.ETag!.Tag,
+            instrumentalConfirmed: true,
+            mode: "upcoming",
+            releaseDate: DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)));
+        setup.EnsureSuccessStatusCode();
+        using (var rights = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/releases/{projectId}/rights")
+        {
+            Content = JsonContent.Create(new
+            {
+                ownsAudioRights = true,
+                ownsLyricsRights = false,
+                ownsVisualRights = true,
+                allowsExternalAiArtwork = true,
+                allowsExternalAiProcessing = true,
+                syntheticContentStatus = "none",
+                policyVersion = "2026-07"
+            })
+        })
+        {
+            rights.Headers.TryAddWithoutValidation("If-Match", setup.Headers.ETag!.Tag);
+            (await client.SendAsync(rights)).EnsureSuccessStatusCode();
+        }
+
+        Guid failedPackId;
+        Guid failedJobId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            var project = await db.Projects.SingleAsync(value => value.Id == projectId);
+            var historical = Enumerable.Range(1, 3)
+                .Select(number => new ArtworkPackRevision
+                {
+                    WorkspaceId = project.WorkspaceId,
+                    ProjectId = project.Id,
+                    Number = number,
+                    OperationNumber = number,
+                    State = RevisionState.Superseded,
+                    Prompt = $"Historical direction {number}",
+                    CandidateAssetIdsJson = JsonSerializer.Serialize(new[] { Guid.CreateVersion7() }),
+                    SourceFingerprint = $"request:artwork-history-{number}"
+                })
+                .ToArray();
+            var failedPack = new ArtworkPackRevision
+            {
+                WorkspaceId = project.WorkspaceId,
+                ProjectId = project.Id,
+                Number = 4,
+                OperationNumber = 4,
+                State = RevisionState.Processing,
+                Prompt = "Recover this cover direction",
+                SourceFingerprint = "request:artwork-recovery-old"
+            };
+            var failedJob = new Job
+            {
+                WorkspaceId = project.WorkspaceId,
+                ProjectId = project.Id,
+                Type = JobType.ArtworkGeneration,
+                RequiredCapability = "control",
+                HandlerVersion = "openrouter-image-v1",
+                InputFingerprint = failedPack.SourceFingerprint,
+                IdempotencyKey = $"artwork:{project.Id:N}:artwork-recovery-old",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    projectId = project.Id,
+                    artworkPackRevisionId = failedPack.Id,
+                    prompt = failedPack.Prompt,
+                    style = "editorial"
+                }),
+                State = JobState.Failed,
+                AttemptCount = 3,
+                MaxAttempts = 3,
+                ProgressStage = "failed",
+                ErrorCode = "job.lease_expired",
+                CompletedAt = DateTimeOffset.UtcNow
+            };
+            var grant = new ArtworkCreditGrant
+            {
+                WorkspaceId = project.WorkspaceId,
+                CheckoutId = Guid.CreateVersion7(),
+                Granted = 1,
+                Remaining = 1
+            };
+            db.WorkspaceArtworkCredits.Add(new WorkspaceArtworkCredit
+            {
+                WorkspaceId = project.WorkspaceId,
+                Balance = 1
+            });
+            db.ArtworkCreditGrants.Add(grant);
+            db.ArtworkPackRevisions.AddRange(historical);
+            db.ArtworkPackRevisions.Add(failedPack);
+            db.Jobs.Add(failedJob);
+            project.CurrentArtworkPackRevisionId = failedPack.Id;
+            await db.SaveChangesAsync();
+            Assert.True(await ArtworkCreditLedger.TryReserveAsync(
+                db,
+                project.WorkspaceId,
+                failedPack.Id,
+                CancellationToken.None));
+            await db.SaveChangesAsync();
+            Assert.Equal(0, (await db.WorkspaceArtworkCredits.SingleAsync()).Balance);
+            failedPackId = failedPack.Id;
+            failedJobId = failedJob.Id;
+        }
+
+        const string replacementKey = "artwork-recovery-new";
+        static HttpRequestMessage ReplacementRequest(Guid id) => new(
+            HttpMethod.Post,
+            $"/api/v1/releases/{id}/artwork")
+        {
+            Content = JsonContent.Create(new
+            {
+                prompt = "A restored midnight city cover",
+                style = "editorial music artwork"
+            })
+        };
+
+        using var firstRequest = ReplacementRequest(projectId);
+        firstRequest.Headers.TryAddWithoutValidation("Idempotency-Key", replacementKey);
+        var firstResponse = await client.SendAsync(firstRequest);
+        Assert.Equal(HttpStatusCode.Accepted, firstResponse.StatusCode);
+        var firstResult = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var replacementJobId = firstResult.GetProperty("jobId").GetGuid();
+        var replacementPackId = firstResult.GetProperty("revisionId").GetGuid();
+
+        using var replayRequest = ReplacementRequest(projectId);
+        replayRequest.Headers.TryAddWithoutValidation("Idempotency-Key", replacementKey);
+        var replayResponse = await client.SendAsync(replayRequest);
+        Assert.Equal(HttpStatusCode.Accepted, replayResponse.StatusCode);
+        var replayResult = await replayResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(replacementJobId, replayResult.GetProperty("jobId").GetGuid());
+        Assert.Equal(replacementPackId, replayResult.GetProperty("revisionId").GetGuid());
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verify = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var projectAfter = await verify.Projects.SingleAsync(value => value.Id == projectId);
+        var failedPackAfter = await verify.ArtworkPackRevisions.SingleAsync(value => value.Id == failedPackId);
+        var replacementPack = await verify.ArtworkPackRevisions.SingleAsync(value => value.Id == replacementPackId);
+        var replacementJob = await verify.Jobs.SingleAsync(value => value.Id == replacementJobId);
+        Assert.Equal(RevisionState.Failed, failedPackAfter.State);
+        Assert.Equal(JobState.Failed, (await verify.Jobs.SingleAsync(value => value.Id == failedJobId)).State);
+        Assert.Equal(replacementPackId, projectAfter.CurrentArtworkPackRevisionId);
+        Assert.Equal(5, replacementPack.Number);
+        Assert.Equal(RevisionState.Processing, replacementPack.State);
+        Assert.Equal($"request:{replacementKey}", replacementPack.SourceFingerprint);
+        Assert.Equal(JobState.Queued, replacementJob.State);
+        Assert.Equal(replacementPack.SourceFingerprint, replacementJob.InputFingerprint);
+        Assert.Contains(replacementPackId.ToString(), replacementJob.PayloadJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, await verify.Jobs.CountAsync(value => value.Type == JobType.ArtworkGeneration));
+        Assert.Equal(5, await verify.ArtworkPackRevisions.CountAsync(value => value.ProjectId == projectId));
+        Assert.Equal(0, (await verify.WorkspaceArtworkCredits.SingleAsync()).Balance);
+        Assert.Equal(0, (await verify.ArtworkCreditGrants.SingleAsync()).Remaining);
+
+        var transactions = await verify.ArtworkCreditTransactions.ToListAsync();
+        Assert.Equal(3, transactions.Count);
+        Assert.Single(transactions, value =>
+            value.Reason == "artwork_generation_released" &&
+            value.Reference.Contains(failedPackId.ToString("N"), StringComparison.OrdinalIgnoreCase));
+        Assert.Single(transactions, value =>
+            value.Reason == "artwork_generation_reserved" &&
+            value.Reference.Contains(replacementPackId.ToString("N"), StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(transactions, value =>
+            value.Reference.Contains(replacementPackId.ToString("N"), StringComparison.OrdinalIgnoreCase) &&
+            value.Reference.EndsWith(":finalize", StringComparison.Ordinal));
+    }
+
     private static async Task<HttpResponseMessage> QuickUpload(
         HttpClient client,
         string key,

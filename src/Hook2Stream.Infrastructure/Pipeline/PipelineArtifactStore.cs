@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Hook2Stream.Application;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Infrastructure.Pipeline;
@@ -38,8 +39,12 @@ public interface IPipelineArtifactStore
 public sealed class PipelineArtifactStore(
     IObjectStorage storage,
     IProcessRunner processRunner,
-    IOptions<MediaToolsOptions> mediaOptions) : IPipelineArtifactStore
+    IOptions<MediaToolsOptions> mediaOptions,
+    ILogger<PipelineArtifactStore>? logger = null) : IPipelineArtifactStore
 {
+    private static readonly EventId StagingCleanupFailedEvent =
+        new(1001, "PipelineArtifactStagingCleanupFailed");
+
     public async Task<PromotedArtifact> PromoteAsync(
         ProviderArtifactManifest manifest,
         string canonicalObjectKey,
@@ -101,7 +106,20 @@ public sealed class PipelineArtifactStore(
                 cancellationToken);
             if (manifest.Materialized)
             {
-                await storage.DeleteAsync(manifest.ObjectKey, cancellationToken);
+                try
+                {
+                    await storage.DeleteAsync(manifest.ObjectKey, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception)
+                {
+                    logger?.LogWarning(
+                        StagingCleanupFailedEvent,
+                        "Provider staging cleanup failed after canonical artifact promotion; cleanup remains best effort.");
+                }
             }
 
             return result;

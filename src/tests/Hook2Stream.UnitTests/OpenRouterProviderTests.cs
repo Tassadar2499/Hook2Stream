@@ -14,6 +14,8 @@ namespace Hook2Stream.UnitTests;
 
 public sealed class OpenRouterProviderTests
 {
+    private static readonly string TestApiKey = $"sk-or-v1-{new string('a', 64)}";
+
     private static readonly ProviderExecutionContext Context = new(
         Guid.Parse("01900000-0000-7000-8000-000000000701"),
         new string('a', 64),
@@ -36,12 +38,12 @@ public sealed class OpenRouterProviderTests
                     start = call == 1 ? 0 : 2,
                     end = call == 1 ? 49 : call == 2 ? 49 : 4,
                     text = $"phrase {call}",
-                    confidence = 0.8,
-                    words = new[]
-                    {
-                        new { word = $"word{call}", start = call == 1 ? 0 : 2, end = call == 1 ? 1 : 3, probability = 0.9 }
-                    }
+                    confidence = 0.8
                 }
+            },
+            words = new[]
+            {
+                new { word = $"word{call}", start = call == 1 ? 0 : 2, end = call == 1 ? 1 : 3, probability = 0.9 }
             },
             usage = new { seconds = 50, input_tokens = 2, output_tokens = 3, total_tokens = 5, cost = 0.001m }
         }, $"generation-{call}"));
@@ -75,8 +77,10 @@ public sealed class OpenRouterProviderTests
         {
             Assert.Equal("openai/whisper-large-v3", request.GetProperty("model").GetString());
             Assert.Equal("verbose_json", request.GetProperty("response_format").GetString());
-            Assert.True(request.GetProperty("provider").GetProperty("zdr").GetBoolean());
-            Assert.Equal("deny", request.GetProperty("provider").GetProperty("data_collection").GetString());
+            Assert.Equal(
+                "word",
+                Assert.Single(request.GetProperty("timestamp_granularities").EnumerateArray()).GetString());
+            Assert.False(request.TryGetProperty("provider", out _));
         });
     }
 
@@ -122,12 +126,12 @@ public sealed class OpenRouterProviderTests
         var handler = new CapturingHandler(call => Json(new
         {
             model = "bytedance-seed/seedream-4.5",
-            provider = "bytedance",
+            provider = "seed",
             data = new[]
             {
-                new { b64_json = Convert.ToBase64String(Png(128, 128)), media_type = "image/png" }
+                new { b64_json = Convert.ToBase64String(Jpeg()), media_type = "image/jpeg" }
             },
-            usage = new { prompt_tokens = 1, completion_tokens = 2, total_tokens = 3, cost = 0.05m }
+            usage = new { prompt_tokens = 1, completion_tokens = 2, total_tokens = 3, cost = 0.04m }
         }, $"image-{call}"));
         var storage = new FakeStorage();
         var options = Options();
@@ -171,16 +175,71 @@ public sealed class OpenRouterProviderTests
         Assert.All(handler.Requests, request =>
         {
             Assert.Equal("bytedance-seed/seedream-4.5", request.GetProperty("model").GetString());
-            Assert.Equal("2K", request.GetProperty("resolution").GetString());
+            Assert.Equal("4K", request.GetProperty("resolution").GetString());
             Assert.Equal("9:16", request.GetProperty("aspect_ratio").GetString());
-            Assert.True(request.GetProperty("provider").GetProperty("zdr").GetBoolean());
-            Assert.Equal("deny", request.GetProperty("provider").GetProperty("data_collection").GetString());
-            Assert.True(request.GetProperty("provider").GetProperty("require_parameters").GetBoolean());
+            Assert.False(request.TryGetProperty("output_format", out _));
+            var routing = request.GetProperty("provider");
+            Assert.Equal("seed", Assert.Single(routing.GetProperty("only").EnumerateArray()).GetString());
+            Assert.False(routing.GetProperty("allow_fallbacks").GetBoolean());
+            Assert.False(routing.TryGetProperty("zdr", out _));
+            Assert.False(routing.TryGetProperty("data_collection", out _));
+            Assert.False(routing.TryGetProperty("require_parameters", out _));
             var dataUrl = request.GetProperty("input_references")[0]
                 .GetProperty("image_url").GetProperty("url").GetString();
             Assert.StartsWith("data:image/png;base64,", dataUrl, StringComparison.Ordinal);
         });
-        Assert.Equal(0.15m, result.Provenance.Usage!.CostUsd);
+        Assert.Equal(0.12m, result.Provenance.Usage!.CostUsd);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Artwork_later_candidate_failure_deletes_already_materialized_staging_artifacts(
+        bool invalidResponse)
+    {
+        var handler = new CapturingHandler(call => call == 1
+            ? Json(new
+            {
+                model = "bytedance-seed/seedream-4.5",
+                provider = "seed",
+                data = new[]
+                {
+                    new { b64_json = Convert.ToBase64String(Jpeg()), media_type = "image/jpeg" }
+                }
+            }, "image-1")
+            : invalidResponse
+                ? Json(new { data = Array.Empty<object>() }, "image-2")
+                : new HttpResponseMessage(HttpStatusCode.BadGateway)
+                {
+                    Content = new StringContent("upstream unavailable")
+                });
+        var storage = new FakeStorage();
+        var options = Options();
+        var provider = new OpenRouterArtworkProvider(
+            new OpenRouterClient(new HttpClient(handler), options, TimeProvider.System),
+            storage,
+            new MaterializingProcessRunner(),
+            options,
+            new MediaToolsOptions(),
+            TimeProvider.System);
+
+        var result = await provider.GenerateAsync(
+            new ArtworkGenerationRequest(
+                Context,
+                "Artist",
+                "Track",
+                new ArtworkCreativeBrief("dark", ["#112233"], [], null),
+                3,
+                2_048,
+                2_048),
+            CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("2K", handler.Requests[0].GetProperty("resolution").GetString());
+        Assert.Equal("1:1", handler.Requests[0].GetProperty("aspect_ratio").GetString());
+        var stagedKey = $"{Context.StagingPrefix}/cover-candidate-1.png";
+        Assert.Contains(stagedKey, storage.Deleted);
+        Assert.DoesNotContain(stagedKey, storage.Uploaded.Keys);
     }
 
     [Fact]
@@ -311,6 +370,49 @@ public sealed class OpenRouterProviderTests
     }
 
     [Theory]
+    [InlineData("content_policy_violation")]
+    [InlineData("image_content_policy_violation")]
+    public async Task Client_classifies_official_content_policy_violation_without_exposing_upstream_text(
+        string errorType)
+    {
+        const string upstreamText = "Raw provider moderation detail containing private prompt text.";
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(new
+                {
+                    error = new
+                    {
+                        code = 400,
+                        message = upstreamText,
+                        metadata = new { error_type = errorType }
+                    }
+                }),
+                Encoding.UTF8,
+                "application/json")
+        });
+        var options = Options();
+        var client = new OpenRouterClient(new HttpClient(handler), options, TimeProvider.System);
+
+        var result = await client.PostJsonAsync(
+            "chat/completions",
+            new { model = options.CampaignModel, messages = Array.Empty<object>() },
+            "content-policy-classification",
+            30,
+            outcomeCanBeRetried: true,
+            CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ProviderFailureKind.Moderation, result.Failure!.Kind);
+        Assert.Equal("openrouter.moderation_blocked", result.Failure.Code);
+        Assert.Equal(
+            "The request was blocked by the provider safety policy.",
+            result.Failure.SafeMessage);
+        Assert.DoesNotContain(upstreamText, result.Failure.SafeMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain(upstreamText, result.Failure.Code, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("OpenRouter:BaseUrl", "https://api.openai.com/v1/")]
     [InlineData("OpenRouter:TranscriptionModel", "openai/whisper-large-v3-turbo")]
     [InlineData("OpenRouter:ImageModel", "openai/gpt-image-1")]
@@ -322,6 +424,63 @@ public sealed class OpenRouterProviderTests
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { [key] = value })
+            .Build();
+        using var services = new ServiceCollection()
+            .AddHook2StreamPipelineProviders(configuration, allowFixtureProviders: true)
+            .BuildServiceProvider();
+
+        Assert.Throws<OptionsValidationException>(() =>
+            services.GetRequiredService<IOptions<OpenRouterOptions>>().Value);
+    }
+
+    [Theory]
+    [InlineData("Transcription")]
+    [InlineData("Artwork")]
+    public void Dedicated_OpenRouter_endpoints_require_account_or_guardrail_ZDR(string stage)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                [$"PipelineProviders:{stage}:Mode"] = "OpenRouter",
+                ["OpenRouter:ApiKey"] = TestApiKey
+            })
+            .Build();
+        using var services = new ServiceCollection()
+            .AddHook2StreamPipelineProviders(configuration, allowFixtureProviders: true)
+            .BuildServiceProvider();
+
+        Assert.Throws<OptionsValidationException>(() =>
+            services.GetRequiredService<IOptions<OpenRouterOptions>>().Value);
+    }
+
+    [Fact]
+    public void Campaign_only_OpenRouter_mode_uses_per_request_ZDR()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PipelineProviders:CampaignPlanning:Mode"] = "OpenRouter",
+                ["OpenRouter:ApiKey"] = TestApiKey
+            })
+            .Build();
+        using var services = new ServiceCollection()
+            .AddHook2StreamPipelineProviders(configuration, allowFixtureProviders: true)
+            .BuildServiceProvider();
+
+        Assert.False(
+            services.GetRequiredService<IOptions<OpenRouterOptions>>()
+                .Value.AccountOrGuardrailZdrEnforced);
+    }
+
+    [Fact]
+    public void OpenRouter_mode_rejects_a_malformed_api_key()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PipelineProviders:CampaignPlanning:Mode"] = "OpenRouter",
+                ["OpenRouter:ApiKey"] = "sk-or-v1-not-a-current-key"
+            })
             .Build();
         using var services = new ServiceCollection()
             .AddHook2StreamPipelineProviders(configuration, allowFixtureProviders: true)
@@ -358,7 +517,7 @@ public sealed class OpenRouterProviderTests
 
     private static OpenRouterOptions Options() => new()
     {
-        ApiKey = "test-openrouter-key",
+        ApiKey = TestApiKey,
         MaxRetries = 0
     };
 
@@ -402,6 +561,8 @@ public sealed class OpenRouterProviderTests
         return bytes;
     }
 
+    private static byte[] Jpeg() => [0xff, 0xd8, 0xff, 0xd9];
+
     private sealed class CapturingHandler(Func<int, HttpResponseMessage> response) : HttpMessageHandler
     {
         public List<JsonElement> Requests { get; } = [];
@@ -414,7 +575,7 @@ public sealed class OpenRouterProviderTests
             using var json = JsonDocument.Parse(body);
             Requests.Add(json.RootElement.Clone());
             Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
-            Assert.Equal("test-openrouter-key", request.Headers.Authorization?.Parameter);
+            Assert.Equal(TestApiKey, request.Headers.Authorization?.Parameter);
             return response(Requests.Count);
         }
     }
@@ -447,6 +608,7 @@ public sealed class OpenRouterProviderTests
     private sealed class FakeStorage : IObjectStorage
     {
         public Dictionary<string, byte[]> Uploaded { get; } = [];
+        public List<string> Deleted { get; } = [];
 
         public Task EnsureBucketAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken) =>
@@ -469,7 +631,12 @@ public sealed class OpenRouterProviderTests
         public Task<Uri> CreateMultipartPartUploadUrlAsync(string objectKey, string uploadId, int partNumber, TimeSpan lifetime, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task CompleteMultipartUploadAsync(string objectKey, string uploadId, IReadOnlyList<MultipartPart> parts, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task AbortMultipartUploadAsync(string objectKey, string uploadId, CancellationToken cancellationToken) => throw new NotSupportedException();
-        public Task DeleteAsync(string objectKey, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task DeleteAsync(string objectKey, CancellationToken cancellationToken)
+        {
+            Deleted.Add(objectKey);
+            Uploaded.Remove(objectKey);
+            return Task.CompletedTask;
+        }
         public Task DeleteProjectObjectsAsync(ProjectStorageScope scope, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task DeleteAssetObjectsAsync(AssetStorageScope scope, CancellationToken cancellationToken) => Task.CompletedTask;
     }

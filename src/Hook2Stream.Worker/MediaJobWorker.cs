@@ -57,7 +57,25 @@ public sealed class MediaJobWorker(
                 continue;
             }
 
-            await ProcessJobAsync(job, stoppingToken);
+            try
+            {
+                await ProcessJobAsync(job, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                // A queue transition may still fail after its bounded retry
+                // budget. Keep the worker alive and let the lease-recovery
+                // path make the job available again.
+                logger.LogError(
+                    exception,
+                    "Worker {WorkerId} could not finish processing job {JobId}; the lease will be recovered.",
+                    _workerId,
+                    job.Id);
+            }
         }
     }
 
@@ -82,6 +100,7 @@ public sealed class MediaJobWorker(
 
         using var processingCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var heartbeatTask = KeepLeaseAliveAsync(job, processingCancellation, stoppingToken);
+        var handlerSucceeded = false;
 
         try
         {
@@ -113,25 +132,30 @@ public sealed class MediaJobWorker(
             }
 
             await handler.ProcessAsync(job, processingCancellation.Token);
+            handlerSucceeded = true;
 
-            // Stop and join the heartbeat before completing the lease. This
-            // prevents a late heartbeat write from racing the terminal update.
-            processingCancellation.Cancel();
-            try
+            if (!await StopHeartbeatBeforeTransitionAsync(
+                    job,
+                    processingCancellation,
+                    heartbeatTask))
             {
-                await heartbeatTask;
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected when the successful operation stops its heartbeat.
+                return;
             }
 
             var queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
             await queue.CompleteAsync(job.Id, job.LeaseOwner, job.LeaseToken, stoppingToken);
             logger.LogInformation("Job {JobId} succeeded.", job.Id);
         }
-        catch (JobDeferredException exception)
+        catch (JobDeferredException exception) when (!handlerSucceeded)
         {
+            if (!await StopHeartbeatBeforeTransitionAsync(
+                    job,
+                    processingCancellation,
+                    heartbeatTask))
+            {
+                return;
+            }
+
             await DeferAsync(job, exception.Delay, exception.ReasonCode, stoppingToken);
             logger.LogInformation(
                 "Job {JobId} was deferred for {Delay} because {ReasonCode}.",
@@ -139,32 +163,60 @@ public sealed class MediaJobWorker(
                 exception.Delay,
                 exception.ReasonCode);
         }
-        catch (JobBlockedException exception)
+        catch (JobBlockedException exception) when (!handlerSucceeded)
         {
+            if (!await StopHeartbeatBeforeTransitionAsync(
+                    job,
+                    processingCancellation,
+                    heartbeatTask))
+            {
+                return;
+            }
+
             await BlockAsync(job, exception.ReasonCode, exception.SafeMessage, stoppingToken);
             logger.LogInformation(
                 "Job {JobId} is waiting for a user action because {ReasonCode}.",
                 job.Id,
                 exception.ReasonCode);
         }
-        catch (JobHandlerException exception)
+        catch (JobHandlerException exception) when (!handlerSucceeded)
         {
+            if (!await StopHeartbeatBeforeTransitionAsync(
+                    job,
+                    processingCancellation,
+                    heartbeatTask))
+            {
+                return;
+            }
+
             await FailAsync(job, exception.Code, exception.SafeMessage, exception.Retryable, stoppingToken);
             logger.LogWarning("Job {JobId} failed: {ErrorCode}.", job.Id, exception.Code);
         }
-        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested && processingCancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (
+            !handlerSucceeded &&
+            !stoppingToken.IsCancellationRequested &&
+            processingCancellation.IsCancellationRequested)
         {
-            // The fencing token makes any late result harmless. Do not mutate a
-            // job that another worker may already have leased.
-            logger.LogWarning("Processing stopped after lease loss for job {JobId}.", job.Id);
+            var heartbeatFailure = await StopAndObserveHeartbeatAsync(
+                processingCancellation,
+                heartbeatTask);
+            LogHeartbeatFailure(job, heartbeatFailure);
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (!handlerSucceeded && stoppingToken.IsCancellationRequested)
         {
             logger.LogInformation("Worker shutdown interrupted job {JobId}; the lease will be recovered.", job.Id);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (!handlerSucceeded)
         {
             logger.LogError(exception, "Job {JobId} failed and may be retried.", job.Id);
+            if (!await StopHeartbeatBeforeTransitionAsync(
+                    job,
+                    processingCancellation,
+                    heartbeatTask))
+            {
+                return;
+            }
+
             var failure = JobFailureClassifier.Classify(exception, job);
             await FailAsync(
                 job,
@@ -175,51 +227,119 @@ public sealed class MediaJobWorker(
         }
         finally
         {
-            processingCancellation.Cancel();
-            try
-            {
-                await heartbeatTask;
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected when processing completes, the lease is lost, or the host stops.
-            }
-            catch (LeaseLostException)
-            {
-                // Already reported above; stale completion is blocked by the fencing token.
-            }
+            // Awaiting a completed task is idempotent. This final observation
+            // protects future branches from ever leaking a heartbeat fault.
+            await StopAndObserveHeartbeatAsync(processingCancellation, heartbeatTask);
         }
     }
 
-    private async Task KeepLeaseAliveAsync(
+    private async Task<Exception?> KeepLeaseAliveAsync(
         LeasedJob job,
         CancellationTokenSource processingCancellation,
         CancellationToken stoppingToken)
     {
-        while (!processingCancellation.IsCancellationRequested)
+        try
         {
-            await Task.Delay(
-                TimeSpan.FromSeconds(_options.HeartbeatIntervalSeconds),
-                processingCancellation.Token);
-            await using var scope = scopeFactory.CreateAsyncScope();
-            var queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
-            var renewed = await queue.HeartbeatAsync(
-                job.Id,
-                job.LeaseOwner,
-                job.LeaseToken,
-                TimeSpan.FromSeconds(_options.LeaseDurationSeconds),
-                progressPercent: -1,
-                stage: "",
-                processingCancellation.Token);
-            if (!renewed)
+            while (!processingCancellation.IsCancellationRequested)
             {
-                processingCancellation.Cancel();
-                if (!stoppingToken.IsCancellationRequested)
+                await Task.Delay(
+                    TimeSpan.FromSeconds(_options.HeartbeatIntervalSeconds),
+                    processingCancellation.Token);
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var queue = scope.ServiceProvider.GetRequiredService<IJobQueue>();
+                var renewed = await queue.HeartbeatAsync(
+                    job.Id,
+                    job.LeaseOwner,
+                    job.LeaseToken,
+                    TimeSpan.FromSeconds(_options.LeaseDurationSeconds),
+                    progressPercent: -1,
+                    stage: "",
+                    processingCancellation.Token);
+                if (!renewed)
                 {
-                    throw new LeaseLostException(job.Id);
+                    processingCancellation.Cancel();
+                    return stoppingToken.IsCancellationRequested
+                        ? null
+                        : new LeaseLostException(job.Id);
                 }
             }
+
+            return null;
         }
+        catch (OperationCanceledException) when (processingCancellation.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception exception)
+        {
+            // Heartbeat and provider processing are a single lease-scoped
+            // operation. A failed heartbeat invalidates that operation and
+            // must cancel the provider immediately. Return the fault so the
+            // processing path can observe it without faulting the
+            // BackgroundService.
+            processingCancellation.Cancel();
+            return exception;
+        }
+    }
+
+    private async Task<bool> StopHeartbeatBeforeTransitionAsync(
+        LeasedJob job,
+        CancellationTokenSource processingCancellation,
+        Task<Exception?> heartbeatTask)
+    {
+        var heartbeatFailure = await StopAndObserveHeartbeatAsync(
+            processingCancellation,
+            heartbeatTask);
+        if (heartbeatFailure is null)
+        {
+            return true;
+        }
+
+        LogHeartbeatFailure(job, heartbeatFailure);
+        return false;
+    }
+
+    private static async Task<Exception?> StopAndObserveHeartbeatAsync(
+        CancellationTokenSource processingCancellation,
+        Task<Exception?> heartbeatTask)
+    {
+        processingCancellation.Cancel();
+        try
+        {
+            return await heartbeatTask;
+        }
+        catch (OperationCanceledException) when (processingCancellation.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception exception)
+        {
+            // Keep this defensive boundary even though KeepLeaseAliveAsync
+            // normally represents heartbeat faults as its result.
+            return exception;
+        }
+    }
+
+    private void LogHeartbeatFailure(LeasedJob job, Exception? heartbeatFailure)
+    {
+        if (heartbeatFailure is LeaseLostException)
+        {
+            // The fencing token makes any late result harmless. Do not mutate
+            // a job that another worker may already have leased.
+            logger.LogWarning("Processing stopped after lease loss for job {JobId}.", job.Id);
+            return;
+        }
+
+        if (heartbeatFailure is not null)
+        {
+            logger.LogError(
+                heartbeatFailure,
+                "Heartbeat failed for job {JobId}; processing was cancelled and the lease will be recovered.",
+                job.Id);
+            return;
+        }
+
+        logger.LogWarning("Processing stopped after lease cancellation for job {JobId}.", job.Id);
     }
 
     private async Task FailAsync(

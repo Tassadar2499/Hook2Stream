@@ -165,6 +165,27 @@ public sealed class WorkerRegistrationTests
         Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IVideoRenderer));
     }
 
+    [Fact]
+    public void Control_pool_resolves_the_typed_OpenRouter_client_when_enabled()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["PipelineProviders:Transcription:Mode"] = "OpenRouter",
+                ["OpenRouter:ApiKey"] = $"sk-or-v1-{new string('a', 64)}",
+                ["OpenRouter:AccountOrGuardrailZdrEnforced"] = "true"
+            })
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddHook2StreamPipelineProviders(
+                configuration,
+                allowFixtureProviders: true,
+                [JobRoutingRegistry.Control])
+            .BuildServiceProvider();
+
+        Assert.NotNull(provider.GetRequiredService<OpenRouterClient>());
+    }
+
     [Theory]
     [InlineData(JobRoutingRegistry.Media, false)]
     [InlineData(JobRoutingRegistry.Analysis, false)]

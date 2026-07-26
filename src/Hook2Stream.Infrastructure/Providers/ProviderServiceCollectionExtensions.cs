@@ -72,10 +72,17 @@ public static class ProviderServiceCollectionExtensions
                 })
                 .Validate(HasValidOpenRouterOptions, "OpenRouter configuration is invalid.")
                 .Validate(
-                    options => !UsesOpenRouter(configuration) || !string.IsNullOrWhiteSpace(options.ApiKey),
-                    "OPENROUTER_API_KEY is required when an OpenRouter provider mode is selected.")
+                    options => !UsesOpenRouter(configuration) || HasValidOpenRouterApiKey(options.ApiKey),
+                    "OpenRouter:ApiKey or OPENROUTER_API_KEY must be a current sk-or-v1 inference key when an OpenRouter provider mode is selected.")
+                .Validate(
+                    options => !UsesDedicatedOpenRouterEndpoint(configuration) ||
+                               options.AccountOrGuardrailZdrEnforced,
+                    "OpenRouter account or API-key guardrail ZDR enforcement must be configured and acknowledged with OpenRouter:AccountOrGuardrailZdrEnforced for transcription or artwork.")
                 .ValidateOnStart();
-            services.AddHttpClient<OpenRouterClient>(client => client.Timeout = Timeout.InfiniteTimeSpan);
+#pragma warning disable EXTEXP0001 // The provider owns request deadlines and must opt out of global HTTP resilience timeouts.
+            services.AddHttpClient<OpenRouterClient>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+                .RemoveAllResilienceHandlers();
+#pragma warning restore EXTEXP0001
             services.AddSingleton<FixtureTranscriptionProvider>();
             services.AddSingleton<FixtureArtworkProvider>();
             services.AddSingleton<FixtureCampaignPlanner>();
@@ -200,8 +207,32 @@ public static class ProviderServiceCollectionExtensions
         options.DenyDataCollection &&
         options.RequireParameters;
 
+    private static bool HasValidOpenRouterApiKey(string apiKey)
+    {
+        const string prefix = "sk-or-v1-";
+        if (apiKey.Length != prefix.Length + 64 ||
+            !apiKey.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        for (var index = prefix.Length; index < apiKey.Length; index++)
+        {
+            if (!char.IsAsciiHexDigit(apiKey[index])) return false;
+        }
+
+        return true;
+    }
+
     private static bool UsesOpenRouter(IConfiguration configuration) =>
         new[] { "Transcription", "Artwork", "CampaignPlanning" }.Any(stage =>
+            Enum.TryParse<ProviderAdapterMode>(
+                configuration[$"{PipelineProviderOptions.SectionName}:{stage}:Mode"],
+                ignoreCase: true,
+                out var mode) && mode == ProviderAdapterMode.OpenRouter);
+
+    private static bool UsesDedicatedOpenRouterEndpoint(IConfiguration configuration) =>
+        new[] { "Transcription", "Artwork" }.Any(stage =>
             Enum.TryParse<ProviderAdapterMode>(
                 configuration[$"{PipelineProviderOptions.SectionName}:{stage}:Mode"],
                 ignoreCase: true,

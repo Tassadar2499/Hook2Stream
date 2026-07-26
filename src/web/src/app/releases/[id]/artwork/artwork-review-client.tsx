@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
@@ -45,6 +45,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const approvalSubmitInFlight = useRef(false);
 
   const load = useCallback(async () => {
     const token = await getToken();
@@ -180,6 +181,23 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
   const compositionDirty = artwork
     ? composition !== JSON.stringify(parseArtworkEdit(artwork.compositionJson))
     : false;
+  const approvedPack = artwork?.state === "approved";
+  const canRetryBackgrounds = approvedPack && artwork.backgroundAssetIds.length === 0;
+  const backgroundsComplete = approvedPack && artwork.backgroundAssetIds.length === 3;
+  const approvalActionLabel = canRetryBackgrounds
+    ? "Retry campaign backgrounds"
+    : backgroundsComplete
+      ? "Campaign backgrounds complete"
+      : approvedPack
+        ? "Campaign backgrounds are processing"
+        : compositionDirty || artwork?.selectedAssetId !== selectedAssetId
+          ? "Save before approval"
+          : "Approve official cover";
+  const approvalActionDisabled =
+    busy ||
+    (approvedPack
+      ? !canRetryBackgrounds
+      : !selectedAssetId || compositionDirty || artwork?.selectedAssetId !== selectedAssetId);
   const coverCropStyle = coverImageCropStyle(edit);
   const textLayoutStyle = coverTextLayoutStyle(edit);
 
@@ -237,7 +255,16 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
   }
 
   async function approveCover() {
-    if (!artwork || !selectedAssetId || compositionDirty || artwork.selectedAssetId !== selectedAssetId) return;
+    if (!artwork || approvalSubmitInFlight.current) return;
+    const retryingBackgrounds =
+      artwork.state === "approved" && artwork.backgroundAssetIds.length === 0;
+    if (
+      artwork.state === "approved"
+        ? !retryingBackgrounds
+        : !selectedAssetId || compositionDirty || artwork.selectedAssetId !== selectedAssetId
+    ) return;
+
+    approvalSubmitInFlight.current = true;
     setBusy(true);
     setError(undefined);
     try {
@@ -250,11 +277,21 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
         },
         body: JSON.stringify({ revisionId: artwork.revisionId }),
       });
-      setNotice("Official cover approved. Three coherent 9:16 backgrounds are being prepared.");
+      setNotice(
+        retryingBackgrounds
+          ? "Campaign background retry queued. Three coherent 9:16 backgrounds are being prepared."
+          : "Official cover approved. Three coherent 9:16 backgrounds are being prepared.",
+      );
       await load();
     } catch (caught) {
-      setError(messageFor(caught, "Could not approve this cover."));
+      setError(messageFor(
+        caught,
+        retryingBackgrounds
+          ? "Could not retry campaign backgrounds."
+          : "Could not approve this cover.",
+      ));
     } finally {
+      approvalSubmitInFlight.current = false;
       setBusy(false);
     }
   }
@@ -491,7 +528,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                   </div>
                   <div className="mt-7 flex flex-wrap gap-2">
                     <button className="button-secondary" type="button" onClick={saveSelection} disabled={busy || !selectedAssetId}>Save composition</button>
-                    <button className="button-primary" type="button" onClick={approveCover} disabled={busy || !selectedAssetId || compositionDirty || artwork.selectedAssetId !== selectedAssetId || artwork.state === "approved"}>{compositionDirty || artwork.selectedAssetId !== selectedAssetId ? "Save before approval" : "Approve official cover"}</button>
+                    <button className="button-primary" type="button" onClick={approveCover} disabled={approvalActionDisabled}>{approvalActionLabel}</button>
                     {cleanCover ? (
                       <a className="button-quiet" href={cleanCover.url}>Download clean 3000×3000 cover</a>
                     ) : artwork.state === "approved" && hasCleanCoverEntitlement ? (

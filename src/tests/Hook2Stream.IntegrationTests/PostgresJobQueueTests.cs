@@ -3,11 +3,109 @@ using Hook2Stream.Domain;
 using Hook2Stream.Infrastructure.Jobs;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace Hook2Stream.IntegrationTests;
 
 public sealed class PostgresJobQueueTests
 {
+    [Theory]
+    [InlineData("heartbeat", JobState.Running, PipelineStageState.Running, PipelineStageState.Running, "progress")]
+    [InlineData("complete", JobState.Succeeded, PipelineStageState.Succeeded, PipelineStageState.Succeeded, "succeeded")]
+    [InlineData("fail", JobState.Failed, PipelineStageState.Failed, PipelineStageState.Failed, "failed")]
+    [InlineData("defer", JobState.Queued, PipelineStageState.Queued, PipelineStageState.Running, "deferred")]
+    [InlineData("block", JobState.Cancelled, PipelineStageState.WaitingUser, PipelineStageState.WaitingUser, "waiting_user")]
+    public async Task Lease_transition_rebuilds_aggregate_after_concurrency_conflict(
+        string transition,
+        JobState expectedJobState,
+        PipelineStageState expectedStageState,
+        PipelineStageState expectedRunState,
+        string expectedEventType)
+    {
+        var interceptor = new InjectedConcurrencyInterceptor();
+        await using var dbContext = CreateDbContext(interceptor);
+        var (job, leasedJob) = await SeedPipelineJobAsync(dbContext);
+        interceptor.Arm(failures: 1);
+        var queue = new PostgresJobQueue(dbContext);
+
+        switch (transition)
+        {
+            case "heartbeat":
+                Assert.True(await queue.HeartbeatAsync(
+                    job.Id,
+                    leasedJob.LeaseOwner,
+                    leasedJob.LeaseToken,
+                    TimeSpan.FromMinutes(2),
+                    50,
+                    "working",
+                    CancellationToken.None));
+                break;
+            case "complete":
+                await queue.CompleteAsync(
+                    job.Id,
+                    leasedJob.LeaseOwner,
+                    leasedJob.LeaseToken,
+                    CancellationToken.None);
+                break;
+            case "fail":
+                await queue.FailAsync(
+                    leasedJob,
+                    "provider.failure",
+                    "The provider failed.",
+                    retryable: false,
+                    CancellationToken.None);
+                break;
+            case "defer":
+                await queue.DeferAsync(
+                    leasedJob,
+                    TimeSpan.FromSeconds(5),
+                    "dependency.wait",
+                    CancellationToken.None);
+                break;
+            case "block":
+                await queue.BlockAsync(
+                    leasedJob,
+                    "consent.required",
+                    "Consent is required.",
+                    CancellationToken.None);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(transition));
+        }
+
+        dbContext.ChangeTracker.Clear();
+        var persistedJob = await dbContext.Jobs.SingleAsync(value => value.Id == job.Id);
+        var persistedStage = await dbContext.PipelineStages.SingleAsync();
+        var persistedRun = await dbContext.PipelineRuns.SingleAsync();
+        var events = await dbContext.JobEvents.ToListAsync();
+
+        Assert.Equal(2, interceptor.SaveAttempts);
+        Assert.Equal(expectedJobState, persistedJob.State);
+        Assert.Equal(expectedStageState, persistedStage.State);
+        Assert.Equal(expectedRunState, persistedRun.State);
+        Assert.Single(events);
+        Assert.Equal(expectedEventType, events[0].EventType);
+    }
+
+    [Fact]
+    public async Task Lease_transition_has_bounded_concurrency_retry_budget()
+    {
+        var interceptor = new InjectedConcurrencyInterceptor();
+        await using var dbContext = CreateDbContext(interceptor);
+        var (job, leasedJob) = await SeedPipelineJobAsync(dbContext);
+        interceptor.Arm(failures: int.MaxValue);
+        var queue = new PostgresJobQueue(dbContext);
+
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() =>
+            queue.CompleteAsync(
+                job.Id,
+                leasedJob.LeaseOwner,
+                leasedJob.LeaseToken,
+                CancellationToken.None));
+
+        Assert.Equal(3, interceptor.SaveAttempts);
+    }
+
     [Fact]
     public async Task Enqueue_preserves_pipeline_metadata_and_is_idempotent()
     {
@@ -262,11 +360,122 @@ public sealed class PostgresJobQueueTests
             CancellationToken.None));
     }
 
-    private static Hook2StreamDbContext CreateDbContext()
+    private static async Task<(Job Job, LeasedJob LeasedJob)> SeedPipelineJobAsync(
+        Hook2StreamDbContext dbContext)
+    {
+        var workspaceId = Guid.NewGuid();
+        var projectId = Guid.NewGuid();
+        var leaseToken = Guid.NewGuid();
+        var job = new Job
+        {
+            WorkspaceId = workspaceId,
+            ProjectId = projectId,
+            Type = JobType.Transcription,
+            PayloadJson = "{}",
+            RequiredCapability = JobRoutingRegistry.Control,
+            State = JobState.Running,
+            AttemptCount = 1,
+            LeaseOwner = "worker-a",
+            LeaseToken = leaseToken,
+            LeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
+            PipelineStage = WorkflowLane.Transcript.ToString(),
+            ProgressStage = "processing"
+        };
+        var run = new PipelineRun
+        {
+            WorkspaceId = workspaceId,
+            ProjectId = projectId,
+            Number = 1,
+            State = PipelineStageState.Running,
+            Trigger = "test"
+        };
+        var stage = new PipelineStage
+        {
+            PipelineRun = run,
+            PipelineRunId = run.Id,
+            Lane = WorkflowLane.Transcript,
+            State = PipelineStageState.Running,
+            CurrentJobId = job.Id
+        };
+        run.Stages.Add(stage);
+        job.PipelineRunId = run.Id;
+        dbContext.Jobs.Add(job);
+        dbContext.JobAttempts.Add(new JobAttempt
+        {
+            JobId = job.Id,
+            Number = 1,
+            WorkerId = "worker-a",
+            State = JobState.Running,
+            StartedAt = DateTimeOffset.UtcNow
+        });
+        dbContext.PipelineRuns.Add(run);
+        await dbContext.SaveChangesAsync();
+
+        return (
+            job,
+            new LeasedJob(
+                job.Id,
+                workspaceId,
+                projectId,
+                null,
+                job.Type,
+                job.PayloadJson,
+                1,
+                job.MaxAttempts,
+                job.RequiredCapability,
+                job.HandlerVersion,
+                null,
+                job.PayloadSchemaVersion,
+                "worker-a",
+                job.LeaseExpiresAt!.Value,
+                leaseToken));
+    }
+
+    private static Hook2StreamDbContext CreateDbContext(
+        SaveChangesInterceptor? interceptor = null)
     {
         var options = new DbContextOptionsBuilder<Hook2StreamDbContext>()
-            .UseInMemoryDatabase($"job-queue-tests-{Guid.NewGuid():N}")
-            .Options;
-        return new Hook2StreamDbContext(options);
+            .UseInMemoryDatabase($"job-queue-tests-{Guid.NewGuid():N}");
+        if (interceptor is not null)
+        {
+            options.AddInterceptors(interceptor);
+        }
+
+        return new Hook2StreamDbContext(options.Options);
+    }
+
+    private sealed class InjectedConcurrencyInterceptor : SaveChangesInterceptor
+    {
+        private int _remainingFailures;
+        private bool _armed;
+
+        public int SaveAttempts { get; private set; }
+
+        public void Arm(int failures)
+        {
+            _remainingFailures = failures;
+            SaveAttempts = 0;
+            _armed = true;
+        }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_armed)
+            {
+                return new ValueTask<InterceptionResult<int>>(result);
+            }
+
+            SaveAttempts++;
+            if (_remainingFailures > 0)
+            {
+                _remainingFailures--;
+                throw new DbUpdateConcurrencyException("Injected optimistic concurrency conflict.");
+            }
+
+            return new ValueTask<InterceptionResult<int>>(result);
+        }
     }
 }

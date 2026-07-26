@@ -14,6 +14,24 @@ using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Worker;
 
+internal enum ProviderResultCommitOutcome
+{
+    Committed,
+    Stale,
+    ConsentRevoked
+}
+
+internal readonly record struct ProviderResultCommitDecision(
+    ProviderResultCommitOutcome Outcome,
+    string? BlockerCode = null)
+{
+    public static ProviderResultCommitDecision Committed { get; } = new(ProviderResultCommitOutcome.Committed);
+    public static ProviderResultCommitDecision Stale { get; } = new(ProviderResultCommitOutcome.Stale);
+
+    public static ProviderResultCommitDecision Blocked(string? blockerCode) =>
+        new(ProviderResultCommitOutcome.ConsentRevoked, blockerCode);
+}
+
 public sealed class AudioAnalysisJobHandler(
     Hook2StreamDbContext db,
     IAudioAnalysisProvider provider) : IJobHandler
@@ -113,6 +131,26 @@ public sealed class TranscriptionJobHandler(
         if (revision.State is RevisionState.ReadyForReview or RevisionState.Approved or RevisionState.Superseded) return;
         PipelineHandlerData.EnsureFingerprint(job, revision.SourceFingerprint);
 
+        // Regeneration jobs create their processing revision in the handler. Make
+        // that revision durable before crossing the paid-provider boundary so the
+        // post-provider commit can always re-read authoritative state.
+        if (db.Entry(revision).State == EntityState.Added)
+        {
+            await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+            db.ChangeTracker.Clear();
+            project = await db.Projects.SingleAsync(
+                value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
+                cancellationToken);
+            asset = await db.MediaAssets.SingleAsync(
+                value => value.Id == payload.AssetId &&
+                         value.ProjectId == project.Id &&
+                         value.State == AssetState.Ready,
+                cancellationToken);
+            revision = await db.TranscriptRevisions.SingleAsync(
+                value => value.Id == revision.Id,
+                cancellationToken);
+        }
+
         var source = PipelineHandlerData.Object(asset);
         var providerContext = PipelineHandlerData.Context(job, "transcription");
         var result = await provider.TranscribeAsync(
@@ -125,7 +163,8 @@ public sealed class TranscriptionJobHandler(
             cancellationToken);
         if (!result.IsSuccess)
         {
-            await invocations.RecordAsync(
+            await PipelineHandlerData.TryRecordInvocationAsync(
+                invocations,
                 job,
                 "transcription",
                 providerContext,
@@ -135,98 +174,176 @@ public sealed class TranscriptionJobHandler(
                 cancellationToken);
             if (!result.Failure!.Retryable)
             {
-                revision.State = RevisionState.Failed;
-                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                await CommitFailureAsync(
+                    job,
+                    payload,
+                    revision.Id,
+                    cancellationToken);
             }
 
             throw PipelineHandlerData.Failure(result.Failure!);
         }
 
-        // Provider calls can outlive the revision they were started for. Re-read
-        // the authoritative pointers and the lease after the external call so a
-        // manual/imported transcript (or another invalidation) always wins.
-        var currentTranscriptId = await db.Projects.AsNoTracking()
-            .Where(value => value.Id == project.Id && value.WorkspaceId == job.WorkspaceId)
-            .Select(value => value.CurrentTranscriptRevisionId)
-            .SingleAsync(cancellationToken);
-        var currentRevisionState = await db.TranscriptRevisions.AsNoTracking()
-            .Where(value => value.Id == revision.Id)
-            .Select(value => value.State)
-            .SingleAsync(cancellationToken);
-        var leaseIsCurrent = await db.Jobs.AsNoTracking().AnyAsync(
-            value => value.Id == job.Id &&
-                     value.State == JobState.Running &&
-                     value.LeaseOwner == job.LeaseOwner &&
-                     value.LeaseToken == job.LeaseToken,
-            cancellationToken);
-        if (currentTranscriptId != revision.Id ||
-            currentRevisionState != RevisionState.Processing ||
-            !leaseIsCurrent)
+        try
         {
-            await invocations.RecordAsync(
+            var phrases = result.Value!.Phrases.Select((phrase, index) => new TranscriptPhraseRequest(
+                phrase.Id.ToString("N"),
+                index,
+                phrase.Text,
+                phrase.StartMilliseconds,
+                phrase.EndMilliseconds,
+                phrase.Confidence,
+                WarningAcknowledged: false,
+                phrase.Words.Select(word => new TranscriptWordResponse(
+                    word.Text,
+                    word.StartMilliseconds,
+                    word.EndMilliseconds,
+                    word.Confidence)).ToArray())).ToArray();
+            var commit = await CommitResultAsync(
+                job,
+                payload,
+                revision.Id,
+                result.Value,
+                phrases,
+                cancellationToken);
+            await PipelineHandlerData.TryRecordInvocationAsync(
+                invocations,
                 job,
                 "transcription",
                 providerContext,
                 result.Provenance,
                 failure: null,
-                AiProviderInvocationLedger.DiscardedStaleInput,
+                commit.Outcome switch
+                {
+                    ProviderResultCommitOutcome.Stale => AiProviderInvocationLedger.DiscardedStaleInput,
+                    ProviderResultCommitOutcome.ConsentRevoked => AiProviderInvocationLedger.DiscardedConsentRevoked,
+                    _ => null
+                },
                 cancellationToken);
-            return;
+            if (commit.Outcome == ProviderResultCommitOutcome.ConsentRevoked)
+            {
+                throw new JobBlockedException(
+                    commit.BlockerCode ?? "rights.external_ai_processing_required",
+                    "Transcription was not saved because external AI processing consent is no longer active.");
+            }
         }
-
-        var currentRights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
-            value => value.ProjectId == project.Id,
-            cancellationToken);
-        var currentExternalAi = ExternalAiProcessingGate.Evaluate(project, asset, currentRights);
-        if (!currentExternalAi.Allowed)
+        catch (Exception exception)
         {
-            await invocations.RecordAsync(
-                job,
-                "transcription",
-                providerContext,
-                result.Provenance,
-                failure: null,
-                AiProviderInvocationLedger.DiscardedConsentRevoked,
+            var finalException = PipelineHandlerData.NormalizePostProviderFailure(exception, "transcription");
+            if (ReferenceEquals(finalException, exception)) throw;
+            throw finalException;
+        }
+    }
+
+    private async Task<ProviderResultCommitDecision> CommitResultAsync(
+        LeasedJob job,
+        TranscriptionPayload payload,
+        Guid revisionId,
+        TranscriptionResult result,
+        IReadOnlyList<TranscriptPhraseRequest> phrases,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= PipelineHandlerData.ResultCommitMaxAttempts; attempt++)
+        {
+            db.ChangeTracker.Clear();
+            var project = await db.Projects.SingleOrDefaultAsync(
+                value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
                 cancellationToken);
-            throw new JobBlockedException(
-                currentExternalAi.BlockerCode ?? "rights.external_ai_processing_required",
-                "Transcription was not saved because external AI processing consent is no longer active.");
+            var asset = await db.MediaAssets.SingleOrDefaultAsync(
+                value => value.Id == payload.AssetId &&
+                         value.ProjectId == payload.ProjectId &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.State == AssetState.Ready,
+                cancellationToken);
+            var revision = await db.TranscriptRevisions.SingleOrDefaultAsync(
+                value => value.Id == revisionId && value.ProjectId == payload.ProjectId,
+                cancellationToken);
+            if (project is null || asset is null || revision is null ||
+                project.CurrentTranscriptRevisionId != revision.Id ||
+                project.IsInstrumental && project.IsInstrumentalConfirmed ||
+                revision.State != RevisionState.Processing ||
+                !string.Equals(revision.SourceFingerprint, job.InputFingerprint, StringComparison.Ordinal) ||
+                !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            var rights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
+                value => value.ProjectId == project.Id,
+                cancellationToken);
+            var gate = ExternalAiProcessingGate.Evaluate(project, asset, rights);
+            if (!gate.Allowed)
+            {
+                return ProviderResultCommitDecision.Blocked(gate.BlockerCode);
+            }
+
+            revision.Language = result.Language;
+            revision.PhrasesJson = JsonSerializer.Serialize(phrases, PipelineHandlerData.Json);
+            revision.State = RevisionState.ReadyForReview;
+            project.CurrentTranscriptRevisionId = revision.Id;
+            project.LyricsText = phrases.Count == 0 ? null : string.Join('\n', phrases.Select(value => value.Text));
+            if (result.IsInstrumentalCandidate)
+            {
+                project.IsInstrumental = true;
+                project.IsInstrumentalConfirmed = false;
+            }
+
+            PipelineOutbox.Reconcile(db, project, "transcription.completed", job.Id);
+            try
+            {
+                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                return ProviderResultCommitDecision.Committed;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < PipelineHandlerData.ResultCommitMaxAttempts)
+            {
+                // Re-read and re-apply the already materialized provider result.
+            }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                throw PipelineHandlerData.ResultCommitConflict("transcription", exception);
+            }
         }
 
-        var phrases = result.Value!.Phrases.Select((phrase, index) => new TranscriptPhraseRequest(
-            phrase.Id.ToString("N"),
-            index,
-            phrase.Text,
-            phrase.StartMilliseconds,
-            phrase.EndMilliseconds,
-            phrase.Confidence,
-            WarningAcknowledged: false,
-            phrase.Words.Select(word => new TranscriptWordResponse(
-                word.Text,
-                word.StartMilliseconds,
-                word.EndMilliseconds,
-                word.Confidence)).ToArray())).ToArray();
-        revision.Language = result.Value.Language;
-        revision.PhrasesJson = JsonSerializer.Serialize(phrases, PipelineHandlerData.Json);
-        revision.State = RevisionState.ReadyForReview;
-        project.CurrentTranscriptRevisionId = revision.Id;
-        project.LyricsText = phrases.Length == 0 ? null : string.Join('\n', phrases.Select(value => value.Text));
-        if (result.Value.IsInstrumentalCandidate)
+        throw new InvalidOperationException("The transcription result commit loop did not terminate.");
+    }
+
+    private async Task CommitFailureAsync(
+        LeasedJob job,
+        TranscriptionPayload payload,
+        Guid revisionId,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= PipelineHandlerData.ResultCommitMaxAttempts; attempt++)
         {
-            project.IsInstrumental = true;
-            project.IsInstrumentalConfirmed = false;
-        }
+            db.ChangeTracker.Clear();
+            var project = await db.Projects.SingleOrDefaultAsync(
+                value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
+                cancellationToken);
+            var revision = await db.TranscriptRevisions.SingleOrDefaultAsync(
+                value => value.Id == revisionId && value.ProjectId == payload.ProjectId,
+                cancellationToken);
+            if (project is null || revision is null ||
+                project.CurrentTranscriptRevisionId != revision.Id ||
+                revision.State != RevisionState.Processing ||
+                !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+            {
+                return;
+            }
 
-        await invocations.RecordAsync(
-            job,
-            "transcription",
-            providerContext,
-            result.Provenance,
-            failure: null,
-            status: null,
-            cancellationToken);
-        PipelineOutbox.Reconcile(db, project, "transcription.completed", job.Id);
-        await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+            revision.State = RevisionState.Failed;
+            try
+            {
+                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < PipelineHandlerData.ResultCommitMaxAttempts)
+            {
+            }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                throw PipelineHandlerData.ResultCommitConflict("transcription failure", exception);
+            }
+        }
     }
 
     private async Task<TranscriptRevision> CreateRevisionAsync(
@@ -273,6 +390,8 @@ public sealed class ArtworkGenerationJobHandler(
     ICleanCoverComposer coverComposer,
     IAiProviderInvocationWriter invocations) : IJobHandler
 {
+    private const long MaximumReferenceImageBytes = 20_000_000;
+
     public JobType Type => JobType.ArtworkGeneration;
     public string Capability => JobRoutingRegistry.GetRequiredCapability(Type);
 
@@ -323,27 +442,46 @@ public sealed class ArtworkGenerationJobHandler(
                 "Artwork generation is paused until the current audio rights and external AI consent are confirmed.");
         }
 
+        var preparedAssets = new List<PreparedArtworkAsset>(3);
+        IReadOnlyList<ProviderArtifactManifest>? providerArtifacts = null;
+        var preparedResultCommitted = false;
         try
         {
             var brand = await db.BrandKits.SingleAsync(value => value.WorkspaceId == project.WorkspaceId, cancellationToken);
             var reference = isBackgrounds
-            ? await db.MediaAssets.SingleAsync(
-                value => value.Id == pack.SelectedAssetId &&
-                         value.ProjectId == project.Id &&
-                         value.State == AssetState.Ready,
-                cancellationToken)
-            : null;
+                ? await db.MediaAssets
+                    .Include(value => value.Derivatives)
+                    .SingleAsync(
+                        value => value.Id == pack.SelectedAssetId &&
+                                 value.ProjectId == project.Id &&
+                                 value.WorkspaceId == job.WorkspaceId &&
+                                 value.State == AssetState.Ready &&
+                                 value.Purpose == AssetPurpose.ApprovedCover,
+                        cancellationToken)
+                : null;
+            var referenceSnapshot = reference is null
+                ? null
+                : new ArtworkReferenceSnapshot(reference.Id, reference.Sha256, reference.Version);
             if (reference is { Origin: AssetOrigin.Uploaded } && rights?.OwnsVisualRights != true)
             {
                 throw new JobBlockedException(
                     "rights.visual_required",
                     "Background generation is paused until rights to the selected uploaded cover are confirmed.");
             }
+            var providerReference = reference is null
+                ? null
+                : CompactBackgroundReference(reference);
             if (isBackgrounds)
             {
                 // Materialize the approved crop and local typography once. It stays
                 // owner-scoped and is never used as the external artwork reference.
-                _ = await coverComposer.EnsureAsync(project, pack, cancellationToken);
+                var cleanCover = await coverComposer.EnsureAsync(project, pack, cancellationToken);
+                if (db.Entry(cleanCover).State == EntityState.Added)
+                {
+                    // This local prerequisite is durable before the paid provider
+                    // call and therefore is not part of result-commit retries.
+                    await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                }
             }
             var localComposition = isBackgrounds
                 ? CleanCoverComposer.CoverComposition.Parse(pack.CompositionJson)
@@ -372,11 +510,12 @@ public sealed class ArtworkGenerationJobHandler(
                 payload.Count ?? 3,
                 isBackgrounds ? 1088 : 2048,
                 isBackgrounds ? 1920 : 2048,
-                reference is null ? null : PipelineHandlerData.Object(reference));
+                providerReference);
             var result = await provider.GenerateAsync(request, cancellationToken);
             if (!result.IsSuccess)
             {
-                await invocations.RecordAsync(
+                await PipelineHandlerData.TryRecordInvocationAsync(
+                    invocations,
                     job,
                     providerStage,
                     providerContext,
@@ -385,23 +524,21 @@ public sealed class ArtworkGenerationJobHandler(
                     status: null,
                     cancellationToken);
                 var terminalFailure = !result.Failure!.Retryable || job.AttemptNumber >= job.MaxAttempts;
-                if (terminalFailure && !isBackgrounds)
-                {
-                    pack.State = RevisionState.Failed;
-                    await ArtworkCreditLedger.ReleaseReservationAsync(
-                        db,
-                        project.WorkspaceId,
-                        pack.Id,
-                        cancellationToken);
-                    await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
-                }
-
-                throw PipelineHandlerData.Failure(result.Failure!);
+                var failure = PipelineHandlerData.Failure(result.Failure!);
+                throw terminalFailure && !isBackgrounds
+                    ? new JobHandlerException(
+                        failure.Code,
+                        failure.SafeMessage,
+                        retryable: false,
+                        failure)
+                    : failure;
             }
 
+            providerArtifacts = result.Value!.Artifacts;
             if (result.Value!.Candidates.Count != 3)
             {
-                await invocations.RecordAsync(
+                await PipelineHandlerData.TryRecordInvocationAsync(
+                    invocations,
                     job,
                     providerStage,
                     providerContext,
@@ -409,17 +546,6 @@ public sealed class ArtworkGenerationJobHandler(
                     failure: null,
                     AiProviderInvocationLedger.Rejected,
                     cancellationToken);
-                if (!isBackgrounds)
-                {
-                    pack.State = RevisionState.Failed;
-                    await ArtworkCreditLedger.ReleaseReservationAsync(
-                        db,
-                        project.WorkspaceId,
-                        pack.Id,
-                        cancellationToken);
-                    await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
-                }
-
                 throw new JobHandlerException(
                     isBackgrounds ? "artwork.background_batch_incomplete" : "artwork.candidate_batch_incomplete",
                     isBackgrounds
@@ -428,94 +554,402 @@ public sealed class ArtworkGenerationJobHandler(
                     retryable: false);
             }
 
-            var latestRights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
-                value => value.ProjectId == project.Id,
+            var currentState = await CurrentCommitStateAsync(
+                job,
+                payload,
+                isBackgrounds,
+                referenceSnapshot,
                 cancellationToken);
-            var latestGate = audio is null
-                ? new ArtworkAutomationDecision(false, "audio.not_ready")
-                : ArtworkAutomationGate.Evaluate(
-                    project,
-                    audio,
-                    latestRights,
-                    DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime));
-            if (!latestGate.Allowed)
+            if (currentState.Outcome != ProviderResultCommitOutcome.Committed)
             {
-                await invocations.RecordAsync(
+                await PipelineHandlerData.TryRecordInvocationAsync(
+                    invocations,
                     job,
                     providerStage,
                     providerContext,
                     result.Provenance,
                     failure: null,
-                    AiProviderInvocationLedger.DiscardedConsentRevoked,
+                    currentState.Outcome == ProviderResultCommitOutcome.ConsentRevoked
+                        ? AiProviderInvocationLedger.DiscardedConsentRevoked
+                        : AiProviderInvocationLedger.DiscardedStaleInput,
                     cancellationToken);
-                foreach (var artifact in result.Value.Artifacts.Where(value => value.Materialized))
+                if (currentState.Outcome == ProviderResultCommitOutcome.ConsentRevoked)
                 {
-                    try
-                    {
-                        await storage.DeleteAsync(artifact.ObjectKey, cancellationToken);
-                    }
-                    catch
-                    {
-                        // Revocation wins; provider staging cleanup remains best effort.
-                    }
+                    throw new JobBlockedException(
+                        currentState.BlockerCode ?? "rights.external_ai_processing_required",
+                        "Artwork was not saved because external AI processing consent is no longer active.");
                 }
 
-                throw new JobBlockedException(
-                    latestGate.BlockerCode ?? "rights.external_ai_processing_required",
-                    "Artwork was not saved because external AI processing consent is no longer active.");
+                throw new JobHandlerException(
+                    "artwork.revision_stale",
+                    "The generated artwork was discarded because its release revision is no longer current.",
+                    retryable: false);
             }
 
-            await invocations.RecordAsync(
+            await PrepareArtworkAssetsAsync(
+                result.Value,
+                result.Provenance,
+                project.WorkspaceId,
+                project.Id,
+                pack.Id,
+                pack.Number,
+                isBackgrounds,
+                job,
+                preparedAssets,
+                cancellationToken);
+            var commit = await CommitPreparedResultAsync(
+                job,
+                payload,
+                isBackgrounds,
+                referenceSnapshot,
+                preparedAssets,
+                cancellationToken);
+            if (commit.Outcome == ProviderResultCommitOutcome.Committed)
+            {
+                // From this point the canonical objects are referenced by durable
+                // database rows and must never be treated as retry cleanup.
+                preparedResultCommitted = true;
+            }
+
+            await PipelineHandlerData.TryRecordInvocationAsync(
+                invocations,
                 job,
                 providerStage,
                 providerContext,
                 result.Provenance,
                 failure: null,
-                status: null,
-                cancellationToken);
-            var assetIds = new List<Guid>();
-            foreach (var candidate in result.Value!.Candidates)
-            {
-                var assetId = candidate.CandidateId;
-                var existing = await db.MediaAssets.SingleOrDefaultAsync(value => value.Id == assetId, cancellationToken);
-                if (existing is not null)
+                commit.Outcome switch
                 {
-                    assetIds.Add(existing.Id);
-                    continue;
+                    ProviderResultCommitOutcome.Stale => AiProviderInvocationLedger.DiscardedStaleInput,
+                    ProviderResultCommitOutcome.ConsentRevoked => AiProviderInvocationLedger.DiscardedConsentRevoked,
+                    _ => null
+                },
+                cancellationToken);
+            if (commit.Outcome != ProviderResultCommitOutcome.Committed)
+            {
+                if (commit.Outcome == ProviderResultCommitOutcome.ConsentRevoked)
+                {
+                    throw new JobBlockedException(
+                        commit.BlockerCode ?? "rights.external_ai_processing_required",
+                        "Artwork was not saved because external AI processing consent is no longer active.");
                 }
 
-                var role = isBackgrounds ? "backgrounds" : "candidates";
-                var canonicalKey =
-                    $"workspaces/{project.WorkspaceId:N}/projects/{project.Id:N}/generated/artwork/{pack.Id:N}/{role}/attempt-{job.AttemptNumber}-{job.LeaseToken:N}/{candidate.CandidateNumber}.png";
-                var promoted = await artifacts.PromoteAsync(candidate.Artwork, canonicalKey, cancellationToken);
-                var asset = new MediaAsset
+                throw new JobHandlerException(
+                    "artwork.revision_stale",
+                    "The generated artwork was discarded because its release revision is no longer current.",
+                    retryable: false);
+            }
+        }
+        catch (Exception exception)
+        {
+            var finalException = NormalizePostProviderFailure(
+                exception,
+                providerArtifacts is not null,
+                preparedResultCommitted);
+            var committedAfterAmbiguousFailure = false;
+            if (!preparedResultCommitted)
+            {
+                committedAfterAmbiguousFailure = await CleanupUnreferencedPreparedAssetsAsync(
+                    payload,
+                    isBackgrounds,
+                    preparedAssets,
+                    CancellationToken.None);
+                if (providerArtifacts is not null)
                 {
-                    Id = assetId,
-                    WorkspaceId = project.WorkspaceId,
-                    ProjectId = project.Id,
-                    Kind = isBackgrounds ? AssetKind.Visual : AssetKind.Cover,
-                    Origin = AssetOrigin.Generated,
-                    Purpose = isBackgrounds ? AssetPurpose.CampaignBackground : AssetPurpose.CoverCandidate,
-                    State = AssetState.Ready,
-                    OriginalFileName = isBackgrounds
-                        ? $"campaign-background-{candidate.CandidateNumber}.png"
-                        : $"cover-candidate-{candidate.CandidateNumber}.png",
-                    DeclaredContentType = promoted.ContentType,
-                    DetectedContentType = promoted.ContentType,
-                    DeclaredBytes = promoted.SizeBytes,
-                    ActualBytes = promoted.SizeBytes,
-                    ObjectKey = promoted.ObjectKey,
-                    Revision = pack.Number,
-                    SortOrder = candidate.CandidateNumber,
-                    IsActive = isBackgrounds,
-                    Sha256 = promoted.Sha256,
-                    Width = promoted.Width,
-                    Height = promoted.Height,
-                    ProvenanceJson = JsonSerializer.Serialize(result.Provenance, PipelineHandlerData.Json)
-                };
-                db.MediaAssets.Add(asset);
-                await CreateProtectedProxiesAsync(asset, cancellationToken);
-                assetIds.Add(asset.Id);
+                    await CleanupProviderArtifactsAsync(providerArtifacts, CancellationToken.None);
+                }
+            }
+
+            if (committedAfterAmbiguousFailure &&
+                finalException is not OperationCanceledException &&
+                finalException is not JobHandlerException { Code: "job.lease_lost" })
+            {
+                return;
+            }
+
+            if (ShouldReleaseReservation(finalException, isBackgrounds, pack, job))
+            {
+                await CommitFailureAsync(
+                    job,
+                    payload,
+                    cancellationToken);
+            }
+
+            if (ReferenceEquals(finalException, exception))
+            {
+                throw;
+            }
+
+            throw finalException;
+        }
+    }
+
+    private static Exception NormalizePostProviderFailure(
+        Exception exception,
+        bool providerReturnedSuccess,
+        bool resultCommitted)
+    {
+        if (!providerReturnedSuccess || resultCommitted)
+        {
+            return exception;
+        }
+
+        return PipelineHandlerData.NormalizePostProviderFailure(exception, "artwork");
+    }
+
+    private static ProviderObjectReference CompactBackgroundReference(MediaAsset reference)
+    {
+        // ImageProxy is intentionally watermarked. Thumbnail is the compact,
+        // unwatermarked derivative approved for external reference input.
+        var thumbnail = reference.Derivatives
+            .Where(value => value.Kind == DerivativeKind.Thumbnail)
+            .OrderByDescending(value => value.CreatedAt)
+            .ThenByDescending(value => value.Id)
+            .FirstOrDefault();
+        var contentType = thumbnail?.ContentType?.Trim().ToLowerInvariant();
+        if (thumbnail is null ||
+            string.IsNullOrWhiteSpace(thumbnail.ObjectKey) ||
+            string.IsNullOrWhiteSpace(thumbnail.Sha256) ||
+            thumbnail.Bytes is <= 0 or > MaximumReferenceImageBytes ||
+            string.IsNullOrWhiteSpace(contentType) ||
+            !MediaPolicy.IsImageContentType(contentType))
+        {
+            throw new JobHandlerException(
+                "artwork.reference_thumbnail_invalid",
+                "The approved cover does not have a valid compact reference image.",
+                retryable: false);
+        }
+
+        return new ProviderObjectReference(
+            reference.Id,
+            thumbnail.ObjectKey,
+            thumbnail.Sha256,
+            contentType,
+            thumbnail.Bytes,
+            Width: thumbnail.Width,
+            Height: thumbnail.Height);
+    }
+
+    private async Task<ProviderResultCommitDecision> CurrentCommitStateAsync(
+        LeasedJob job,
+        ArtworkPayload payload,
+        bool isBackgrounds,
+        ArtworkReferenceSnapshot? referenceSnapshot,
+        CancellationToken cancellationToken)
+    {
+        db.ChangeTracker.Clear();
+        var project = await db.Projects.AsNoTracking().SingleOrDefaultAsync(
+            value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
+            cancellationToken);
+        var pack = await db.ArtworkPackRevisions.AsNoTracking().SingleOrDefaultAsync(
+            value => value.Id == payload.ArtworkPackRevisionId && value.ProjectId == payload.ProjectId,
+            cancellationToken);
+        if (project is null || pack is null ||
+            project.CurrentArtworkPackRevisionId != pack.Id ||
+            pack.State is RevisionState.Superseded or RevisionState.Failed ||
+            !isBackgrounds && pack.State != RevisionState.Processing ||
+            isBackgrounds && PipelineHandlerData.Deserialize<List<Guid>>(pack.BackgroundAssetIdsJson)?.Count == 3 ||
+            isBackgrounds && (referenceSnapshot is null || pack.SelectedAssetId != referenceSnapshot.Id) ||
+            !isBackgrounds && !string.Equals(pack.SourceFingerprint, job.InputFingerprint, StringComparison.Ordinal) ||
+            !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+        {
+            return ProviderResultCommitDecision.Stale;
+        }
+
+        var audio = await db.MediaAssets.AsNoTracking().SingleOrDefaultAsync(
+            value => value.ProjectId == project.Id &&
+                     value.WorkspaceId == job.WorkspaceId &&
+                     value.Kind == AssetKind.Audio &&
+                     value.IsActive &&
+                     value.State == AssetState.Ready &&
+                     value.Sha256 != null,
+            cancellationToken);
+        var rights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
+            value => value.ProjectId == project.Id,
+            cancellationToken);
+        var gate = audio is null
+            ? new ArtworkAutomationDecision(false, "audio.not_ready")
+            : ArtworkAutomationGate.Evaluate(
+                project,
+                audio,
+                rights,
+                DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime));
+        if (!gate.Allowed)
+        {
+            return ProviderResultCommitDecision.Blocked(gate.BlockerCode);
+        }
+
+        var reference = isBackgrounds && referenceSnapshot is not null
+            ? await db.MediaAssets.AsNoTracking().SingleOrDefaultAsync(
+                value => value.Id == referenceSnapshot.Id &&
+                         value.ProjectId == project.Id &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.State == AssetState.Ready &&
+                         value.Purpose == AssetPurpose.ApprovedCover,
+                cancellationToken)
+            : null;
+        if (isBackgrounds && (reference is null ||
+                              reference.Version != referenceSnapshot!.Version ||
+                              !string.Equals(reference.Sha256, referenceSnapshot.Sha256, StringComparison.Ordinal)))
+        {
+            return ProviderResultCommitDecision.Stale;
+        }
+
+        return reference is { Origin: AssetOrigin.Uploaded } && rights?.OwnsVisualRights != true
+            ? ProviderResultCommitDecision.Blocked("rights.visual_required")
+            : ProviderResultCommitDecision.Committed;
+    }
+
+    private async Task PrepareArtworkAssetsAsync(
+        ArtworkGenerationResult result,
+        ProviderProvenance provenance,
+        Guid workspaceId,
+        Guid projectId,
+        Guid packId,
+        int packNumber,
+        bool isBackgrounds,
+        LeasedJob job,
+        ICollection<PreparedArtworkAsset> prepared,
+        CancellationToken cancellationToken)
+    {
+        foreach (var candidate in result.Candidates)
+        {
+            var role = isBackgrounds ? "backgrounds" : "candidates";
+            var canonicalKey =
+                $"workspaces/{workspaceId:N}/projects/{projectId:N}/generated/artwork/{packId:N}/{role}/attempt-{job.AttemptNumber}-{job.LeaseToken:N}/{candidate.CandidateNumber}.png";
+            var preparedAsset = new PreparedArtworkAsset(canonicalKey);
+            prepared.Add(preparedAsset);
+            var promoted = await artifacts.PromoteAsync(candidate.Artwork, canonicalKey, cancellationToken);
+            var asset = new MediaAsset
+            {
+                Id = candidate.CandidateId,
+                WorkspaceId = workspaceId,
+                ProjectId = projectId,
+                Kind = isBackgrounds ? AssetKind.Visual : AssetKind.Cover,
+                Origin = AssetOrigin.Generated,
+                Purpose = isBackgrounds ? AssetPurpose.CampaignBackground : AssetPurpose.CoverCandidate,
+                State = AssetState.Ready,
+                OriginalFileName = isBackgrounds
+                    ? $"campaign-background-{candidate.CandidateNumber}.png"
+                    : $"cover-candidate-{candidate.CandidateNumber}.png",
+                DeclaredContentType = promoted.ContentType,
+                DetectedContentType = promoted.ContentType,
+                DeclaredBytes = promoted.SizeBytes,
+                ActualBytes = promoted.SizeBytes,
+                ObjectKey = promoted.ObjectKey,
+                Revision = packNumber,
+                SortOrder = candidate.CandidateNumber,
+                IsActive = isBackgrounds,
+                Sha256 = promoted.Sha256,
+                Width = promoted.Width,
+                Height = promoted.Height,
+                ProvenanceJson = JsonSerializer.Serialize(provenance, PipelineHandlerData.Json)
+            };
+            preparedAsset.SetAsset(asset);
+            await CreateProtectedProxiesAsync(preparedAsset, cancellationToken);
+        }
+    }
+
+    private async Task<ProviderResultCommitDecision> CommitPreparedResultAsync(
+        LeasedJob job,
+        ArtworkPayload payload,
+        bool isBackgrounds,
+        ArtworkReferenceSnapshot? referenceSnapshot,
+        IReadOnlyList<PreparedArtworkAsset> preparedAssets,
+        CancellationToken cancellationToken)
+    {
+        var assetIds = preparedAssets.Select(value => value.Asset.Id).ToArray();
+        for (var attempt = 1; attempt <= PipelineHandlerData.ResultCommitMaxAttempts; attempt++)
+        {
+            db.ChangeTracker.Clear();
+            var project = await db.Projects.SingleOrDefaultAsync(
+                value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
+                cancellationToken);
+            var pack = await db.ArtworkPackRevisions.SingleOrDefaultAsync(
+                value => value.Id == payload.ArtworkPackRevisionId && value.ProjectId == payload.ProjectId,
+                cancellationToken);
+            if (project is null || pack is null ||
+                project.CurrentArtworkPackRevisionId != pack.Id ||
+                pack.State is RevisionState.Superseded or RevisionState.Failed ||
+                !isBackgrounds && pack.State != RevisionState.Processing ||
+                isBackgrounds && (referenceSnapshot is null || pack.SelectedAssetId != referenceSnapshot.Id) ||
+                !isBackgrounds && !string.Equals(pack.SourceFingerprint, job.InputFingerprint, StringComparison.Ordinal) ||
+                !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            var alreadyCommittedIds = PipelineHandlerData.Deserialize<List<Guid>>(
+                isBackgrounds ? pack.BackgroundAssetIdsJson : pack.CandidateAssetIdsJson) ?? [];
+            if (alreadyCommittedIds.Count == assetIds.Length &&
+                alreadyCommittedIds.Order().SequenceEqual(assetIds.Order()) &&
+                (isBackgrounds || pack.State == RevisionState.ReadyForReview))
+            {
+                return ProviderResultCommitDecision.Committed;
+            }
+
+            var audio = await db.MediaAssets.SingleOrDefaultAsync(
+                value => value.ProjectId == project.Id &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.Kind == AssetKind.Audio &&
+                         value.IsActive &&
+                         value.State == AssetState.Ready &&
+                         value.Sha256 != null,
+                cancellationToken);
+            var rights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
+                value => value.ProjectId == project.Id,
+                cancellationToken);
+            var gate = audio is null
+                ? new ArtworkAutomationDecision(false, "audio.not_ready")
+                : ArtworkAutomationGate.Evaluate(
+                    project,
+                    audio,
+                    rights,
+                    DateOnly.FromDateTime(timeProvider.GetUtcNow().UtcDateTime));
+            if (!gate.Allowed)
+            {
+                return ProviderResultCommitDecision.Blocked(gate.BlockerCode);
+            }
+
+            var reference = isBackgrounds && referenceSnapshot is not null
+                ? await db.MediaAssets.AsNoTracking().SingleOrDefaultAsync(
+                    value => value.Id == referenceSnapshot.Id &&
+                             value.ProjectId == project.Id &&
+                             value.WorkspaceId == job.WorkspaceId &&
+                             value.State == AssetState.Ready &&
+                             value.Purpose == AssetPurpose.ApprovedCover,
+                    cancellationToken)
+                : null;
+            if (isBackgrounds && (reference is null ||
+                                  reference.Version != referenceSnapshot!.Version ||
+                                  !string.Equals(reference.Sha256, referenceSnapshot.Sha256, StringComparison.Ordinal)))
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            if (reference is { Origin: AssetOrigin.Uploaded } && rights?.OwnsVisualRights != true)
+            {
+                return ProviderResultCommitDecision.Blocked("rights.visual_required");
+            }
+
+            foreach (var prepared in preparedAssets)
+            {
+                var exists = await db.MediaAssets.AsNoTracking().AnyAsync(
+                    value => value.Id == prepared.Asset.Id,
+                    cancellationToken);
+                if (exists) continue;
+                // A failed SaveChanges attempt leaves relationship fixup on the
+                // materialized instances even after ChangeTracker.Clear(). Rebind
+                // them to this attempt's authoritative graph and track each row
+                // explicitly so EF does not traverse stale navigation instances.
+                prepared.Asset.Project = project;
+                prepared.Asset.Derivatives = prepared.Derivatives;
+                db.Entry(prepared.Asset).State = EntityState.Added;
+                foreach (var derivative in prepared.Derivatives)
+                {
+                    derivative.Asset = prepared.Asset;
+                    db.Entry(derivative).State = EntityState.Added;
+                }
             }
 
             if (isBackgrounds)
@@ -533,21 +967,168 @@ public sealed class ArtworkGenerationJobHandler(
                     cancellationToken);
             }
 
-            PipelineOutbox.Reconcile(db, project, isBackgrounds ? "artwork.backgrounds_completed" : "artwork.completed", job.Id);
-            await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+            PipelineOutbox.Reconcile(
+                db,
+                project,
+                isBackgrounds ? "artwork.backgrounds_completed" : "artwork.completed",
+                job.Id);
+            try
+            {
+                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                return ProviderResultCommitDecision.Committed;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < PipelineHandlerData.ResultCommitMaxAttempts)
+            {
+            }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                throw PipelineHandlerData.ResultCommitConflict("artwork", exception);
+            }
         }
-        catch (Exception exception) when (ShouldReleaseReservation(exception, isBackgrounds, pack, job))
+
+        throw new InvalidOperationException("The artwork result commit loop did not terminate.");
+    }
+
+    private async Task CommitFailureAsync(
+        LeasedJob job,
+        ArtworkPayload payload,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= PipelineHandlerData.ResultCommitMaxAttempts; attempt++)
         {
-            DiscardUncommittedCoverAssets(db, project.Id);
+            db.ChangeTracker.Clear();
+            var project = await db.Projects.SingleOrDefaultAsync(
+                value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
+                cancellationToken);
+            var pack = await db.ArtworkPackRevisions.SingleOrDefaultAsync(
+                value => value.Id == payload.ArtworkPackRevisionId && value.ProjectId == payload.ProjectId,
+                cancellationToken);
+            if (project is null || pack is null || pack.State != RevisionState.Processing ||
+                !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+            {
+                return;
+            }
+
             pack.State = RevisionState.Failed;
             await ArtworkCreditLedger.ReleaseReservationAsync(
                 db,
                 project.WorkspaceId,
                 pack.Id,
                 cancellationToken);
-            await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
-            throw;
+            try
+            {
+                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < PipelineHandlerData.ResultCommitMaxAttempts)
+            {
+            }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                throw PipelineHandlerData.ResultCommitConflict("artwork failure", exception);
+            }
         }
+    }
+
+    private async Task CleanupProviderArtifactsAsync(
+        IReadOnlyList<ProviderArtifactManifest> providerArtifacts,
+        CancellationToken cancellationToken)
+    {
+        foreach (var artifact in providerArtifacts.Where(value => value.Materialized))
+        {
+            try
+            {
+                await storage.DeleteAsync(artifact.ObjectKey, cancellationToken);
+            }
+            catch
+            {
+                // Revocation or invalidation wins; cleanup remains best effort.
+            }
+        }
+    }
+
+    private async Task<bool> CleanupUnreferencedPreparedAssetsAsync(
+        ArtworkPayload payload,
+        bool isBackgrounds,
+        IReadOnlyList<PreparedArtworkAsset> preparedAssets,
+        CancellationToken cancellationToken)
+    {
+        var objectKeys = preparedAssets
+            .SelectMany(value => value.OwnedObjectKeys)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (objectKeys.Length == 0) return false;
+
+        HashSet<string> referencedKeys;
+        ArtworkPackRevision? pack;
+        try
+        {
+            db.ChangeTracker.Clear();
+            var referencedAssetKeys = await db.MediaAssets
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(value => objectKeys.Contains(value.ObjectKey))
+                .Select(value => value.ObjectKey)
+                .ToListAsync(cancellationToken);
+            var referencedDerivativeKeys = await db.MediaDerivatives
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(value => objectKeys.Contains(value.ObjectKey))
+                .Select(value => value.ObjectKey)
+                .ToListAsync(cancellationToken);
+            referencedKeys = referencedAssetKeys
+                .Concat(referencedDerivativeKeys)
+                .ToHashSet(StringComparer.Ordinal);
+            pack = await db.ArtworkPackRevisions
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .SingleOrDefaultAsync(
+                    value => value.Id == payload.ArtworkPackRevisionId &&
+                             value.ProjectId == payload.ProjectId,
+                    cancellationToken);
+        }
+        catch
+        {
+            // The commit outcome is unknown. Leaving possible orphans is safer
+            // than deleting an object that a durable database row may reference.
+            return false;
+        }
+
+        foreach (var objectKey in objectKeys.Where(value => !referencedKeys.Contains(value)))
+        {
+            try
+            {
+                await storage.DeleteAsync(objectKey, cancellationToken);
+            }
+            catch
+            {
+                // The database did not accept the result; cleanup remains best effort.
+            }
+        }
+
+        var preparedIds = preparedAssets
+            .Where(value => value.HasAsset)
+            .Select(value => value.Asset.Id)
+            .Order()
+            .ToArray();
+        var committedIds = PipelineHandlerData.Deserialize<List<Guid>>(
+            (isBackgrounds ? pack?.BackgroundAssetIdsJson : pack?.CandidateAssetIdsJson) ?? "[]") ?? [];
+        return preparedIds.Length == 3 &&
+               referencedKeys.Count == objectKeys.Length &&
+               committedIds.Order().SequenceEqual(preparedIds) &&
+               (isBackgrounds || pack?.State == RevisionState.ReadyForReview);
+    }
+
+    private sealed class PreparedArtworkAsset(string canonicalObjectKey)
+    {
+        private MediaAsset? _asset;
+
+        public MediaAsset Asset => _asset!;
+        public bool HasAsset => _asset is not null;
+        public List<MediaDerivative> Derivatives { get; } = [];
+        public HashSet<string> OwnedObjectKeys { get; } = new(StringComparer.Ordinal) { canonicalObjectKey };
+
+        public void SetAsset(MediaAsset asset) => _asset = asset;
     }
 
     internal static bool ShouldReleaseReservation(
@@ -570,27 +1151,6 @@ public sealed class ArtworkGenerationJobHandler(
         };
     }
 
-    private static void DiscardUncommittedCoverAssets(Hook2StreamDbContext db, Guid projectId)
-    {
-        var candidates = db.ChangeTracker.Entries<MediaAsset>()
-            .Where(value => value.State == EntityState.Added &&
-                            value.Entity.ProjectId == projectId &&
-                            value.Entity.Purpose == AssetPurpose.CoverCandidate)
-            .ToArray();
-        var candidateIds = candidates.Select(value => value.Entity.Id).ToHashSet();
-        foreach (var derivative in db.ChangeTracker.Entries<MediaDerivative>()
-                     .Where(value => value.State == EntityState.Added &&
-                                     candidateIds.Contains(value.Entity.AssetId)))
-        {
-            derivative.State = EntityState.Detached;
-        }
-
-        foreach (var asset in candidates)
-        {
-            asset.State = EntityState.Detached;
-        }
-    }
-
     private async Task<IReadOnlyList<string>> ShortExcerptsAsync(
         ReleaseProject project,
         CancellationToken cancellationToken)
@@ -609,8 +1169,11 @@ public sealed class ArtworkGenerationJobHandler(
             ? $"#{ffmpegColor[2..]}"
             : ffmpegColor;
 
-    private async Task CreateProtectedProxiesAsync(MediaAsset asset, CancellationToken cancellationToken)
+    private async Task CreateProtectedProxiesAsync(
+        PreparedArtworkAsset prepared,
+        CancellationToken cancellationToken)
     {
+        var asset = prepared.Asset;
         var workDirectory = Path.Combine(Path.GetTempPath(), "hook2stream-artwork-proxy", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workDirectory);
         var source = Path.Combine(workDirectory, "source.png");
@@ -643,9 +1206,14 @@ public sealed class ArtworkGenerationJobHandler(
 
             var proxyKey = $"{asset.ObjectKey}.preview.webp";
             var thumbnailKey = $"{asset.ObjectKey}.thumbnail.webp";
+            // Register ownership before each upload. A storage client may have
+            // persisted the object even if it subsequently reports a failure.
+            prepared.OwnedObjectKeys.Add(proxyKey);
             await storage.UploadAsync(proxyKey, proxy, "image/webp", cancellationToken);
+            prepared.OwnedObjectKeys.Add(thumbnailKey);
             await storage.UploadAsync(thumbnailKey, thumbnail, "image/webp", cancellationToken);
-            db.MediaDerivatives.AddRange(
+            prepared.Derivatives.AddRange(
+            [
                 new MediaDerivative
                 {
                     AssetId = asset.Id,
@@ -665,7 +1233,8 @@ public sealed class ArtworkGenerationJobHandler(
                     ContentType = "image/webp",
                     Bytes = new FileInfo(thumbnail).Length,
                     Sha256 = await PipelineHandlerData.Sha256Async(thumbnail, cancellationToken)
-                });
+                }
+            ]);
         }
         finally
         {
@@ -680,6 +1249,8 @@ public sealed class ArtworkGenerationJobHandler(
         string? Style,
         string? Mode,
         int? Count);
+
+    private sealed record ArtworkReferenceSnapshot(Guid Id, string? Sha256, long Version);
 }
 
 public sealed class CampaignGenerationJobHandler(
@@ -698,6 +1269,9 @@ public sealed class CampaignGenerationJobHandler(
             cancellationToken);
         var project = await db.Projects.SingleAsync(value => value.Id == payload.ProjectId, cancellationToken);
         if (project.CurrentCampaignPlanRevisionId != revision.Id ||
+            project.CurrentTranscriptRevisionId != revision.TranscriptRevisionId ||
+            project.CurrentArtworkPackRevisionId != revision.ArtworkPackRevisionId ||
+            project.CurrentHookSetRevisionId != revision.HookSetRevisionId ||
             revision.State is RevisionState.Superseded or RevisionState.Failed)
         {
             throw new JobHandlerException(
@@ -725,13 +1299,47 @@ public sealed class CampaignGenerationJobHandler(
                 rightsDecision.BlockerCode ?? "rights.external_ai_processing_required",
                 "Campaign generation is paused until rights and external AI processing are confirmed.");
         }
-        var hooksRevision = await db.HookSetRevisions.SingleAsync(value => value.Id == revision.HookSetRevisionId, cancellationToken);
-        var artworkRevision = await db.ArtworkPackRevisions.SingleAsync(value => value.Id == revision.ArtworkPackRevisionId, cancellationToken);
+        var transcriptRevision = await db.TranscriptRevisions.SingleOrDefaultAsync(
+            value => value.Id == revision.TranscriptRevisionId &&
+                     value.ProjectId == project.Id &&
+                     value.State == RevisionState.Approved,
+            cancellationToken);
+        var hooksRevision = await db.HookSetRevisions.SingleOrDefaultAsync(
+            value => value.Id == revision.HookSetRevisionId &&
+                     value.ProjectId == project.Id &&
+                     value.State == RevisionState.Approved,
+            cancellationToken);
+        var artworkRevision = await db.ArtworkPackRevisions.SingleOrDefaultAsync(
+            value => value.Id == revision.ArtworkPackRevisionId &&
+                     value.ProjectId == project.Id &&
+                     value.State == RevisionState.Approved,
+            cancellationToken);
+        if (transcriptRevision is null || hooksRevision is null || artworkRevision is null ||
+            hooksRevision.TranscriptRevisionId != transcriptRevision.Id)
+        {
+            throw new JobHandlerException(
+                "campaign.dependencies_stale",
+                "The queued campaign no longer matches the approved release dependencies.",
+                retryable: false);
+        }
+
         var selectedCover = artworkRevision.SelectedAssetId is { } selectedCoverId
             ? await db.MediaAssets.SingleOrDefaultAsync(
-                value => value.Id == selectedCoverId && value.ProjectId == project.Id,
+                value => value.Id == selectedCoverId &&
+                         value.ProjectId == project.Id &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.State == AssetState.Ready &&
+                         value.Purpose == AssetPurpose.ApprovedCover,
                 cancellationToken)
             : null;
+        if (selectedCover is null)
+        {
+            throw new JobHandlerException(
+                "campaign.dependencies_stale",
+                "The approved campaign cover is no longer available.",
+                retryable: false);
+        }
+
         if (selectedCover is { Origin: AssetOrigin.Uploaded } && currentRights?.OwnsVisualRights != true)
         {
             throw new JobBlockedException(
@@ -746,10 +1354,25 @@ public sealed class CampaignGenerationJobHandler(
                 "The queued campaign no longer matches the current brand kit.",
                 retryable: false);
         }
+        if (!string.Equals(
+                PipelineHandlerData.CampaignFingerprint(project, transcriptRevision, artworkRevision, hooksRevision, brand.Version),
+                revision.SourceFingerprint,
+                StringComparison.Ordinal))
+        {
+            throw new JobHandlerException(
+                "campaign.revision_stale",
+                "The queued campaign no longer matches the current release inputs.",
+                retryable: false);
+        }
+
         var hooks = PipelineHandlerData.Deserialize<List<HookRequest>>(hooksRevision.HooksJson) ?? [];
         var backgroundIds = PipelineHandlerData.Deserialize<List<Guid>>(artworkRevision.BackgroundAssetIdsJson) ?? [];
         var backgrounds = await db.MediaAssets
-            .Where(value => backgroundIds.Contains(value.Id) && value.State == AssetState.Ready)
+            .Where(value => backgroundIds.Contains(value.Id) &&
+                            value.ProjectId == project.Id &&
+                            value.WorkspaceId == job.WorkspaceId &&
+                            value.State == AssetState.Ready &&
+                            value.Purpose == AssetPurpose.CampaignBackground)
             .OrderBy(value => value.SortOrder)
             .ToListAsync(cancellationToken);
         if (backgroundIds.Count != 3 || backgrounds.Count != 3)
@@ -779,7 +1402,8 @@ public sealed class CampaignGenerationJobHandler(
         var result = await provider.PlanAsync(planningRequest, cancellationToken);
         if (!result.IsSuccess)
         {
-            await invocations.RecordAsync(
+            await PipelineHandlerData.TryRecordInvocationAsync(
+                invocations,
                 job,
                 "campaign",
                 providerContext,
@@ -789,38 +1413,22 @@ public sealed class CampaignGenerationJobHandler(
                 cancellationToken);
             if (!result.Failure!.Retryable)
             {
-                revision.State = RevisionState.Failed;
-                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                await CommitFailureAsync(
+                    job,
+                    payload,
+                    cancellationToken);
             }
 
             throw PipelineHandlerData.Failure(result.Failure!);
         }
 
-        var latestRights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
-            value => value.ProjectId == project.Id,
-            cancellationToken);
-        var latestDecision = currentAudio is null
-            ? new ExternalAiProcessingDecision(false, "audio.not_ready")
-            : ExternalAiProcessingGate.Evaluate(project, currentAudio, latestRights);
-        if (!latestDecision.Allowed)
+        try
         {
-            await invocations.RecordAsync(
-                job,
-                "campaign",
-                providerContext,
-                result.Provenance,
-                failure: null,
-                AiProviderInvocationLedger.DiscardedConsentRevoked,
-                cancellationToken);
-            throw new JobBlockedException(
-                latestDecision.BlockerCode ?? "rights.external_ai_processing_required",
-                "Campaign copy was not saved because external AI processing consent is no longer active.");
-        }
-
         var validation = CampaignPlanContractValidator.Validate(planningRequest, result.Value!.Items);
         if (!validation.IsValid)
         {
-            await invocations.RecordAsync(
+            await PipelineHandlerData.TryRecordInvocationAsync(
+                invocations,
                 job,
                 "campaign",
                 providerContext,
@@ -828,20 +1436,13 @@ public sealed class CampaignGenerationJobHandler(
                 failure: null,
                 AiProviderInvocationLedger.Rejected,
                 cancellationToken);
+            await CommitFailureAsync(job, payload, cancellationToken);
             throw new JobHandlerException(
                 "campaign.recipe_invalid",
                 "The campaign provider returned an invalid 18-item campaign recipe.",
                 retryable: false);
         }
 
-        await invocations.RecordAsync(
-            job,
-            "campaign",
-            providerContext,
-            result.Provenance,
-            failure: null,
-            status: null,
-            cancellationToken);
         var items = result.Value.Items.Select((value, index) =>
         {
             var background = backgrounds[index % backgrounds.Count];
@@ -860,12 +1461,218 @@ public sealed class CampaignGenerationJobHandler(
                 value.Caption,
                 MergeCampaignComposition(value, selectedBackgroundId, brand));
         }).ToArray();
+        var itemsJson = JsonSerializer.Serialize(items, PipelineHandlerData.Json);
+        var commit = await CommitResultAsync(
+            job,
+            payload,
+            itemsJson,
+            selectedCover.Id,
+            backgroundIds,
+            cancellationToken);
+        await PipelineHandlerData.TryRecordInvocationAsync(
+            invocations,
+            job,
+            "campaign",
+            providerContext,
+            result.Provenance,
+            failure: null,
+            commit.Outcome switch
+            {
+                ProviderResultCommitOutcome.Stale => AiProviderInvocationLedger.DiscardedStaleInput,
+                ProviderResultCommitOutcome.ConsentRevoked => AiProviderInvocationLedger.DiscardedConsentRevoked,
+                _ => null
+            },
+            cancellationToken);
+        if (commit.Outcome == ProviderResultCommitOutcome.ConsentRevoked)
+        {
+            throw new JobBlockedException(
+                commit.BlockerCode ?? "rights.external_ai_processing_required",
+                "Campaign copy was not saved because external AI processing consent is no longer active.");
+        }
+        }
+        catch (Exception exception)
+        {
+            var finalException = PipelineHandlerData.NormalizePostProviderFailure(exception, "campaign");
+            if (ReferenceEquals(finalException, exception)) throw;
+            throw finalException;
+        }
+    }
 
-        revision.ItemsJson = JsonSerializer.Serialize(items, PipelineHandlerData.Json);
-        revision.State = RevisionState.ReadyForReview;
-        project.State = ProjectState.CampaignReady;
-        PipelineOutbox.Reconcile(db, project, "campaign.completed", job.Id);
-        await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+    private async Task<ProviderResultCommitDecision> CommitResultAsync(
+        LeasedJob job,
+        CampaignPayload payload,
+        string itemsJson,
+        Guid expectedSelectedCoverId,
+        IReadOnlyCollection<Guid> expectedBackgroundIds,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= PipelineHandlerData.ResultCommitMaxAttempts; attempt++)
+        {
+            db.ChangeTracker.Clear();
+            var revision = await db.CampaignPlanRevisions.SingleOrDefaultAsync(
+                value => value.Id == payload.CampaignRevisionId &&
+                         value.ProjectId == payload.ProjectId,
+                cancellationToken);
+            var project = await db.Projects.SingleOrDefaultAsync(
+                value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId,
+                cancellationToken);
+            if (project is null || revision is null ||
+                project.CurrentCampaignPlanRevisionId != revision.Id ||
+                project.CurrentTranscriptRevisionId != revision.TranscriptRevisionId ||
+                project.CurrentArtworkPackRevisionId != revision.ArtworkPackRevisionId ||
+                project.CurrentHookSetRevisionId != revision.HookSetRevisionId ||
+                revision.State != RevisionState.Processing ||
+                !string.Equals(revision.SourceFingerprint, job.InputFingerprint, StringComparison.Ordinal) ||
+                !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            var transcript = await db.TranscriptRevisions.AsNoTracking().SingleOrDefaultAsync(
+                value => value.Id == revision.TranscriptRevisionId &&
+                         value.ProjectId == project.Id &&
+                         value.State == RevisionState.Approved,
+                cancellationToken);
+            var hooks = await db.HookSetRevisions.AsNoTracking().SingleOrDefaultAsync(
+                value => value.Id == revision.HookSetRevisionId &&
+                         value.ProjectId == project.Id &&
+                         value.State == RevisionState.Approved,
+                cancellationToken);
+            var artwork = await db.ArtworkPackRevisions.AsNoTracking().SingleOrDefaultAsync(
+                value => value.Id == revision.ArtworkPackRevisionId &&
+                         value.ProjectId == project.Id &&
+                         value.State == RevisionState.Approved,
+                cancellationToken);
+            var backgroundIds = PipelineHandlerData.Deserialize<List<Guid>>(artwork?.BackgroundAssetIdsJson ?? "[]") ?? [];
+            if (transcript is null || hooks is null || artwork is null ||
+                hooks.TranscriptRevisionId != transcript.Id ||
+                artwork.SelectedAssetId != expectedSelectedCoverId ||
+                backgroundIds.Count != 3 ||
+                !backgroundIds.Order().SequenceEqual(expectedBackgroundIds.Order()))
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            var currentBrandVersion = await db.BrandKits.AsNoTracking()
+                .Where(value => value.WorkspaceId == project.WorkspaceId)
+                .Select(value => value.Version)
+                .SingleAsync(cancellationToken);
+            if (!string.Equals(
+                    PipelineHandlerData.CampaignFingerprint(project, transcript, artwork, hooks, currentBrandVersion),
+                    revision.SourceFingerprint,
+                    StringComparison.Ordinal))
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            var selectedCover = await db.MediaAssets.AsNoTracking().SingleOrDefaultAsync(
+                value => value.Id == expectedSelectedCoverId &&
+                         value.ProjectId == project.Id &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.State == AssetState.Ready &&
+                         value.Purpose == AssetPurpose.ApprovedCover,
+                cancellationToken);
+            var readyBackgroundCount = await db.MediaAssets.AsNoTracking().CountAsync(
+                value => backgroundIds.Contains(value.Id) &&
+                         value.ProjectId == project.Id &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.State == AssetState.Ready &&
+                         value.Purpose == AssetPurpose.CampaignBackground,
+                cancellationToken);
+            if (selectedCover is null || readyBackgroundCount != 3)
+            {
+                return ProviderResultCommitDecision.Stale;
+            }
+
+            var audio = await db.MediaAssets.SingleOrDefaultAsync(
+                value => value.ProjectId == project.Id &&
+                         value.WorkspaceId == job.WorkspaceId &&
+                         value.Kind == AssetKind.Audio &&
+                         value.IsActive &&
+                         value.State == AssetState.Ready,
+                cancellationToken);
+            var rights = await db.RightsAttestations.AsNoTracking().SingleOrDefaultAsync(
+                value => value.ProjectId == project.Id,
+                cancellationToken);
+            var gate = audio is null
+                ? new ExternalAiProcessingDecision(false, "audio.not_ready")
+                : ExternalAiProcessingGate.Evaluate(project, audio, rights);
+            if (!gate.Allowed)
+            {
+                return ProviderResultCommitDecision.Blocked(gate.BlockerCode);
+            }
+
+            if (selectedCover is { Origin: AssetOrigin.Uploaded } && rights?.OwnsVisualRights != true)
+            {
+                return ProviderResultCommitDecision.Blocked("rights.visual_required");
+            }
+
+            if (payload.BrandKitVersion is { } queuedBrandVersion)
+            {
+                if (currentBrandVersion != queuedBrandVersion)
+                {
+                    return ProviderResultCommitDecision.Stale;
+                }
+            }
+
+            revision.ItemsJson = itemsJson;
+            revision.State = RevisionState.ReadyForReview;
+            project.State = ProjectState.CampaignReady;
+            PipelineOutbox.Reconcile(db, project, "campaign.completed", job.Id);
+            try
+            {
+                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                return ProviderResultCommitDecision.Committed;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < PipelineHandlerData.ResultCommitMaxAttempts)
+            {
+            }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                throw PipelineHandlerData.ResultCommitConflict("campaign", exception);
+            }
+        }
+
+        throw new InvalidOperationException("The campaign result commit loop did not terminate.");
+    }
+
+    private async Task CommitFailureAsync(
+        LeasedJob job,
+        CampaignPayload payload,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= PipelineHandlerData.ResultCommitMaxAttempts; attempt++)
+        {
+            db.ChangeTracker.Clear();
+            var revision = await db.CampaignPlanRevisions.SingleOrDefaultAsync(
+                value => value.Id == payload.CampaignRevisionId &&
+                         value.ProjectId == payload.ProjectId,
+                cancellationToken);
+            var currentCampaignId = await db.Projects.AsNoTracking()
+                .Where(value => value.Id == payload.ProjectId && value.WorkspaceId == job.WorkspaceId)
+                .Select(value => value.CurrentCampaignPlanRevisionId)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (revision is null || currentCampaignId != revision.Id ||
+                revision.State != RevisionState.Processing ||
+                !await PipelineHandlerData.OwnsLeaseAsync(db, job, cancellationToken))
+            {
+                return;
+            }
+
+            revision.State = RevisionState.Failed;
+            try
+            {
+                await PipelineHandlerData.CommitAsync(db, job, cancellationToken);
+                return;
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < PipelineHandlerData.ResultCommitMaxAttempts)
+            {
+            }
+            catch (DbUpdateConcurrencyException exception)
+            {
+                throw PipelineHandlerData.ResultCommitConflict("campaign failure", exception);
+            }
+        }
     }
 
     private static string MergeCampaignComposition(
@@ -1337,6 +2144,8 @@ public sealed record VideoCompositionControls(
 
 internal static class PipelineHandlerData
 {
+    public const int ResultCommitMaxAttempts = 3;
+
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -1399,6 +2208,90 @@ internal static class PipelineHandlerData
                 "job.input_stale",
                 "The queued operation no longer matches the current revision.",
                 retryable: false);
+        }
+    }
+
+    public static string CampaignFingerprint(
+        ReleaseProject project,
+        TranscriptRevision transcript,
+        ArtworkPackRevision artwork,
+        HookSetRevision hooks,
+        long brandVersion) =>
+        Hash(
+            $"{transcript.Id:N}:{transcript.Version}:{artwork.Id:N}:{artwork.Version}:{hooks.Id:N}:{hooks.Version}:" +
+            $"{project.ArtistName}:{project.TrackTitle}:{project.Language}:{project.Mode}:{project.ReleaseDate:O}:{project.CampaignStartDate:O}:" +
+            $"{project.IsInstrumental}:{project.IsInstrumentalConfirmed}:brand:{brandVersion}");
+
+    public static Task<bool> OwnsLeaseAsync(
+        Hook2StreamDbContext db,
+        LeasedJob job,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return db.Jobs.AsNoTracking().AnyAsync(
+            value => value.Id == job.Id &&
+                     value.State == JobState.Running &&
+                     value.LeaseOwner == job.LeaseOwner &&
+                     value.LeaseToken == job.LeaseToken &&
+                     value.LeaseExpiresAt > now,
+            cancellationToken);
+    }
+
+    public static JobHandlerException ResultCommitConflict(
+        string stage,
+        DbUpdateConcurrencyException exception) =>
+        new(
+            "provider.result_commit_conflict",
+            $"The completed {stage} result could not be saved because the release kept changing.",
+            retryable: false,
+            exception);
+
+    public static Exception NormalizePostProviderFailure(Exception exception, string stage)
+    {
+        if (exception is OperationCanceledException or JobBlockedException or JobDeferredException ||
+            exception is JobHandlerException { Code: "job.lease_lost" } ||
+            exception is JobHandlerException { Retryable: false })
+        {
+            return exception;
+        }
+
+        return new JobHandlerException(
+            "provider.result_processing_failed",
+            $"The completed {stage} result could not be finalized. Start a new operation to try again.",
+            retryable: false,
+            exception);
+    }
+
+    public static async Task TryRecordInvocationAsync(
+        IAiProviderInvocationWriter writer,
+        LeasedJob job,
+        string stage,
+        ProviderExecutionContext context,
+        ProviderProvenance provenance,
+        ProviderFailure? failure,
+        string? status,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await writer.RecordAsync(
+                job,
+                stage,
+                context,
+                provenance,
+                failure,
+                status,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Invocation recording is an audit side effect. A storage or logging
+            // failure must never turn an already-classified provider outcome or
+            // committed result into a retry of the paid provider call.
         }
     }
 
