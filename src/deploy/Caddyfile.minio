@@ -1,0 +1,146 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$APP_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+		-Server
+	}
+
+	@api_ready path /health/api-ready
+	handle @api_ready {
+		rewrite * /health/ready
+		reverse_proxy api:8080 {
+			header_up Host {$APP_DOMAIN}
+
+			@ready status 200
+			handle_response @ready {
+				header Content-Type "text/plain; charset=utf-8"
+				respond "ready" 200
+			}
+
+			handle_response {
+				header Content-Type "text/plain; charset=utf-8"
+				respond "not ready" 503
+			}
+		}
+	}
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy api:8080 {
+			health_uri /health/ready
+			health_headers {
+				Host {$APP_DOMAIN}
+			}
+			health_interval 30s
+			health_timeout 5s
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			health_uri /health/ready
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+{$S3_PUBLIC_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# The S3 API must keep its original host, path, and query string because
+	# AWS Signature V4 signs all three. The admin API and metrics stay private.
+	@minio_private path /minio/admin/* /minio/v2/metrics/* /minio/metrics/*
+	handle @minio_private {
+		respond "not found" 404
+	}
+
+	request_body {
+		max_size 300MB
+	}
+
+	# MinIO CE has only cluster-wide CORS. Keep it disabled and grant browser
+	# access solely to the media bucket, for the exact application origin.
+	# OPTIONS is not signed; proxied requests still preserve every SigV4 input.
+	@media_preflight {
+		method OPTIONS
+		path /{$S3_MEDIA_BUCKET}/*
+		header Origin https://{$APP_DOMAIN}
+		header_regexp Access-Control-Request-Method ^(GET|HEAD|PUT|POST)$
+	}
+	handle @media_preflight {
+		header {
+			Access-Control-Allow-Origin "https://{$APP_DOMAIN}"
+			Access-Control-Allow-Methods "GET, HEAD, PUT, POST"
+			Access-Control-Allow-Headers "{http.request.header.Access-Control-Request-Headers}"
+			Access-Control-Expose-Headers "ETag"
+			Access-Control-Max-Age "3600"
+			Vary "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+		}
+		respond 204
+	}
+
+	@media_cors {
+		path /{$S3_MEDIA_BUCKET}/*
+		header Origin https://{$APP_DOMAIN}
+	}
+	handle @media_cors {
+		header {
+			Access-Control-Allow-Origin "https://{$APP_DOMAIN}"
+			Access-Control-Expose-Headers "ETag"
+			Vary "Origin"
+		}
+		reverse_proxy minio:9000 {
+			header_up Host {http.request.hostport}
+			health_uri /minio/health/ready
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+
+	handle {
+		reverse_proxy minio:9000 {
+			header_up Host {http.request.hostport}
+			health_uri /minio/health/ready
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

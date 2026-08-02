@@ -19,6 +19,8 @@ equivalent root-owned directory outside the checkout:
 | `backup_encryption_key_id` | stable identifier recorded with new backups |
 | `backup_encryption_passphrase` | client-side backup encryption |
 | `backup_heartbeat_url` | PostgreSQL backup success monitor; may be empty to disable |
+| `minio_root_user` | MinIO server and one-shot initializer only; required when `STORAGE_MODE=minio` |
+| `minio_root_password` | MinIO server and one-shot initializer only; required when `STORAGE_MODE=minio` |
 
 Use one value per file; a trailing newline is allowed. Set `SECRETS_GID` to a
 dedicated numeric group (the default is `2000`), make the directory
@@ -41,6 +43,19 @@ values with a cryptographic RNG: use at least 32 random bytes for the PostgreSQL
 password and at least 48 random bytes for the backup encryption passphrase.
 Supply externally issued provider secrets unchanged. Never commit or copy these
 files into an image.
+
+When `STORAGE_MODE=minio`, generate a distinct random root username and at
+least 32 random bytes for `minio_root_password`. The initializer uses the root
+identity only to create the two buckets and their scoped service identities.
+Applications and the PostgreSQL backup sidecar continue to use the existing
+runtime/bootstrap/backup S3 files and never mount either MinIO root secret.
+The MinIO console is disabled and the root identity must not be used from a
+browser or stored in `.env`.
+Re-running the initializer updates a secret key when its access-key ID stays
+the same. Changing an access-key ID creates a new MinIO user but cannot safely
+infer which old ID should be revoked; after a credential cutover, verify the
+new identity and explicitly remove the retired user with the administrative
+client.
 The repository-root `.dockerignore` excludes this entire directory from every
 application build context; keep secret files outside the checkout in production
 and treat that exclusion as defense in depth.

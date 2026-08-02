@@ -96,7 +96,7 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, Po
 - OpenAPI contract и сгенерированные TypeScript-типы;
 - unit, API integration, AppHost topology и Playwright smoke tests.
 
-Текущий срез реализует MP3-first orchestration, revision contracts, UI review surfaces, OpenRouter adapters для transcription/artwork/campaign, детерминированный audio analysis и FFmpeg clean render, а также валидируемую ZIP assembly. Production требует `OPENROUTER_API_KEY` со строгим ZDR, Stripe catalog/webhooks, infrastructure configuration и staging/golden-media validation. Локальные fixture providers используются только в development/tests и никогда не подменяют production AI-результат.
+Текущий срез реализует MP3-first orchestration, revision contracts, UI review surfaces, OpenRouter adapters для transcription/artwork/campaign, детерминированный audio analysis и FFmpeg clean render, а также валидируемую ZIP assembly. Production требует `OPENROUTER_API_KEY` со строгим ZDR, Stripe catalog/webhooks, infrastructure configuration и staging/golden-media validation. Локальные fixture providers используются только в development/tests и никогда не подменяют production AI-результат. Deployment bundle также содержит изолированный single-user MinIO-профиль для временного VPS staging; он не заменяет внешний S3 в публичном или production-контуре.
 
 ## Быстрый запуск
 

@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18.3
@@ -26,30 +26,14 @@ jobs:
           --health-retries 10
     env:
       HOOK2STREAM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
-      HOOK2STREAM_TEST_MINIO: http://localhost:9000
-      HOOK2STREAM_TEST_MINIO_PUBLIC: http://127.0.0.1:9000
-      HOOK2STREAM_TEST_MINIO_ACCESS_KEY: hook2stream-ci
-      HOOK2STREAM_TEST_MINIO_SECRET_KEY: hook2stream-ci-secret
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start MinIO acceptance dependency
-        run: |
-          docker run --detach --rm \
-            --name hook2stream-ci-minio \
-            --publish 127.0.0.1:9000:9000 \
-            --env MINIO_ROOT_USER=hook2stream-ci \
-            --env MINIO_ROOT_PASSWORD=hook2stream-ci-secret \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z \
-            server /data
-          for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs hook2stream-ci-minio
-          exit 1
+      - name: Build audited MinIO acceptance dependency
+        run: docker build --file src/deploy/minio/Dockerfile --tag hook2stream-minio:ci .
+
+      - name: Start and verify MinIO/Caddy acceptance dependency
+        run: src/ci/start-minio-acceptance.sh "$GITHUB_ENV"
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -72,6 +56,12 @@ jobs:
 
       - run: npx --prefix src/web playwright install --with-deps chromium firefox webkit
       - run: npm run test:e2e:fast --prefix src/web
+
+      - name: Dump MinIO acceptance logs on failure
+        if: failure()
+        run: |
+          docker logs hook2stream-ci-minio || true
+          docker logs hook2stream-ci-caddy || true
 
       - if: always()
         uses: actions/upload-artifact@v4
@@ -123,7 +113,7 @@ jobs:
   containers:
     needs: [verify, full-stack]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -153,6 +143,11 @@ jobs:
             runtime: postgres
             secret_consumer: true
             build_args: ""
+          - name: minio
+            dockerfile: src/deploy/minio/Dockerfile
+            runtime: minio
+            secret_consumer: false
+            build_args: ""
     steps:
       - uses: actions/checkout@v4
       - run: docker build ${{ matrix.build_args }} --file "${{ matrix.dockerfile }}" --tag "hook2stream-${{ matrix.name }}:ci" .
@@ -162,6 +157,8 @@ jobs:
         run: docker run --rm --entrypoint node "hook2stream-${{ matrix.name }}:ci" --version
       - if: matrix.runtime == 'postgres'
         run: docker run --rm --entrypoint pg_dump "hook2stream-${{ matrix.name }}:ci" --version
+      - if: matrix.runtime == 'minio'
+        run: docker run --rm --entrypoint minio "hook2stream-${{ matrix.name }}:ci" --version
       - name: Verify supplemental-group secret access
         if: matrix.secret_consumer == true
         shell: bash
@@ -198,7 +195,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: containers
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -226,6 +223,10 @@ jobs:
             dockerfile: src/deploy/backup/Dockerfile
             build_args: ""
             deploy_var: POSTGRES_BACKUP_IMAGE
+          - name: minio
+            dockerfile: src/deploy/minio/Dockerfile
+            build_args: ""
+            deploy_var: MINIO_IMAGE
     steps:
       - uses: actions/checkout@v4
 
@@ -328,9 +329,10 @@ jobs:
             release-digests/bootstrapper.txt \
             release-digests/web.txt \
             release-digests/postgres-backup.txt \
+            release-digests/minio.txt \
             >> release-images.env
           grep -qx "RELEASE_VERSION=${GITHUB_SHA}" release-images.env
-          test "$(grep -c '_IMAGE=ghcr.io/.\+@sha256:' release-images.env)" -eq 5
+          test "$(grep -c '_IMAGE=ghcr.io/.\+@sha256:' release-images.env)" -eq 6
 
       - name: Upload deployment image manifest
         uses: actions/upload-artifact@v4

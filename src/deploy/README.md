@@ -13,7 +13,204 @@ only one control-plane instance. Moving PostgreSQL to a managed 35-day PITR
 service and running at least two API/web instances is the production upgrade
 path; the application and S3 settings remain the same.
 
-## One-time setup
+## Temporary single-host MinIO staging
+
+`STORAGE_MODE=minio` activates `compose.minio.yaml` for a personal,
+production-like staging environment. It adds a source-built MinIO server on an
+isolated Docker network, exposes only its signed S3 API through Caddy, and keeps
+the console and administrative API private. The normal `external` storage mode
+and its production topology are unchanged.
+
+This profile is deliberately **disposable**. PostgreSQL, media, and encrypted
+logical backups all live on the same unencrypted VPS disk, so a host or disk
+loss destroys every copy. Use it for no more than 30 days and never admit a
+second user; move both media and backups to a maintained external S3 provider
+before either limit is reached. The MinIO community source repository is
+archived, so CI builds the final CVE-fixed source release
+`RELEASE.2025-10-15T17-29-55Z` instead of using the older archived Docker Hub
+server image.
+
+For the IT-Garage staging profile, provision an amd64 Ubuntu 24.04 VM with 8
+vCPU, 16 GB RAM, and 320 GB NVMe. Configure two DNS-only A records pointing to
+its static IPv4 address:
+
+- `APP_DOMAIN=staging.<base-domain>` and
+  `PUBLIC_ORIGIN=https://staging.<base-domain>`;
+- `S3_PUBLIC_DOMAIN=s3-staging.<base-domain>` and
+  `S3_PUBLIC_SERVICE_URL=https://s3-staging.<base-domain>`.
+
+Set the remaining storage values exactly as follows. The release preflight
+accepts cleartext only for these two internal Docker-network endpoints and
+continues to require HTTPS for the browser-visible origin.
+
+```dotenv
+STORAGE_MODE=minio
+S3_SERVICE_URL=http://minio:9000
+S3_PUBLIC_SERVICE_URL=https://s3-staging.<base-domain>
+S3_PUBLIC_DOMAIN=s3-staging.<base-domain>
+S3_REGION=us-east-1
+S3_MEDIA_BUCKET=hook2stream-staging-media
+S3_FORCE_PATH_STYLE=true
+S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE=false
+MINIO_MEDIA_QUOTA_GIB=180
+MINIO_BACKUP_QUOTA_GIB=20
+BACKUP_S3_ENDPOINT=http://minio:9000
+BACKUP_S3_REGION=us-east-1
+BACKUP_S3_BUCKET=hook2stream-staging-pg-backups
+BACKUP_S3_PREFIX=hook2stream/staging/postgres
+BACKUP_RETENTION_DAYS=7
+POSTGRES_MAX_CONNECTIONS=50
+POSTGRES_SHARED_BUFFERS=512MB
+POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
+POSTGRES_MAINTENANCE_WORK_MEM=64MB
+POSTGRES_WORK_MEM=4MB
+```
+
+Pin `MINIO_IMAGE` and `MINIO_MC_IMAGE` by digest and add the two conditional
+root files documented in `secrets/README.md`. MinIO creates separate identities
+from the existing runtime, bootstrap, and backup S3 credential pairs; no
+application container receives the root secrets. The media bucket is
+unversioned and capped at 180 GiB. The backup bucket is versioned, capped at 20
+GiB, and retains encrypted PostgreSQL recovery points for seven days.
+
+The selected MinIO server rejects its standalone abort-incomplete-multipart
+lifecycle rule, so the staging profile disables that one external-S3 safety
+net. Application error paths still abort failed multipart uploads directly;
+the 30-day disposal limit remains the outer cleanup bound.
+
+Community MinIO does not implement per-bucket `PutBucketCors`. In this profile,
+its wildcard global CORS default is disabled and `Caddyfile.minio` answers CORS
+only for the path-style media bucket, only for the exact application origin.
+The backup bucket receives no browser CORS headers. The external-S3 profile
+continues to configure native bucket CORS through the bootstrapper.
+
+On this 16 GB host, create a 4 GB swap file as an emergency OOM guard, keep at
+least 20% disk space free, and run only one instance of every worker pool. Swap
+is not capacity for normal renders. The MinIO overlay lowers PostgreSQL and
+non-render worker memory ceilings while preserving 3 GB for the render worker.
+
+The base domain itself is intentionally an operator-provided value. Register
+the exact application callback and webhook only after both public hostnames
+resolve and Caddy can issue their certificates.
+
+Prepare the persistent layout before changing Docker's `data-root`:
+
+```bash
+sudo install -d -o root -g root -m 0755 \
+  /srv/hook2stream \
+  /srv/hook2stream/docker \
+  /srv/hook2stream/releases
+sudo install -d -o root -g root -m 0700 \
+  /srv/hook2stream/config \
+  /srv/hook2stream/release-state
+sudo install -d -o root -g 2000 -m 0750 \
+  /srv/hook2stream/secrets/current
+```
+
+Keep `/srv/hook2stream/release-state` as a real root-owned directory with mode
+`0700`; every parent must also be root-owned and non-writable by group/others.
+Do not replace it or any parent component with a symlink. The release preflight
+fails closed instead of following or repairing an unsafe state path.
+
+On a fresh host, configure Docker Engine's `data-root` as
+`/srv/hook2stream/docker` before starting any application containers. Create
+the emergency swap once, record it in `/etc/fstab`, and keep swappiness low:
+
+```bash
+sudo fallocate -l 4G /swapfile
+sudo chmod 0600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+printf '%s\n' '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+printf '%s\n' 'vm.swappiness=10' | sudo tee /etc/sysctl.d/90-hook2stream.conf
+sudo sysctl --system
+```
+
+Run `sudo ./scripts/validate-staging-host.sh` after Docker Compose v2 and the
+UFW firewall are configured. The check fails when the host is undersized,
+Docker stores data outside `/srv/hook2stream`, free disk falls below 20%, a
+private application/storage port is bound to every host interface, or UFW does
+not default-deny inbound traffic with the exact public/restricted rules below.
+
+### IT-Garage host hardening
+
+`my.it-garage.pro` is the provider control panel, not an application hostname.
+Confirm that the RZ-W-8 offer, German location, price, and stock still match the
+required 8 vCPU / 16 GB / 320 GB profile before ordering. After Ubuntu boots:
+
+1. Create a named operator with `sudo` and install only the operator's public
+   key in its `authorized_keys`. Do not add that account to the `docker` group;
+   releases intentionally run through `sudo`.
+2. In `/etc/ssh/sshd_config.d/90-hook2stream.conf`, set
+   `PermitRootLogin no`, `PasswordAuthentication no`,
+   `KbdInteractiveAuthentication no`, and `PubkeyAuthentication yes`. Run
+   `sudo sshd -t`, keep the original session open, and prove a second key-only
+   operator login before reloading SSH.
+3. Default-deny inbound traffic. Permit 22/TCP only from the operator CIDR and
+   permit 80/TCP, 443/TCP, and 443/UDP publicly. Apply the same policy in the
+   provider firewall when it is available; do not open any Compose-private
+   port. Configure explicit UFW port rules rather than broad application
+   profiles:
+
+   ```bash
+   sudo ufw default deny incoming
+   sudo ufw default allow outgoing
+   sudo ufw default deny routed
+   sudo ufw allow from '<operator-cidr>' to any port 22 proto tcp
+   sudo ufw allow 80/tcp
+   sudo ufw allow 443/tcp
+   sudo ufw allow 443/udp
+   sudo ufw enable
+   ```
+4. Install Docker Engine from Docker's official Ubuntu repository with the
+   Compose v2 plugin. Set `/etc/docker/daemon.json` to use
+   `"data-root": "/srv/hook2stream/docker"` before the first workload starts.
+   Enable Ubuntu unattended security upgrades and reboot deliberately when a
+   kernel or container-runtime update requires it.
+5. Log in to GHCR with a dedicated token that has only `read:packages`; keep it
+   in Docker's root credential store, never in `.env` or a secret mounted into
+   the application.
+
+Create DNS-only A records for both public names. If an AAAA record is added,
+first apply the same SSH/firewall policy to IPv6 and verify that Caddy can reach
+the ACME service over that route.
+
+### Staging accounts and first release
+
+- Keep Google OAuth in **Testing** status, add only the owner as a test user,
+  and register exactly
+  `https://staging.<base-domain>/api/v1/auth/callback`.
+- Use Stripe test mode, create the five products/prices listed below, and
+  register exactly
+  `https://staging.<base-domain>/api/v1/billing/stripe/webhook`.
+- Issue a dedicated OpenRouter key, require ZDR, deny data collection, restrict
+  it to the configured three models, and cap the account/key at USD 20 monthly.
+- Store the non-secret staging environment at
+  `/srv/hook2stream/config/staging.env`; keep file secrets under
+  `/srv/hook2stream/secrets/current`. The environment sets
+  `HOOK2STREAM_RELEASE_STATE_DIR=/srv/hook2stream/release-state`.
+
+Release only a commit whose verify, full-stack, container scan, and publish jobs
+are green. Download `release-images-<sha>/release-images.env`, copy its digest
+references into the staging environment, resolve the remaining infrastructure
+images to reviewed digests, and check out that same SHA on the VPS. Then run:
+
+```bash
+test "$(git rev-parse HEAD)" = '<green-commit-sha>'
+sudo env \
+  HOOK2STREAM_ENV_FILE=/srv/hook2stream/config/staging.env \
+  ./src/deploy/scripts/deploy-release.sh
+```
+
+Use the same command for upgrades. The script records the previous environment
+under the configured release-state directory and prints the rollback command;
+rollback changes image digests only and never runs a down-migration.
+
+## One-time setup for the external-S3 alpha
+
+This section describes the existing Hetzner/LUKS/external-S3 profile. For the
+temporary IT-Garage staging profile, use the unencrypted single-disk procedure
+above and do not mix the two storage contracts.
 
 1. Provision a Hetzner CX43-class x86_64 host in Helsinki with Ubuntu 24.04,
    Docker Engine, and the Docker Compose plugin v2 or newer. Attach a 160 GB Cloud Volume,
@@ -100,30 +297,43 @@ relative API paths behind Caddy, so the same web image can move between
 same-origin environments without rebuilding it for a hostname.
 
 `scripts/validate-deployment.sh` syntax-checks every deployment shell script,
-runs the focused tests under `tests/`, parses the lifecycle policy, and renders
-both Compose models with temporary placeholder secret files. The repository
-workflow runs it as a dedicated CI step; it can also be run locally before
-pushing when Docker Compose v2 and Node 24 are available.
+runs the focused tests under `tests/`, parses the lifecycle policy, validates
+both Caddy configurations, and renders external, MinIO, build, and Vault
+Compose models with temporary placeholder secret files. Every rendered service
+must use an immutable `image@sha256` reference. The repository workflow runs it
+as a dedicated CI step; it can also be run locally before pushing when Docker
+Compose v2 and Node 24 are available.
+
+The verify job also boots the audited MinIO image and the production MinIO
+Caddyfile, runs the real initializer twice, checks quotas/versioning/lifecycle
+and IAM denials, and exercises HTTPS CORS plus signed single-part and multipart
+uploads through the public S3 origin.
 
 On a successful `main` publish, CI emits the artifact
-`release-images-<commit-sha>/release-images.env`. Review it, copy its five
-digest-pinned `API_IMAGE`, `WORKER_IMAGE`, `BOOTSTRAPPER_IMAGE`, `WEB_IMAGE`, and
-`POSTGRES_BACKUP_IMAGE` assignments and its `RELEASE_VERSION` into the
-production `.env`. This artifact is the release handoff; do not translate its
-digest references back to mutable tags.
+`release-images-<commit-sha>/release-images.env`. Review it and copy the
+digest-pinned `API_IMAGE`, `WORKER_IMAGE`, `BOOTSTRAPPER_IMAGE`, `WEB_IMAGE`,
+`POSTGRES_BACKUP_IMAGE`, `MINIO_IMAGE`, and `RELEASE_VERSION` assignments into
+the selected environment file. This artifact is the release handoff; do not
+translate its digest references back to mutable tags. `MINIO_IMAGE` is ignored
+in external mode.
 Resolve and pin `CADDY_IMAGE`, `POSTGRES_IMAGE`, and `PGBOUNCER_IMAGE` by digest
-as well. The release preflight rejects every mutable application or
-infrastructure image reference.
+as well. MinIO mode additionally requires a reviewed `MINIO_MC_IMAGE` digest
+for the one-shot initializer. The release preflight rejects every mutable
+application or infrastructure image reference that the selected mode uses.
 
 The optional build overlay builds the four application artifacts and backup
 sidecar from the repository root:
 
 ```bash
-docker compose --env-file .env \
-  -f compose.yaml -f compose.build.yaml \
+compose_env=${HOOK2STREAM_ENV_FILE:-.env}
+compose_files=(-f compose.yaml)
+if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
+  compose_files+=(-f compose.minio.yaml)
+fi
+compose_files+=(-f compose.build.yaml)
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
   build api worker-media bootstrapper web postgres-backup
-docker compose --env-file .env \
-  -f compose.yaml -f compose.build.yaml \
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
   push api worker-media bootstrapper web postgres-backup
 ```
 
@@ -132,15 +342,27 @@ image list. This catches missing required values without printing secret file
 contents:
 
 ```bash
-docker compose --env-file .env --profile tools config --quiet
-docker compose --env-file .env --profile tools config --images
+compose_env=${HOOK2STREAM_ENV_FILE:-.env}
+compose_files=(-f compose.yaml)
+if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
+  compose_files+=(-f compose.minio.yaml)
+fi
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
+  --profile tools config --quiet
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
+  --profile tools config --images
 ```
+
+The mode check is intentional: raw Compose commands do not automatically load
+`compose.minio.yaml`. Keep the same `compose_files` selection for every manual
+staging inspection or incident command.
 
 The release preflight rejects non-HTTPS application and custom backup S3
 endpoints. For native AWS S3, leave `BACKUP_S3_ENDPOINT` empty so the AWS CLI
 uses the regional endpoint selected by `BACKUP_S3_REGION`.
 It also rejects mutable application and infrastructure image tags; replace all
-eight image values with reviewed `image@sha256:<digest>` references first.
+eight base image values and, in MinIO mode, both additional image values with
+reviewed `image@sha256:<digest>` references first.
 Exported variables that could override Compose inputs are rejected as well;
 make deployment changes in the selected `.env` file so preflight validates the
 same values that Compose will use.
@@ -155,10 +377,13 @@ sudo ./scripts/deploy-release.sh
 
 Use `--no-pull` only for images just built on that host. The script serializes
 deployments, validates Compose, records the last successful environment, pulls
-all images, starts PostgreSQL/PgBouncer, requires an encrypted pre-migration
-backup, runs the bootstrapper exactly once, updates leaf workers → control → API
-→ web/Caddy, waits on role readiness, and smokes both web and API through the
-public origin. Re-running it with the same `.env` is safe.
+all images and, in MinIO mode, starts and checks object storage and runs its
+idempotent initializer first. It then starts PostgreSQL/PgBouncer, requires an
+encrypted pre-migration backup, runs the bootstrapper exactly once, updates leaf
+workers → control → API → web/Caddy, waits on role readiness, and smokes web,
+API, and public MinIO readiness through HTTPS. It also requires the persistent
+backup daemon to become healthy before recording the release as successful.
+Re-running it with the same environment is safe.
 
 Workers receive a 150-second shutdown grace period, longer than the 120-second
 lease. Jobs are retryable and fenced, but this Compose topology does not promise
@@ -170,8 +395,13 @@ After rollout, check service health, the internal dependency-ready endpoint, and
 the public web endpoint:
 
 ```bash
-docker compose --env-file .env ps
-docker compose --env-file .env exec api \
+compose_env=${HOOK2STREAM_ENV_FILE:-.env}
+compose_files=(-f compose.yaml)
+if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
+  compose_files+=(-f compose.minio.yaml)
+fi
+docker compose --env-file "$compose_env" "${compose_files[@]}" ps
+docker compose --env-file "$compose_env" "${compose_files[@]}" exec api \
   /bin/sh /opt/hook2stream/http-healthcheck.sh
 curl --fail --silent --show-error https://app.example.com/health/ready
 curl --fail --silent --show-error https://app.example.com/health/api-ready
@@ -184,6 +414,25 @@ least 30 minutes. The external monitors must alert independently on web and API
 availability; the success heartbeat must alert when the recovery-point age
 exceeds 130 minutes. Leave OTLP disabled for the alpha unless an approved EU
 collector and its data-retention policy are configured.
+
+For the temporary staging profile, acceptance also requires all of the
+following before it can be called ready:
+
+- the media bucket accepts HTTPS presigned single-part and multipart uploads
+  from the exact application origin, exposes `ETag`, supports read/delete, and
+  applies its staging-object expiry rule;
+- the backup bucket is versioned, has the seven-day lifecycle and 20 GiB quota,
+  while the media bucket is non-versioned with a 180 GiB quota; the console and
+  MinIO admin/metrics routes are unavailable publicly;
+- Google login → licensed short MP3 → all five worker pools → OpenRouter
+  transcription/artwork/campaign → preview → 18 renders → ZIP completes;
+  Stripe test checkout succeeds and replaying the same webhook does not grant a
+  second entitlement;
+- a second identical deploy succeeds, a VPS reboot returns every persistent
+  service to healthy, the previous digest snapshot rolls back without a
+  down-migration, and one encrypted dump restores into a new empty database;
+- no container is OOM-killed and at least 20% of the filesystem remains free
+  throughout the 30-minute observation window.
 
 ## Backup, restore, and rollback
 
@@ -249,14 +498,17 @@ reapplied deletion tombstones; record actual RPO/RTO. Every key rotation drill
 must restore one recovery point from before the rotation and one from after it.
 Never test `--clean` against the production database.
 
-After each success, the release script stores `.release-state/last-successful.env`.
-Before the next release it snapshots that file and prints the exact snapshot path.
+After each success, the release script stores `last-successful.env` under
+`HOOK2STREAM_RELEASE_STATE_DIR` (or under local `.release-state` when that
+setting is omitted). Before the next release it snapshots that file and prints
+the exact snapshot path.
 For an application rollback, first verify the migration was expand/contract
 compatible, then run the printed command, for example:
 
 ```bash
-sudo env HOOK2STREAM_ENV_FILE=.release-state/20260727T120000Z.env \
-  ./scripts/deploy-release.sh
+sudo env \
+  HOOK2STREAM_ENV_FILE=/srv/hook2stream/release-state/20260727T120000Z.env \
+  ./src/deploy/scripts/deploy-release.sh
 ```
 
 This restores old image digests through the same ordered and health-checked flow.
@@ -268,11 +520,19 @@ approval.
 Useful incident checks:
 
 ```bash
-docker compose --env-file .env ps
-docker compose --env-file .env logs --since 30m api pgbouncer postgres
-docker compose --env-file .env logs --since 30m \
+compose_env=${HOOK2STREAM_ENV_FILE:-.env}
+compose_files=(-f compose.yaml)
+if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
+  compose_files+=(-f compose.minio.yaml)
+fi
+docker compose --env-file "$compose_env" "${compose_files[@]}" ps
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
+  logs --since 30m api pgbouncer postgres
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
+  logs --since 30m \
   worker-media worker-analysis worker-control worker-render worker-export
-docker compose --env-file .env logs --since 2h postgres-backup
+docker compose --env-file "$compose_env" "${compose_files[@]}" \
+  logs --since 2h postgres-backup
 ```
 
 Docker JSON logs rotate locally. For this alpha, use external web/API synthetics

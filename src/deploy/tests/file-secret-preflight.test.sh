@@ -68,6 +68,25 @@ fi
 rm "$secret_dir/google_client_secret"
 mv "$secret_dir/google_client_secret.value" "$secret_dir/google_client_secret"
 
+printf '%s\n' 'STORAGE_MODE=minio' >> "$environment_file"
+if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1; then
+    test_fail "MinIO preflight accepted missing root credential files"
+fi
+printf '%s\n' test-root-user > "$secret_dir/minio_root_user"
+printf '%s\n' test-root-password > "$secret_dir/minio_root_password"
+PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
+
+rm "$secret_dir/minio_root_password"
+if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1; then
+    test_fail "MinIO preflight accepted a missing root password"
+fi
+
+# The root credentials are conditional: external S3 must keep the original
+# file-secret contract and must not require any MinIO-only files.
+printf '%s\n' 'STORAGE_MODE=external' >> "$environment_file"
+rm "$secret_dir/minio_root_user"
+PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
+
 SECRETS_GID=2468
 export SECRETS_GID
 PATH="${stub_bin}:${PATH}" TEST_SECRETS_GID=2468 deployment_validate_file_secrets

@@ -49,10 +49,22 @@ deployment_require_base_tools
 deployment_require_command curl
 deployment_acquire_lock
 
+storage_mode=$(deployment_storage_mode)
+case "$storage_mode" in
+    external) ;;
+    minio)
+        [ -r "$deployment_dir/compose.minio.yaml" ] \
+            || fail "MinIO Compose overlay is missing: $deployment_dir/compose.minio.yaml"
+        ;;
+    *) fail "STORAGE_MODE must be external or minio" ;;
+esac
+
 secret_provider=$(deployment_secret_provider)
 case "$secret_provider" in
     file) deployment_validate_file_secrets ;;
     vault)
+        [ "$storage_mode" != minio ] \
+            || fail "STORAGE_MODE=minio currently requires SECRET_PROVIDER=file"
         current_stage=vault-secrets-preflight
         vault_require_configuration
         vault_preflight_release \
@@ -88,9 +100,62 @@ esac
 case "$acme_email" in
     *@example.com) fail "replace the example ACME_EMAIL before deployment" ;;
 esac
-require_https_endpoint S3_SERVICE_URL
-require_https_endpoint S3_PUBLIC_SERVICE_URL
-require_https_endpoint_or_empty BACKUP_S3_ENDPOINT
+case "$storage_mode" in
+    external)
+        require_https_endpoint S3_SERVICE_URL
+        require_https_endpoint S3_PUBLIC_SERVICE_URL
+        require_https_endpoint_or_empty BACKUP_S3_ENDPOINT
+        ;;
+    minio)
+        s3_service_url=$(read_env_value S3_SERVICE_URL)
+        [ "$s3_service_url" = http://minio:9000 ] \
+            || fail "S3_SERVICE_URL must be exactly http://minio:9000 when STORAGE_MODE=minio"
+        backup_s3_endpoint=$(read_env_value BACKUP_S3_ENDPOINT)
+        [ "$backup_s3_endpoint" = http://minio:9000 ] \
+            || fail "BACKUP_S3_ENDPOINT must be exactly http://minio:9000 when STORAGE_MODE=minio"
+        s3_public_domain=$(read_env_value S3_PUBLIC_DOMAIN)
+        case "$s3_public_domain" in
+            ""|*/*|*:*|.*|*.|*[!A-Za-z0-9.-]*)
+                fail "S3_PUBLIC_DOMAIN must be an unquoted DNS hostname in $environment_file"
+                ;;
+        esac
+        canonical_s3_public_domain=$(printf '%s' "$s3_public_domain" \
+            | tr '[:upper:]' '[:lower:]')
+        case "$canonical_s3_public_domain" in
+            *.example.com)
+                fail "replace the example S3_PUBLIC_DOMAIN before deployment"
+                ;;
+        esac
+        canonical_app_domain=$(printf '%s' "$app_domain" \
+            | tr '[:upper:]' '[:lower:]')
+        [ "$canonical_s3_public_domain" != "$canonical_app_domain" ] \
+            || fail "S3_PUBLIC_DOMAIN must be distinct from APP_DOMAIN"
+        require_https_origin S3_PUBLIC_SERVICE_URL
+        s3_public_service_url=$(read_env_value S3_PUBLIC_SERVICE_URL)
+        [ "$s3_public_service_url" = "https://${s3_public_domain}" ] \
+            || fail "S3_PUBLIC_SERVICE_URL must be exactly https://S3_PUBLIC_DOMAIN when STORAGE_MODE=minio"
+        [ "$(read_env_value S3_MEDIA_BUCKET)" = hook2stream-staging-media ] \
+            || fail "S3_MEDIA_BUCKET must be hook2stream-staging-media when STORAGE_MODE=minio"
+        [ "$(read_env_value BACKUP_S3_BUCKET)" = hook2stream-staging-pg-backups ] \
+            || fail "BACKUP_S3_BUCKET must be hook2stream-staging-pg-backups when STORAGE_MODE=minio"
+        [ "$(read_env_value MINIO_MEDIA_QUOTA_GIB)" = 180 ] \
+            || fail "MINIO_MEDIA_QUOTA_GIB must be 180 for the staging profile"
+        [ "$(read_env_value MINIO_BACKUP_QUOTA_GIB)" = 20 ] \
+            || fail "MINIO_BACKUP_QUOTA_GIB must be 20 for the staging profile"
+        [ "$(read_env_value BACKUP_RETENTION_DAYS)" = 7 ] \
+            || fail "BACKUP_RETENTION_DAYS must be 7 for the staging profile"
+        [ "$(read_env_value S3_REGION)" = us-east-1 ] \
+            || fail "S3_REGION must be us-east-1 for the single-node MinIO profile"
+        [ "$(read_env_value BACKUP_S3_REGION)" = us-east-1 ] \
+            || fail "BACKUP_S3_REGION must be us-east-1 for the single-node MinIO profile"
+        [ "$(read_env_value S3_FORCE_PATH_STYLE)" = true ] \
+            || fail "S3_FORCE_PATH_STYLE must be true when STORAGE_MODE=minio"
+        [ "$(read_env_value S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE)" = false ] \
+            || fail "S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE must be false when STORAGE_MODE=minio"
+        [ "$(read_env_value BACKUP_S3_PREFIX)" = hook2stream/staging/postgres ] \
+            || fail "BACKUP_S3_PREFIX must be hook2stream/staging/postgres for the staging profile"
+        ;;
+esac
 for required_identifier in \
     S3_MEDIA_BUCKET \
     BACKUP_S3_BUCKET \
@@ -121,6 +186,10 @@ done
 if [ "$secret_provider" = vault ]; then
     require_digest_image VAULT_AGENT_IMAGE
 fi
+if [ "$storage_mode" = minio ]; then
+    require_digest_image MINIO_IMAGE
+    require_digest_image MINIO_MC_IMAGE
+fi
 
 last_successful_environment="${release_state_dir}/last-successful.env"
 if [ -r "$last_successful_environment" ]; then
@@ -131,9 +200,21 @@ fi
 
 if [ "$pull_images" = true ]; then
     current_stage=image-pull
+    if [ "$storage_mode" = minio ]; then
+        compose_tools pull minio minio-init
+    fi
     compose_tools pull \
         caddy web api worker-media worker-analysis worker-control \
         worker-render worker-export bootstrapper pgbouncer postgres postgres-backup
+fi
+
+if [ "$storage_mode" = minio ]; then
+    current_stage=object-storage-start
+    compose up -d minio
+    wait_for_service minio || fail "MinIO did not become healthy"
+
+    current_stage=object-storage-init
+    compose_tools run --rm --no-deps minio-init
 fi
 
 current_stage=database-start
@@ -169,6 +250,7 @@ wait_for_service web || fail "web did not become healthy"
 current_stage=edge-and-backup
 compose up -d --no-deps caddy postgres-backup
 wait_for_service caddy || fail "caddy did not become healthy"
+wait_for_service postgres-backup || fail "postgres-backup did not become healthy"
 
 current_stage=smoke
 compose exec -T api /bin/sh /opt/hook2stream/http-healthcheck.sh
@@ -178,6 +260,10 @@ wait_for_url "${public_origin}/health/api-ready" \
     || fail "public API readiness smoke failed"
 wait_for_url "${public_origin}/api/v1/auth/session" \
     || fail "public session smoke failed"
+if [ "$storage_mode" = minio ]; then
+    wait_for_url "https://${s3_public_domain}/minio/health/ready" \
+        || fail "public MinIO readiness smoke failed"
+fi
 
 current_stage=complete
 install -m 0600 "$environment_file" "${last_successful_environment}.tmp"

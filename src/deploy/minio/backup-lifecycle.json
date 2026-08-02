@@ -1,0 +1,17 @@
+{
+  "Rules": [
+    {
+      "ID": "hook2stream-staging-backup-retention-7d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": 6
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 1
+      }
+    }
+  ]
+}

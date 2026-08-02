@@ -7,7 +7,7 @@
 environment_file=${HOOK2STREAM_ENV_FILE:-${deployment_dir}/.env}
 health_timeout=${HOOK2STREAM_HEALTH_TIMEOUT_SECONDS:-600}
 public_smoke_timeout=${HOOK2STREAM_PUBLIC_SMOKE_TIMEOUT_SECONDS:-180}
-release_state_dir=${HOOK2STREAM_RELEASE_STATE_DIR:-${deployment_dir}/.release-state}
+release_state_dir=${HOOK2STREAM_RELEASE_STATE_DIR:-}
 secret_state_dir=${HOOK2STREAM_SECRET_STATE_DIR:-/var/lib/hook2stream/secrets}
 generations_dir=${secret_state_dir}/generations
 deployment_program=${deployment_program:-hook2stream-deploy}
@@ -37,6 +37,13 @@ read_env_value() {
     ' "$environment_file"
 }
 
+if [ -z "$release_state_dir" ]; then
+    if [ -r "$environment_file" ]; then
+        release_state_dir=$(read_env_value HOOK2STREAM_RELEASE_STATE_DIR)
+    fi
+    release_state_dir=${release_state_dir:-${deployment_dir}/.release-state}
+fi
+
 deployment_secret_provider() {
     if [ -n "${SECRET_PROVIDER:-}" ]; then
         printf '%s\n' "$SECRET_PROVIDER"
@@ -46,15 +53,39 @@ deployment_secret_provider() {
     printf '%s\n' "${deployment_provider:-file}"
 }
 
+deployment_storage_mode() {
+    deployment_mode=$(read_env_value STORAGE_MODE)
+    printf '%s\n' "${deployment_mode:-external}"
+}
+
 compose() {
-    if [ "$(deployment_secret_provider)" = vault ]; then
-        docker compose --env-file "$environment_file" \
-            -f "$deployment_dir/compose.yaml" \
-            -f "$deployment_dir/compose.vault.yaml" "$@"
-    else
-        docker compose --env-file "$environment_file" \
-            -f "$deployment_dir/compose.yaml" "$@"
-    fi
+    deployment_compose_secret_provider=$(deployment_secret_provider)
+    deployment_compose_storage_mode=$(deployment_storage_mode)
+    case "${deployment_compose_secret_provider}:${deployment_compose_storage_mode}" in
+        file:external)
+            docker compose --env-file "$environment_file" \
+                -f "$deployment_dir/compose.yaml" "$@"
+            ;;
+        vault:external)
+            docker compose --env-file "$environment_file" \
+                -f "$deployment_dir/compose.yaml" \
+                -f "$deployment_dir/compose.vault.yaml" "$@"
+            ;;
+        file:minio)
+            docker compose --env-file "$environment_file" \
+                -f "$deployment_dir/compose.yaml" \
+                -f "$deployment_dir/compose.minio.yaml" "$@"
+            ;;
+        vault:minio)
+            docker compose --env-file "$environment_file" \
+                -f "$deployment_dir/compose.yaml" \
+                -f "$deployment_dir/compose.vault.yaml" \
+                -f "$deployment_dir/compose.minio.yaml" "$@"
+            ;;
+        *)
+            fail "SECRET_PROVIDER must be file or vault and STORAGE_MODE must be external or minio"
+            ;;
+    esac
 }
 
 compose_tools() {
@@ -83,7 +114,8 @@ deployment_compose_input_names() {
 
     for deployment_compose_source in \
         "$deployment_dir/compose.yaml" \
-        "$deployment_dir/compose.vault.yaml"; do
+        "$deployment_dir/compose.vault.yaml" \
+        "$deployment_dir/compose.minio.yaml"; do
         [ -r "$deployment_compose_source" ] || continue
         grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$deployment_compose_source" \
             | sed 's/^${//'
@@ -152,6 +184,11 @@ deployment_required_secret_files() {
         backup_s3_secret_key \
         backup_encryption_key_id \
         backup_encryption_passphrase
+    if [ "$(deployment_storage_mode)" = minio ]; then
+        printf '%s\n' \
+            minio_root_user \
+            minio_root_password
+    fi
 }
 
 deployment_validate_file_secrets() {
@@ -194,6 +231,42 @@ deployment_validate_file_secrets() {
         || fail "$deployment_heartbeat_path must be root:${deployment_file_secret_gid} with mode 0640"
 }
 
+deployment_reject_symlink_path_components() {
+    deployment_checked_path=$1
+    while [ "$deployment_checked_path" != / ]; do
+        [ ! -L "$deployment_checked_path" ] \
+            || fail "release-state path must not contain symlinks: $deployment_checked_path"
+        deployment_checked_parent=${deployment_checked_path%/*}
+        [ -n "$deployment_checked_parent" ] || deployment_checked_parent=/
+        [ "$deployment_checked_parent" != "$deployment_checked_path" ] \
+            || fail "could not validate release-state path: $1"
+        deployment_checked_path=$deployment_checked_parent
+    done
+}
+
+deployment_validate_privileged_state_ancestors() {
+    deployment_privileged_uid=$1
+    [ "$deployment_privileged_uid" = 0 ] || return 0
+
+    deployment_checked_path=$release_state_dir
+    while :; do
+        deployment_checked_metadata=$(stat -c '%u:%a' "$deployment_checked_path")
+        deployment_checked_owner=${deployment_checked_metadata%%:*}
+        deployment_checked_mode=${deployment_checked_metadata#*:}
+        [ "$deployment_checked_owner" = 0 ] \
+            || fail "privileged release-state path components must be root-owned: $deployment_checked_path"
+        case "$deployment_checked_mode" in
+            *[2367]|*[2367][0-7])
+                fail "privileged release-state path components must not be group/world-writable: $deployment_checked_path"
+                ;;
+        esac
+        [ "$deployment_checked_path" = / ] && break
+        deployment_checked_parent=${deployment_checked_path%/*}
+        [ -n "$deployment_checked_parent" ] || deployment_checked_parent=/
+        deployment_checked_path=$deployment_checked_parent
+    done
+}
+
 deployment_acquire_lock() {
     case "$release_state_dir" in
         /*) ;;
@@ -201,10 +274,40 @@ deployment_acquire_lock() {
     esac
     [ "$release_state_dir" != / ] \
         || fail "HOOK2STREAM_RELEASE_STATE_DIR must not be /"
-    mkdir -p "$release_state_dir"
-    chmod 0700 "$release_state_dir"
+    case "$release_state_dir" in
+        */|*//*|*/./*|*/.|*/../*|*/..)
+            fail "HOOK2STREAM_RELEASE_STATE_DIR must be a canonical absolute path"
+            ;;
+    esac
+
+    deployment_require_command id
+    deployment_require_command stat
+    deployment_reject_symlink_path_components "$release_state_dir"
+    if [ ! -e "$release_state_dir" ]; then
+        (umask 077 && mkdir -p -- "$release_state_dir") \
+            || fail "could not create release-state directory: $release_state_dir"
+    fi
+    deployment_reject_symlink_path_components "$release_state_dir"
+    [ -d "$release_state_dir" ] && [ ! -L "$release_state_dir" ] \
+        || fail "HOOK2STREAM_RELEASE_STATE_DIR must be a real directory: $release_state_dir"
+
+    deployment_release_state_uid=$(id -u)
+    deployment_release_state_metadata=$(stat -c '%u:%a' "$release_state_dir")
+    [ "$deployment_release_state_metadata" = "${deployment_release_state_uid}:700" ] \
+        || fail "$release_state_dir must be owned by uid ${deployment_release_state_uid} with mode 0700"
+    deployment_validate_privileged_state_ancestors "$deployment_release_state_uid"
+
     deployment_lock_file=${release_state_dir}/deploy.lock
-    exec 9>"$deployment_lock_file"
+    if [ -e "$deployment_lock_file" ] || [ -L "$deployment_lock_file" ]; then
+        [ -f "$deployment_lock_file" ] && [ ! -L "$deployment_lock_file" ] \
+            || fail "deployment lock must be a regular non-symlink file: $deployment_lock_file"
+    else
+        (umask 077 && : > "$deployment_lock_file") \
+            || fail "could not create deployment lock: $deployment_lock_file"
+    fi
+    [ -f "$deployment_lock_file" ] && [ ! -L "$deployment_lock_file" ] \
+        || fail "deployment lock must be a regular non-symlink file: $deployment_lock_file"
+    exec 9<>"$deployment_lock_file"
     flock -n 9 || fail "another deployment or secret rotation is already running"
 }
 

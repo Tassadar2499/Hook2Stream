@@ -1,0 +1,334 @@
+services:
+  caddy:
+    environment:
+      S3_PUBLIC_DOMAIN: ${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      S3_MEDIA_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - edge
+      - storage
+
+  api:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - edge
+      - backend
+      - storage
+
+  worker-media:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  worker-analysis:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  worker-control:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+
+  worker-render:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+
+  worker-export:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+
+  bootstrapper:
+    environment:
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
+      Storage__ForcePathStyle: "true"
+      # MinIO CE does not implement per-bucket PutBucketCors. The server-level
+      # CORS layer is disabled and Caddy handles only the media bucket path;
+      # external S3 deployments retain the base bucket-CORS bootstrap.
+      Storage__ConfigureBucketCors: "false"
+      # This MinIO release rejects a standalone abort-incomplete-multipart
+      # lifecycle rule. Application error paths still abort uploads directly;
+      # native external S3 keeps the lifecycle safety net from compose.yaml.
+      Storage__ConfigureMultipartAbortLifecycle: "false"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+
+  postgres-backup:
+    environment:
+      BACKUP_S3_ENDPOINT: http://minio:9000
+      BACKUP_S3_REGION: ${S3_REGION:?Set S3_REGION}
+      BACKUP_RETENTION_DAYS: "7"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - backend
+      - storage
+
+  postgres:
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-2GB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-128MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-2GB}
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=2000
+      - -c
+      - log_parameter_max_length=0
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  minio:
+    image: ${MINIO_IMAGE:?Set MINIO_IMAGE to an immutable image reference}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 60s
+    command:
+      - server
+      - --address
+      - :9000
+      - /data
+    environment:
+      HOME: /tmp
+      MINIO_BROWSER: "off"
+      # Community MinIO supports only server-wide CORS. Disable it here; Caddy
+      # grants exact-origin CORS only for the media bucket path.
+      MINIO_API_CORS_ALLOW_ORIGIN: "off"
+      MINIO_REGION_NAME: ${S3_REGION:?Set S3_REGION}
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      STORAGE_MODE: ${STORAGE_MODE:?Set STORAGE_MODE=minio}
+    expose:
+      - "9000"
+    volumes:
+      - minio_data:/data
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:9000/minio/health/ready
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - storage
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1536M
+          pids: 256
+        reservations:
+          memory: 512M
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:?Set MINIO_MC_IMAGE to an immutable image reference}
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    user: "1000:1000"
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    environment:
+      STORAGE_MODE: ${STORAGE_MODE:?Set STORAGE_MODE=minio}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_REGION: ${S3_REGION:?Set S3_REGION}
+      MINIO_MEDIA_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
+      MINIO_BACKUP_BUCKET: ${BACKUP_S3_BUCKET:?Set BACKUP_S3_BUCKET}
+      MINIO_BACKUP_PREFIX: ${BACKUP_S3_PREFIX:-hook2stream/staging/postgres}
+      MINIO_MEDIA_QUOTA_GIB: ${MINIO_MEDIA_QUOTA_GIB:-180}
+      MINIO_BACKUP_QUOTA_GIB: ${MINIO_BACKUP_QUOTA_GIB:-20}
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      S3_RUNTIME_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
+      S3_RUNTIME_SECRET_KEY_FILE: /run/secrets/s3_runtime_secret_key
+      S3_BOOTSTRAP_ACCESS_KEY_FILE: /run/secrets/s3_bootstrap_access_key
+      S3_BOOTSTRAP_SECRET_KEY_FILE: /run/secrets/s3_bootstrap_secret_key
+      BACKUP_S3_ACCESS_KEY_FILE: /run/secrets/backup_s3_access_key
+      BACKUP_S3_SECRET_KEY_FILE: /run/secrets/backup_s3_secret_key
+      MC_CONFIG_DIR: /tmp/mc
+    entrypoint:
+      - /bin/sh
+      - /opt/hook2stream/minio-init.sh
+    configs:
+      - source: minio_init
+        target: /opt/hook2stream/minio-init.sh
+        mode: 0555
+      - source: minio_runtime_policy
+        target: /etc/hook2stream/minio/runtime-media.json
+        mode: 0444
+      - source: minio_bootstrap_policy
+        target: /etc/hook2stream/minio/bootstrap-media.json
+        mode: 0444
+      - source: minio_backup_policy
+        target: /etc/hook2stream/minio/postgres-backup.json
+        mode: 0444
+      - source: minio_backup_lifecycle
+        target: /etc/hook2stream/minio/backup-lifecycle.json
+        mode: 0444
+    secrets:
+      - minio_root_user
+      - minio_root_password
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
+      - s3_bootstrap_access_key
+      - s3_bootstrap_secret_key
+      - backup_s3_access_key
+      - backup_s3_secret_key
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    depends_on:
+      minio:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - storage
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+          pids: 128
+
+configs:
+  caddyfile:
+    file: ./Caddyfile.minio
+  minio_init:
+    file: ./minio/minio-init.sh
+  minio_runtime_policy:
+    file: ./minio/policies/runtime-media.json
+  minio_bootstrap_policy:
+    file: ./minio/policies/bootstrap-media.json
+  minio_backup_policy:
+    file: ./minio/policies/postgres-backup.json
+  minio_backup_lifecycle:
+    file: ./minio/backup-lifecycle.json
+
+secrets:
+  minio_root_user:
+    file: ${SECRETS_DIR:-./secrets}/minio_root_user
+  minio_root_password:
+    file: ${SECRETS_DIR:-./secrets}/minio_root_password
+
+volumes:
+  minio_data:
+
+networks:
+  storage:
+    internal: true
