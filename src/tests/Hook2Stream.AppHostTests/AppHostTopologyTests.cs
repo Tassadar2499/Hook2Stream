@@ -100,6 +100,10 @@ public sealed class AppHostTopologyTests
         Assert.Single(resources["minio"].Annotations.OfType<HealthCheckAnnotation>());
         Assert.Single(resources["api"].Annotations.OfType<HealthCheckAnnotation>());
         Assert.Single(resources["web"].Annotations.OfType<HealthCheckAnnotation>());
+        Assert.All(
+            workerNames,
+            workerName => Assert.Single(
+                resources[workerName].Annotations.OfType<HealthCheckAnnotation>()));
 
         AssertWaitGraph(
             resources["bootstrapper"],

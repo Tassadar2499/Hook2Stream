@@ -1,6 +1,4 @@
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
-  "http://localhost:5000";
+import { buildApiUrl } from "./api-url";
 
 export const COOKIE_SESSION_MARKER = "__hook2stream_cookie_session__";
 
@@ -56,7 +54,7 @@ export function markOAuthSessionSignedOut() {
 export async function refreshOAuthSession(): Promise<OAuthSessionSnapshot> {
   if (refreshPromise) return refreshPromise;
 
-  refreshPromise = fetch(`${apiBaseUrl}/api/v1/auth/session`, {
+  refreshPromise = fetch(buildApiUrl("/api/v1/auth/session"), {
     method: "GET",
     headers: { Accept: "application/json" },
     credentials: "include",
@@ -100,7 +98,7 @@ export async function logoutOAuthSession() {
   if (session.csrfToken) headers.set("X-CSRF-Token", session.csrfToken);
 
   try {
-    await fetch(`${apiBaseUrl}/api/v1/auth/logout`, {
+    await fetch(buildApiUrl("/api/v1/auth/logout"), {
       method: "POST",
       headers,
       credentials: "include",

@@ -12,9 +12,11 @@ RUN dotnet publish src/Hook2Stream.Worker/Hook2Stream.Worker.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 USER root
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install --yes --no-install-recommends ffmpeg ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/publish .
+ENV ASPNETCORE_HTTP_PORTS=8080
+EXPOSE 8080
 USER app
 ENTRYPOINT ["dotnet", "Hook2Stream.Worker.dll"]

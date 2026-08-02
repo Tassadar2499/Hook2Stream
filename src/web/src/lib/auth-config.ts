@@ -1,3 +1,5 @@
+import { buildApiUrl } from "./api-url";
+
 export type AppAuthMode = "oauth" | "local" | "unconfigured";
 
 export function getAppAuthMode(): AppAuthMode {
@@ -20,9 +22,6 @@ export function isAppAuthConfigured() {
 }
 
 export function buildOAuthLoginUrl(returnPath?: string) {
-  const apiBaseUrl =
-    process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
-    "http://localhost:5000";
   const query = returnPath ? `?returnPath=${encodeURIComponent(returnPath)}` : "";
-  return `${apiBaseUrl}/api/v1/auth/login${query}`;
+  return buildApiUrl(`/api/v1/auth/login${query}`);
 }

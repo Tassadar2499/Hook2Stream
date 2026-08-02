@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
@@ -31,6 +32,20 @@ public static class Hook2StreamServiceDefaults
     public static TBuilder ConfigureOpenTelemetry<TBuilder>(this TBuilder builder)
         where TBuilder : IHostApplicationBuilder
     {
+        var serviceName = FirstNonEmpty(
+            builder.Configuration["OTEL_SERVICE_NAME"],
+            builder.Environment.ApplicationName)!;
+        var serviceVersion = FirstNonEmpty(
+            builder.Configuration["Telemetry:ServiceVersion"],
+            builder.Configuration["OTEL_SERVICE_VERSION"],
+            GetResourceAttribute(
+                builder.Configuration["OTEL_RESOURCE_ATTRIBUTES"],
+                "service.version"),
+            Assembly.GetEntryAssembly()
+                ?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                ?.InformationalVersion,
+            Assembly.GetEntryAssembly()?.GetName().Version?.ToString());
+
         builder.Logging.AddOpenTelemetry(logging =>
         {
             logging.IncludeFormattedMessage = true;
@@ -38,7 +53,9 @@ public static class Hook2StreamServiceDefaults
         });
 
         builder.Services.AddOpenTelemetry()
-            .ConfigureResource(resource => resource.AddService(builder.Environment.ApplicationName))
+            .ConfigureResource(resource => resource.AddService(
+                serviceName,
+                serviceVersion: serviceVersion))
             .WithMetrics(metrics =>
             {
                 metrics.AddAspNetCoreInstrumentation()
@@ -63,6 +80,34 @@ public static class Hook2StreamServiceDefaults
         }
 
         return builder;
+    }
+
+    private static string? FirstNonEmpty(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+    private static string? GetResourceAttribute(string? attributes, string name)
+    {
+        if (string.IsNullOrWhiteSpace(attributes))
+        {
+            return null;
+        }
+
+        foreach (var attribute in attributes.Split(
+                     ',',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separator = attribute.IndexOf('=');
+            if (separator <= 0 ||
+                !string.Equals(attribute[..separator].Trim(), name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var value = attribute[(separator + 1)..].Trim();
+            return string.IsNullOrWhiteSpace(value) ? null : value;
+        }
+
+        return null;
     }
 
     public static TBuilder AddDefaultHealthChecks<TBuilder>(this TBuilder builder)

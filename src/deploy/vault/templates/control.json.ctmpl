@@ -1,0 +1,8 @@
+{{- with secret "hook2stream-kv/data/production/control" -}}
+{
+  "kv_version": {{ .Data.metadata.version }},
+  "secrets": {
+    "openrouter_api_key": {{ .Data.data.openrouter_api_key | toJSON }}
+  }
+}
+{{- end -}}

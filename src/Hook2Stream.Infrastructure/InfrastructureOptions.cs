@@ -8,7 +8,8 @@ public sealed class StorageOptions
     public string PublicServiceUrl { get; set; } = "http://localhost:9000";
     public string Region { get; set; } = "us-east-1";
     public string Bucket { get; set; } = "hook2stream-media";
-    public string AccessKey { get; set; } = "hook2stream";
+    public StorageCredentialMode CredentialMode { get; set; } = StorageCredentialMode.Auto;
+    public string AccessKey { get; set; } = "";
     public string SecretKey { get; set; } = "";
     public bool ForcePathStyle { get; set; } = true;
     public bool RequireCredentials { get; set; }
@@ -17,6 +18,18 @@ public sealed class StorageOptions
     public bool ConfigureMultipartAbortLifecycle { get; set; } = true;
     public string[] BrowserUploadOrigins { get; set; } =
         ["http://localhost:3000", "http://127.0.0.1:3000"];
+}
+
+public enum StorageCredentialMode
+{
+    Auto,
+    Static,
+    DefaultChain
+}
+
+internal sealed class DatabaseConnectionOptions
+{
+    public string ConnectionString { get; set; } = "";
 }
 
 public sealed class OperationalPolicyOptions

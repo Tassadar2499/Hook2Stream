@@ -1,0 +1,243 @@
+#!/bin/sh
+set -eu
+
+deployment_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+temporary_dir=$(mktemp -d)
+
+cleanup() {
+    rm -rf "$temporary_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+fail() {
+    printf '%s\n' "compose secret contract test: $*" >&2
+    exit 1
+}
+
+command -v docker >/dev/null 2>&1 || fail "docker is required"
+docker compose version >/dev/null 2>&1 \
+    || fail "the Docker Compose v2 plugin is required"
+command -v node >/dev/null 2>&1 || fail "node is required"
+
+chmod 0750 "$temporary_dir"
+mkdir -p "$temporary_dir/vault-auth" "$temporary_dir/vault-candidate"
+: > "$temporary_dir/vault-ca.pem"
+umask 027
+for secret_name in \
+    postgres_password \
+    s3_runtime_access_key \
+    s3_runtime_secret_key \
+    s3_bootstrap_access_key \
+    s3_bootstrap_secret_key \
+    google_client_secret \
+    stripe_secret_key \
+    stripe_webhook_secret \
+    openrouter_api_key \
+    backup_s3_access_key \
+    backup_s3_secret_key \
+    backup_encryption_key_id \
+    backup_encryption_passphrase \
+    backup_heartbeat_url; do
+    printf '%s\n' "test-secret" > "$temporary_dir/$secret_name"
+done
+
+render_model() {
+    destination=$1
+    shift
+
+    (
+        unset SECRETS_GID
+        SECRET_PROVIDER=file
+        SECRETS_DIR=$temporary_dir
+        export SECRET_PROVIDER SECRETS_DIR
+        if [ "$#" -gt 0 ]; then
+            SECRETS_GID=$1
+            export SECRETS_GID
+        fi
+
+        docker compose \
+            --env-file "$deployment_dir/.env.example" \
+            --profile tools \
+            -f "$deployment_dir/compose.yaml" \
+            config --format json
+    ) > "$destination"
+}
+
+render_model "$temporary_dir/default.json"
+render_model "$temporary_dir/override.json" 2468
+
+(
+    unset SECRETS_GID
+    SECRET_PROVIDER=vault
+    SECRETS_DIR=$temporary_dir
+    VAULT_AUTH_DIR=$temporary_dir/vault-auth
+    VAULT_CACERT=$temporary_dir/vault-ca.pem
+    VAULT_CANDIDATE_DIR=$temporary_dir/vault-candidate
+    export \
+        SECRET_PROVIDER \
+        SECRETS_DIR \
+        VAULT_AUTH_DIR \
+        VAULT_CACERT \
+        VAULT_CANDIDATE_DIR
+    docker compose \
+        --env-file "$deployment_dir/.env.example" \
+        --profile tools \
+        -f "$deployment_dir/compose.yaml" \
+        -f "$deployment_dir/compose.vault.yaml" \
+        config --format json
+) > "$temporary_dir/vault.json"
+
+node - \
+    "$temporary_dir/default.json" \
+    "$temporary_dir/override.json" \
+    "$temporary_dir/vault.json" <<'NODE'
+const fs = require("node:fs");
+
+const expectedSecrets = {
+  api: [
+    "google_client_secret",
+    "postgres_password",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+    "stripe_secret_key",
+    "stripe_webhook_secret",
+  ],
+  "worker-media": [
+    "postgres_password",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+  ],
+  "worker-analysis": [
+    "postgres_password",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+  ],
+  "worker-control": [
+    "openrouter_api_key",
+    "postgres_password",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+  ],
+  "worker-render": [
+    "postgres_password",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+  ],
+  "worker-export": [
+    "postgres_password",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+  ],
+  bootstrapper: [
+    "postgres_password",
+    "s3_bootstrap_access_key",
+    "s3_bootstrap_secret_key",
+  ],
+  pgbouncer: ["postgres_password"],
+  postgres: ["postgres_password"],
+  "postgres-backup": [
+    "backup_encryption_key_id",
+    "backup_encryption_passphrase",
+    "backup_heartbeat_url",
+    "backup_s3_access_key",
+    "backup_s3_secret_key",
+    "postgres_password",
+  ],
+};
+
+function fail(message) {
+  process.stderr.write(`compose secret contract test: ${message}\n`);
+  process.exit(1);
+}
+
+function mountedSecretNames(service) {
+  return (service.secrets ?? [])
+    .map((secret) => typeof secret === "string" ? secret : secret.source)
+    .sort();
+}
+
+function mountedConfigNames(service) {
+  return (service.configs ?? [])
+    .map((config) => typeof config === "string" ? config : config.source)
+    .sort();
+}
+
+function assertModel(path, expectedGid) {
+  const model = JSON.parse(fs.readFileSync(path, "utf8"));
+  const mountedSecrets = new Set();
+
+  for (const [serviceName, secretNames] of Object.entries(expectedSecrets)) {
+    const service = model.services?.[serviceName];
+    if (!service) {
+      fail(`missing service ${serviceName}`);
+    }
+
+    const actualSecrets = mountedSecretNames(service);
+    actualSecrets.forEach((secret) => mountedSecrets.add(secret));
+    const expected = [...secretNames].sort();
+    if (JSON.stringify(actualSecrets) !== JSON.stringify(expected)) {
+      fail(
+        `${serviceName} secrets differ: expected ${expected.join(",")}; ` +
+        `received ${actualSecrets.join(",")}`,
+      );
+    }
+
+    const supplementalGroups = (service.group_add ?? []).map(String);
+    if (
+      supplementalGroups.length !== 1 ||
+      supplementalGroups[0] !== expectedGid
+    ) {
+      fail(
+        `${serviceName} must have only supplemental secrets group ` +
+        `${expectedGid}; received ${supplementalGroups.join(",")}`,
+      );
+    }
+  }
+
+  for (const [serviceName, service] of Object.entries(model.services ?? {})) {
+    const actualSecrets = mountedSecretNames(service);
+    if (actualSecrets.length > 0 && !(serviceName in expectedSecrets)) {
+      fail(`unexpected secret-consuming service ${serviceName}`);
+    }
+
+    if (!(serviceName in expectedSecrets) && (service.group_add ?? []).length > 0) {
+      fail(`non-consumer ${serviceName} unexpectedly joins the secrets group`);
+    }
+  }
+
+  const declaredSecrets = Object.keys(model.secrets ?? {}).sort();
+  const expectedDeclaredSecrets = [...mountedSecrets].sort();
+  if (JSON.stringify(declaredSecrets) !== JSON.stringify(expectedDeclaredSecrets)) {
+    fail(
+      `declared secrets differ from mounted secrets: declared ` +
+      `${declaredSecrets.join(",")}; mounted ${expectedDeclaredSecrets.join(",")}`,
+    );
+  }
+
+  if (!mountedConfigNames(model.services.postgres).includes("postgres_set_password")) {
+    fail("postgres must mount the audited password-rotation helper");
+  }
+}
+
+assertModel(process.argv[2], "2000");
+assertModel(process.argv[3], "2468");
+
+const vaultModel = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+const vaultRenderer = vaultModel.services?.["vault-renderer"];
+if (!vaultRenderer) {
+  fail("Vault overlay did not render vault-renderer");
+}
+if (JSON.stringify(vaultRenderer.entrypoint) !== JSON.stringify(["/bin/vault"])) {
+  fail("vault-renderer must bypass the vendor privilege-dropping entrypoint");
+}
+if (vaultRenderer.user !== "0:2000") {
+  fail(`vault-renderer must run as 0:2000; received ${vaultRenderer.user}`);
+}
+if (vaultRenderer.command?.[0] !== "agent") {
+  fail("vault-renderer must invoke Vault Agent through /bin/vault");
+}
+NODE
+
+printf '%s\n' \
+    "compose secret contract test: secret mounts, groups, and Vault renderer are valid"

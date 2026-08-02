@@ -66,6 +66,8 @@ jobs:
       - run: dotnet restore src/Hook2Stream.slnx
       - run: npm ci --prefix src/web
       - run: npm audit --prefix src/web --omit=dev --audit-level=high
+      - name: Validate production deployment bundle
+        run: src/deploy/scripts/validate-deployment.sh
       - run: src/ci/verify.sh
 
       - run: npx --prefix src/web playwright install --with-deps chromium firefox webkit
@@ -129,19 +131,28 @@ jobs:
           - name: api
             dockerfile: src/Hook2Stream.Api/Dockerfile
             runtime: dotnet
+            secret_consumer: true
             build_args: ""
           - name: worker
             dockerfile: src/Hook2Stream.Worker/Dockerfile
             runtime: dotnet
+            secret_consumer: true
             build_args: ""
           - name: bootstrapper
             dockerfile: src/Hook2Stream.Bootstrapper/Dockerfile
             runtime: dotnet
+            secret_consumer: true
             build_args: ""
           - name: web
             dockerfile: src/web/Dockerfile
             runtime: node
-            build_args: --build-arg NEXT_PUBLIC_API_BASE_URL=https://api.example.test --build-arg NEXT_PUBLIC_AUTH_MODE=oauth
+            secret_consumer: false
+            build_args: --build-arg NEXT_PUBLIC_AUTH_MODE=oauth
+          - name: postgres-backup
+            dockerfile: src/deploy/backup/Dockerfile
+            runtime: postgres
+            secret_consumer: true
+            build_args: ""
     steps:
       - uses: actions/checkout@v4
       - run: docker build ${{ matrix.build_args }} --file "${{ matrix.dockerfile }}" --tag "hook2stream-${{ matrix.name }}:ci" .
@@ -149,3 +160,182 @@ jobs:
         run: docker run --rm --entrypoint dotnet "hook2stream-${{ matrix.name }}:ci" --list-runtimes | grep -q Microsoft.AspNetCore.App
       - if: matrix.runtime == 'node'
         run: docker run --rm --entrypoint node "hook2stream-${{ matrix.name }}:ci" --version
+      - if: matrix.runtime == 'postgres'
+        run: docker run --rm --entrypoint pg_dump "hook2stream-${{ matrix.name }}:ci" --version
+      - name: Verify supplemental-group secret access
+        if: matrix.secret_consumer == true
+        shell: bash
+        run: |
+          probe_dir=$(mktemp -d)
+          trap 'sudo rm -rf "$probe_dir"' EXIT
+          printf '%s\n' 'runtime-secret-probe' | sudo tee "$probe_dir/secret" >/dev/null
+          sudo chown root:2000 "$probe_dir/secret"
+          sudo chmod 0640 "$probe_dir/secret"
+          docker run --rm \
+            --group-add 2000 \
+            --mount "type=bind,source=$probe_dir/secret,target=/run/secrets/probe,readonly" \
+            --entrypoint /bin/sh \
+            "hook2stream-${{ matrix.name }}:ci" \
+            -ec 'test -r /run/secrets/probe && test "$(cat /run/secrets/probe)" = runtime-secret-probe'
+          if docker run --rm \
+            --mount "type=bind,source=$probe_dir/secret,target=/run/secrets/probe,readonly" \
+            --entrypoint /bin/sh \
+            "hook2stream-${{ matrix.name }}:ci" \
+            -ec 'test -r /run/secrets/probe' 2>/dev/null; then
+            echo "runtime image can read the group-only secret without group_add" >&2
+            exit 1
+          fi
+      - name: Scan container for fixable high and critical vulnerabilities
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: hook2stream-${{ matrix.name }}:ci
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: containers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: src/Hook2Stream.Api/Dockerfile
+            build_args: ""
+            deploy_var: API_IMAGE
+          - name: worker
+            dockerfile: src/Hook2Stream.Worker/Dockerfile
+            build_args: ""
+            deploy_var: WORKER_IMAGE
+          - name: bootstrapper
+            dockerfile: src/Hook2Stream.Bootstrapper/Dockerfile
+            build_args: ""
+            deploy_var: BOOTSTRAPPER_IMAGE
+          - name: web
+            dockerfile: src/web/Dockerfile
+            build_args: NEXT_PUBLIC_AUTH_MODE=oauth
+            deploy_var: WEB_IMAGE
+          - name: postgres-backup
+            dockerfile: src/deploy/backup/Dockerfile
+            build_args: ""
+            deploy_var: POSTGRES_BACKUP_IMAGE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve immutable image reference
+        id: image
+        shell: bash
+        env:
+          IMAGE_NAME: hook2stream-${{ matrix.name }}
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          echo "tag=${repository}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Publish immutable image with SBOM and provenance
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tag }}
+          build-args: ${{ matrix.build_args }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=release-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.name }}
+
+      - name: Scan exact published digest
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
+
+      - name: Record digest-pinned release reference
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.name }}
+          DEPLOY_VARIABLE: ${{ matrix.deploy_var }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p release-digests
+          {
+            echo "# ${IMAGE_TAG}"
+            echo "${DEPLOY_VARIABLE}=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          } > "release-digests/${IMAGE_NAME}.txt"
+          {
+            echo "### ${IMAGE_NAME}"
+            echo
+            echo "\`${IMAGE_REPOSITORY}@${IMAGE_DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload digest reference
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-digest-${{ matrix.name }}-${{ github.sha }}
+          path: release-digests/${{ matrix.name }}.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  release-manifest:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download image digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-digest-*-${{ github.sha }}
+          path: release-digests
+          merge-multiple: true
+
+      - name: Assemble deployment image manifest
+        run: |
+          printf 'RELEASE_VERSION=%s\n' "$GITHUB_SHA" > release-images.env
+          cat \
+            release-digests/api.txt \
+            release-digests/worker.txt \
+            release-digests/bootstrapper.txt \
+            release-digests/web.txt \
+            release-digests/postgres-backup.txt \
+            >> release-images.env
+          grep -qx "RELEASE_VERSION=${GITHUB_SHA}" release-images.env
+          test "$(grep -c '_IMAGE=ghcr.io/.\+@sha256:' release-images.env)" -eq 5
+
+      - name: Upload deployment image manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-images-${{ github.sha }}
+          path: release-images.env
+          if-no-files-found: error
+          retention-days: 90

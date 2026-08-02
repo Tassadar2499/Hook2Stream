@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+data/
+.release-state/
+secrets/*
+!secrets/README.md

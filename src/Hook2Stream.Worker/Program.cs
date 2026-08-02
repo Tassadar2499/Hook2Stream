@@ -3,7 +3,7 @@ using Hook2Stream.Infrastructure;
 using Hook2Stream.Infrastructure.Providers;
 using Hook2Stream.Worker;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
 builder.Services.AddHook2StreamInfrastructure(
     builder.Configuration,
@@ -49,5 +49,8 @@ builder.Services.AddOptions<WorkerOptions>()
     .ValidateOnStart();
 builder.Services.AddHook2StreamWorkerRole(configuredCapabilities);
 
-var host = builder.Build();
-host.Run();
+var app = builder.Build();
+app.MapDefaultEndpoints();
+app.Run();
+
+public partial class Program;

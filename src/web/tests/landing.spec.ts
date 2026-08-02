@@ -1,5 +1,19 @@
 import { expect, test } from "@playwright/test";
 
+test("container health endpoints are live, ready, and not cached", async ({
+  request,
+}) => {
+  const live = await request.get("/health/live");
+  expect(live.status()).toBe(200);
+  expect(await live.json()).toEqual({ status: "ok" });
+  expect(live.headers()["cache-control"]).toContain("no-store");
+
+  const ready = await request.get("/health/ready");
+  expect(ready.status()).toBe(200);
+  expect(await ready.json()).toEqual({ status: "ready" });
+  expect(ready.headers()["cache-control"]).toContain("no-store");
+});
+
 test("landing communicates the campaign result and pricing", async ({ page }) => {
   await page.goto("/");
 

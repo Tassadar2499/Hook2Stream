@@ -5,11 +5,14 @@ using Hook2Stream.Api;
 using Hook2Stream.Api.Authentication;
 using Hook2Stream.Infrastructure;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
+var reverseProxy = builder.Services.AddTrustedReverseProxy(builder.Configuration);
+builder.Services.AddHttpsRedirection(options => options.HttpsPort = 443);
 builder.Services.AddHook2StreamInfrastructure(builder.Configuration, builder.Environment);
 builder.Services.AddOpenApi(options =>
 {
@@ -125,6 +128,19 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+if (reverseProxy.Enabled)
+{
+    app.UseForwardedHeaders();
+}
+
+if (app.Environment.IsProduction())
+{
+    app.UseHsts();
+    app.UseWhen(
+        context => !context.Request.Path.StartsWithSegments("/health"),
+        branch => branch.UseHttpsRedirection());
+}
 
 app.UseExceptionHandler();
 app.UseCors();

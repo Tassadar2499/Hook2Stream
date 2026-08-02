@@ -1,0 +1,69 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2 h3
+	}
+}
+
+{$APP_DOMAIN} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+		-Server
+	}
+
+	@api_ready path /health/api-ready
+	handle @api_ready {
+		rewrite * /health/ready
+		reverse_proxy api:8080 {
+			header_up Host {$APP_DOMAIN}
+
+			@ready status 200
+			handle_response @ready {
+				header Content-Type "text/plain; charset=utf-8"
+				respond "ready" 200
+			}
+
+			handle_response {
+				header Content-Type "text/plain; charset=utf-8"
+				respond "not ready" 503
+			}
+		}
+	}
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy api:8080 {
+			health_uri /health/ready
+			health_headers {
+				Host {$APP_DOMAIN}
+			}
+			health_interval 30s
+			health_timeout 5s
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000 {
+			health_uri /health/ready
+			health_interval 30s
+			health_timeout 5s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

@@ -1,0 +1,8 @@
+{{- with secret "hook2stream-kv/data/production/foundation" -}}
+{
+  "kv_version": {{ .Data.metadata.version }},
+  "secrets": {
+    "postgres_password": {{ .Data.data.postgres_password | toJSON }}
+  }
+}
+{{- end -}}

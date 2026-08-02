@@ -194,6 +194,7 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
     var worker = builder
         .AddProject<Projects.Hook2Stream_Worker>($"worker-{capability}")
         .WithReference(database)
+        .WithHttpEndpoint(name: "http")
         .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment);
     if (isE2e)
     {
@@ -228,6 +229,7 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
         .WithEnvironment("Storage__RequireCredentials", "true")
         .WithEnvironment("Storage__ConfigureBucketCors", "false")
         .WithEnvironment("Worker__Capabilities__0", capability)
+        .WithHttpHealthCheck("/health/ready")
         .WaitForCompletion(bootstrapper);
 }
 

@@ -120,6 +120,55 @@ public sealed class S3ObjectStorageTests
     }
 
     [Theory]
+    [InlineData(StorageCredentialMode.Auto, "access", "secret", true)]
+    [InlineData(StorageCredentialMode.Auto, "", "", false)]
+    [InlineData(StorageCredentialMode.Static, "access", "secret", true)]
+    [InlineData(StorageCredentialMode.DefaultChain, "", "", false)]
+    public void Credential_mode_selects_static_or_aws_default_chain(
+        StorageCredentialMode mode,
+        string accessKey,
+        string secretKey,
+        bool expectedStatic)
+    {
+        var options = new StorageOptions
+        {
+            CredentialMode = mode,
+            AccessKey = accessKey,
+            SecretKey = secretKey
+        };
+
+        Assert.Equal(expectedStatic, S3ClientFactory.UsesStaticCredentials(options));
+    }
+
+    [Theory]
+    [InlineData("Auto", "access", "")]
+    [InlineData("Static", "", "")]
+    [InlineData("DefaultChain", "access", "secret")]
+    public void Invalid_credential_combinations_fail_options_validation(
+        string mode,
+        string accessKey,
+        string secretKey)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Storage:CredentialMode"] = mode,
+                ["Storage:AccessKey"] = accessKey,
+                ["Storage:SecretKey"] = secretKey
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddHook2StreamInfrastructure(
+            configuration,
+            new TestHostEnvironment(Environments.Development),
+            includeBilling: false);
+        using var provider = services.BuildServiceProvider();
+
+        Assert.Throws<OptionsValidationException>(() =>
+            _ = provider.GetRequiredService<IOptions<StorageOptions>>().Value);
+    }
+
+    [Theory]
     [InlineData("ftp://minio.example.test")]
     [InlineData("http://user:password@minio.example.test")]
     [InlineData("http://minio.example.test/base-path")]
@@ -173,7 +222,9 @@ public sealed class S3ObjectStorageTests
                 ["Storage:ServiceUrl"] = serviceUrl,
                 ["Storage:PublicServiceUrl"] = publicServiceUrl,
                 ["Storage:AccessKey"] = "test-access-key",
-                ["Storage:SecretKey"] = "test-secret-key"
+                ["Storage:SecretKey"] = "test-secret-key",
+                ["ConnectionStrings:hook2stream"] =
+                    "Host=postgres;Database=hook2stream;Username=app;Password=secret"
             })
             .Build();
 

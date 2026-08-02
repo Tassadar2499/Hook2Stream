@@ -95,7 +95,10 @@ Workers lease only matching capabilities. A lease token fences late attempts; on
 
 Production images use the repository root as their build context so `Directory.Build.props` is applied, for example `docker build -f src/Hook2Stream.Api/Dockerfile .`. The Dockerfiles pin an available .NET 10 container SDK independently of the workstation-only `global.json`. Separate API, bootstrapper, worker and standalone Next.js Dockerfiles run as non-root users; deploy the same worker image once per capability pool.
 
-The public API URL is compiled into the browser bundle, so build the web image with an explicit origin: `docker build -f src/web/Dockerfile --build-arg NEXT_PUBLIC_API_BASE_URL=https://api.example.com --build-arg NEXT_PUBLIC_AUTH_MODE=oauth .`.
+The production web image uses same-origin `/api/*` requests by default, so one
+immutable image can move between environments without rebuilding it for a
+hostname. Set `NEXT_PUBLIC_API_BASE_URL` only for split-origin deployments;
+`NEXT_PUBLIC_AUTH_MODE` remains a build-time choice.
 
 Set exactly one `Worker__Capabilities__0` value per worker deployment (`media`, `analysis`, `control`, `render`, or `export`). The bootstrapper owns bucket setup; when `Storage__ConfigureBucketCors=true`, provide every public browser origin through `Storage__BrowserUploadOrigins__N` (HTTPS is required in Production). Providers that do not support the S3 `AbortIncompleteMultipartUpload` lifecycle action must set `Storage__ConfigureMultipartAbortLifecycle=false`; staging-object expiration remains controlled independently by `Storage__ConfigureBucketLifecycle`.
 
@@ -125,6 +128,17 @@ src/ci/generate-contracts.sh
 src/ci/verify.sh
 npm run test:e2e --prefix src/web
 ```
+
+## Production deployment
+
+The provider-neutral, budget single-node deployment bundle lives in
+[`deploy/`](deploy/README.md). It includes Caddy TLS termination, PgBouncer,
+isolated worker pools, encrypted off-host PostgreSQL backups, Docker secrets,
+health checks, resource limits, and an ordered release/rollback runbook. It is
+intended for a closed alpha; the runbook identifies the managed PostgreSQL and
+multi-instance upgrades required for paid beta. Backup manifests bind every
+encrypted recovery point to an immutable key ID; historical passphrases remain
+available for the 35-day recovery window plus a 14-day restore margin.
 
 ## Implementation boundary
 

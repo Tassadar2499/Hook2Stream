@@ -17,18 +17,31 @@ namespace Hook2Stream.Infrastructure;
 
 public static class DependencyInjection
 {
+    private const string DevelopmentConnectionString =
+        "Host=localhost;Port=5432;Database=hook2stream;Username=postgres;Password=postgres";
+
     public static IServiceCollection AddHook2StreamInfrastructure(
         this IServiceCollection services,
         IConfiguration configuration,
         IHostEnvironment environment,
         bool includeBilling = true)
     {
-        var connectionString = configuration.GetConnectionString("hook2stream")
-            ?? configuration.GetConnectionString("Database")
-            ?? "Host=localhost;Port=5432;Database=hook2stream;Username=postgres;Password=postgres";
+        var configuredConnectionString = FirstNonEmpty(
+            configuration.GetConnectionString("hook2stream"),
+            configuration.GetConnectionString("Database"));
+        services.AddOptions<DatabaseConnectionOptions>()
+            .Configure(options => options.ConnectionString = configuredConnectionString ??
+                (environment.IsProduction() ? "" : DevelopmentConnectionString))
+            .Validate(
+                options => !string.IsNullOrWhiteSpace(options.ConnectionString),
+                "ConnectionStrings:hook2stream (or ConnectionStrings:Database) is required in Production.")
+            .ValidateOnStart();
 
-        services.AddDbContext<Hook2StreamDbContext>(options =>
-            options.UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure())
+        services.AddDbContext<Hook2StreamDbContext>((serviceProvider, options) =>
+            options.UseNpgsql(
+                    serviceProvider.GetRequiredService<IOptions<DatabaseConnectionOptions>>()
+                        .Value.ConnectionString,
+                    npgsql => npgsql.EnableRetryOnFailure())
                 .UseSnakeCaseNamingConvention());
 
         services.AddOptions<StorageOptions>()
@@ -41,10 +54,20 @@ public static class DependencyInjection
                 "Storage PublicServiceUrl must be an absolute HTTPS origin without credentials, paths, queries, or fragments in Production.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.Bucket), "Storage Bucket is required.")
             .Validate(
+                HasCompleteOrEmptyStaticCredentials,
+                "Storage AccessKey and SecretKey must either both be configured or both be empty.")
+            .Validate(
+                options => options.CredentialMode != StorageCredentialMode.Static || HasStaticCredentials(options),
+                "Storage static credential mode requires both AccessKey and SecretKey.")
+            .Validate(
+                options => options.CredentialMode != StorageCredentialMode.DefaultChain ||
+                           !HasAnyStaticCredential(options),
+                "Storage DefaultChain credential mode cannot be combined with AccessKey or SecretKey.")
+            .Validate(
                 options => !options.RequireCredentials ||
-                           (!string.IsNullOrWhiteSpace(options.AccessKey) &&
-                            !string.IsNullOrWhiteSpace(options.SecretKey)),
-                "Storage credentials are required for this environment.")
+                           options.CredentialMode != StorageCredentialMode.DefaultChain &&
+                           HasStaticCredentials(options),
+                "Storage RequireCredentials requires static AccessKey and SecretKey credentials.")
             .Validate(
                 options => !options.ConfigureBucketCors ||
                            options.BrowserUploadOrigins is { Length: > 0 } &&
@@ -134,6 +157,20 @@ public static class DependencyInjection
 
         return services;
     }
+
+    private static string? FirstNonEmpty(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+    private static bool HasAnyStaticCredential(StorageOptions options) =>
+        !string.IsNullOrWhiteSpace(options.AccessKey) ||
+        !string.IsNullOrWhiteSpace(options.SecretKey);
+
+    private static bool HasStaticCredentials(StorageOptions options) =>
+        !string.IsNullOrWhiteSpace(options.AccessKey) &&
+        !string.IsNullOrWhiteSpace(options.SecretKey);
+
+    private static bool HasCompleteOrEmptyStaticCredentials(StorageOptions options) =>
+        !HasAnyStaticCredential(options) || HasStaticCredentials(options);
 
     private static bool IsValidBrowserOrigin(string value, bool requireHttps) =>
         IsValidOrigin(value, requireHttps);

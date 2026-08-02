@@ -1,0 +1,10 @@
+{{- with secret "hook2stream-kv/data/production/api" -}}
+{
+  "kv_version": {{ .Data.metadata.version }},
+  "secrets": {
+    "google_client_secret": {{ .Data.data.google_client_secret | toJSON }},
+    "stripe_secret_key": {{ .Data.data.stripe_secret_key | toJSON }},
+    "stripe_webhook_secret": {{ .Data.data.stripe_webhook_secret | toJSON }}
+  }
+}
+{{- end -}}

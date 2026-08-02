@@ -25,8 +25,19 @@ public sealed class S3ObjectStorage(
 
     public async Task EnsureBucketAsync(CancellationToken cancellationToken)
     {
-        var buckets = await internalClient.ListBucketsAsync(cancellationToken);
-        if (buckets.Buckets?.Any(bucket => string.Equals(bucket.BucketName, _options.Bucket, StringComparison.Ordinal)) != true)
+        try
+        {
+            await internalClient.ListObjectsV2Async(
+                new ListObjectsV2Request
+                {
+                    BucketName = _options.Bucket,
+                    MaxKeys = 1
+                },
+                cancellationToken);
+        }
+        catch (AmazonS3Exception exception) when (
+            exception.StatusCode == HttpStatusCode.NotFound ||
+            string.Equals(exception.ErrorCode, "NoSuchBucket", StringComparison.Ordinal))
         {
             await internalClient.PutBucketAsync(
                 new PutBucketRequest { BucketName = _options.Bucket },
@@ -354,7 +365,6 @@ internal static class S3ClientFactory
     internal static IAmazonS3 Create(StorageOptions options, bool usePublicServiceUrl)
     {
         var serviceUrl = usePublicServiceUrl ? options.PublicServiceUrl : options.ServiceUrl;
-        var credentials = new BasicAWSCredentials(options.AccessKey, options.SecretKey);
         var config = new AmazonS3Config
         {
             ServiceURL = serviceUrl,
@@ -364,8 +374,24 @@ internal static class S3ClientFactory
             RequestChecksumCalculation = RequestChecksumCalculation.WHEN_REQUIRED,
             ResponseChecksumValidation = ResponseChecksumValidation.WHEN_REQUIRED
         };
-        return new AmazonS3Client(credentials, config);
+        return UsesStaticCredentials(options)
+            ? new AmazonS3Client(new BasicAWSCredentials(options.AccessKey, options.SecretKey), config)
+            : new AmazonS3Client(config);
     }
+
+    internal static bool UsesStaticCredentials(StorageOptions options) =>
+        options.CredentialMode switch
+        {
+            StorageCredentialMode.Static => true,
+            StorageCredentialMode.DefaultChain => false,
+            StorageCredentialMode.Auto =>
+                !string.IsNullOrWhiteSpace(options.AccessKey) &&
+                !string.IsNullOrWhiteSpace(options.SecretKey),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(options),
+                options.CredentialMode,
+                "Unknown storage credential mode.")
+        };
 }
 
 internal static class S3LifecycleConfigurationBuilder

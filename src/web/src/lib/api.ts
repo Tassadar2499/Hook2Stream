@@ -4,6 +4,7 @@ import {
   markOAuthSessionSignedOut,
   readOAuthCsrfToken,
 } from "./auth-session";
+import { buildApiUrl } from "./api-url";
 
 type Schemas = components["schemas"];
 
@@ -41,10 +42,6 @@ export class ApiRequestError extends Error {
   }
 }
 
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ??
-  "http://localhost:5000";
-
 export async function apiFetch<T>(
   path: string,
   token: string,
@@ -63,7 +60,7 @@ export async function apiFetch<T>(
     if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
   }
 
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await fetch(buildApiUrl(path), {
     ...init,
     headers,
     credentials: "include",
@@ -106,7 +103,7 @@ export async function streamJobEvents(
   signal: AbortSignal,
 ) {
   const headers = authenticatedHeaders(token, "text/event-stream");
-  const response = await fetch(`${apiBaseUrl}/api/v1/jobs/${jobId}/events`, {
+  const response = await fetch(buildApiUrl(`/api/v1/jobs/${jobId}/events`), {
     headers,
     credentials: "include",
     cache: "no-store",
@@ -161,7 +158,7 @@ export async function streamProjectEvents(
 ) {
   const headers = authenticatedHeaders(token, "text/event-stream");
   const response = await fetch(
-    `${apiBaseUrl}/api/v1/releases/${projectId}/events`,
+    buildApiUrl(`/api/v1/releases/${projectId}/events`),
     {
       headers,
       credentials: "include",

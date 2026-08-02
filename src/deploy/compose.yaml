@@ -1,0 +1,712 @@
+name: ${COMPOSE_PROJECT_NAME:-hook2stream}
+
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-dotnet-runtime: &dotnet-runtime
+  init: true
+  restart: unless-stopped
+  read_only: true
+  group_add:
+    - "${SECRETS_GID:-2000}"
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 512
+  stop_grace_period: 30s
+  configs:
+    - source: dotnet_load_secrets
+      target: /opt/hook2stream/load-secrets.sh
+      mode: 0555
+  entrypoint:
+    - /bin/sh
+    - /opt/hook2stream/load-secrets.sh
+  logging: *json-logging
+  networks:
+    - backend
+
+x-dotnet-environment: &dotnet-environment
+  DOTNET_ENVIRONMENT: Production
+  DOTNET_EnableDiagnostics: "0"
+  DB_PORT: "6432"
+  DB_SSL_MODE: Disable
+  DB_CONNECT_TIMEOUT_SECONDS: "15"
+  DB_COMMAND_TIMEOUT_SECONDS: "180"
+  Storage__ServiceUrl: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}
+  Storage__PublicServiceUrl: ${S3_PUBLIC_SERVICE_URL:?Set S3_PUBLIC_SERVICE_URL}
+  Storage__Region: ${S3_REGION:?Set S3_REGION}
+  Storage__Bucket: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
+  Storage__CredentialMode: Static
+  Storage__ForcePathStyle: ${S3_FORCE_PATH_STYLE:-false}
+  Storage__RequireCredentials: "true"
+  Storage__ConfigureBucketCors: "false"
+  Storage__ConfigureBucketLifecycle: "false"
+  STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
+  STORAGE_SECRET_FILE: /run/secrets/s3_runtime_secret_key
+  OperationalPolicy__UploadUrlMinutes: "10"
+  OperationalPolicy__UploadSessionHours: "24"
+  OperationalPolicy__StagingHours: "24"
+  OperationalPolicy__SupersededArtworkDays: "30"
+  OperationalPolicy__UnpaidProjectDays: "30"
+  OperationalPolicy__PaidSourceDays: "90"
+  OperationalPolicy__PaidOutputDays: "365"
+  OperationalPolicy__ExplicitDeletionDays: "7"
+  OperationalPolicy__DeletionFenceMinutes: "15"
+  OperationalPolicy__IdempotencyDays: "7"
+  OperationalPolicy__RetentionSweepMinutes: "60"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_SERVICE_VERSION: ${RELEASE_VERSION:?Set RELEASE_VERSION}
+  Telemetry__ServiceVersion: ${RELEASE_VERSION:?Set RELEASE_VERSION}
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production,service.version=${RELEASE_VERSION:?Set RELEASE_VERSION}
+
+x-worker-environment: &worker-environment
+  <<: *dotnet-environment
+  DB_HOST: pgbouncer
+  DB_MAX_POOL_SIZE: "8"
+  DB_PASSWORD_FILE: /run/secrets/postgres_password
+  MediaTools__FfmpegPath: ffmpeg
+  MediaTools__FfprobePath: ffprobe
+  MediaTools__ProcessorVersion: ingest-v1
+  MediaTools__ProcessTimeoutSeconds: "900"
+  MediaTools__WorkRoot: /tmp/hook2stream
+  PipelineProviders__WorkRoot: /tmp/hook2stream
+  PipelineProviders__AudioAnalysis__Mode: Deterministic
+  PipelineProviders__AudioAnalysis__TimeoutSeconds: "900"
+  PipelineProviders__Transcription__Mode: OpenRouter
+  PipelineProviders__Transcription__TimeoutSeconds: "900"
+  PipelineProviders__Artwork__Mode: OpenRouter
+  PipelineProviders__Artwork__TimeoutSeconds: "900"
+  PipelineProviders__CampaignPlanning__Mode: OpenRouter
+  PipelineProviders__CampaignPlanning__TimeoutSeconds: "900"
+  PipelineProviders__VideoRendering__Mode: Deterministic
+  PipelineProviders__VideoRendering__TimeoutSeconds: "7200"
+  Worker__LeaseDurationSeconds: "120"
+  Worker__HeartbeatIntervalSeconds: "30"
+  Worker__IdleDelayMilliseconds: "1000"
+  Worker__QueueErrorDelaySeconds: "5"
+  Worker__OutboxPollMilliseconds: "500"
+  Worker__OutboxBatchSize: "20"
+  Worker__OutboxMaxAttempts: "10"
+
+x-worker-runtime: &worker-runtime
+  <<: *dotnet-runtime
+  image: ${WORKER_IMAGE:?Set WORKER_IMAGE to an immutable image reference}
+  command:
+    - dotnet
+    - Hook2Stream.Worker.dll
+  stop_grace_period: 150s
+  healthcheck:
+    test:
+      - CMD
+      - curl
+      - --fail
+      - --silent
+      - --show-error
+      - http://127.0.0.1:8080/health/ready
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+  depends_on:
+    pgbouncer:
+      condition: service_healthy
+  secrets:
+    - postgres_password
+    - s3_runtime_access_key
+    - s3_runtime_secret_key
+
+services:
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2.11.4-alpine}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL}
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+        mode: 0444
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    ports:
+      - "${HTTP_BIND_ADDRESS:-0.0.0.0}:80:80/tcp"
+      - "${HTTPS_BIND_ADDRESS:-0.0.0.0}:443:443/tcp"
+      - "${HTTPS_BIND_ADDRESS:-0.0.0.0}:443:443/udp"
+    healthcheck:
+      test:
+        - CMD
+        - caddy
+        - validate
+        - --config
+        - /etc/caddy/Caddyfile
+        - --adapter
+        - caddyfile
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    logging: *json-logging
+    networks:
+      - edge
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+        reservations:
+          memory: 64M
+
+  web:
+    image: ${WEB_IMAGE:?Set WEB_IMAGE to an immutable image reference}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 30s
+    environment:
+      NODE_ENV: production
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+      - /app/.next/cache:rw,nosuid,nodev,noexec,size=256m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *json-logging
+    networks:
+      - edge
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+          pids: 256
+        reservations:
+          memory: 128M
+
+  api:
+    <<: *dotnet-runtime
+    image: ${API_IMAGE:?Set API_IMAGE to an immutable image reference}
+    command:
+      - dotnet
+      - Hook2Stream.Api.dll
+    environment:
+      <<: *dotnet-environment
+      ReverseProxy__Enabled: "true"
+      ReverseProxy__ForwardLimit: "1"
+      ReverseProxy__TrustAllProxies: "true"
+      DB_HOST: pgbouncer
+      DB_MAX_POOL_SIZE: "20"
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      OTEL_SERVICE_NAME: hook2stream-api
+      Auth__Mode: OAuth
+      AllowedHosts: ${APP_DOMAIN:?Set APP_DOMAIN}
+      HEALTHCHECK_HOST_HEADER: ${APP_DOMAIN:?Set APP_DOMAIN}
+      Cors__Origins__0: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      Google__ClientId: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID}
+      Google__PublicApiBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      Google__PublicWebReturnBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google_client_secret
+      Stripe__Mode: Stripe
+      Stripe__PublicWebBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret_key
+      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
+      Stripe__PriceIds__art_credits_5: ${STRIPE_PRICE_ART_CREDITS_5:?Set STRIPE_PRICE_ART_CREDITS_5}
+      Stripe__PriceIds__mini_release: ${STRIPE_PRICE_MINI_RELEASE:?Set STRIPE_PRICE_MINI_RELEASE}
+      Stripe__PriceIds__release_pack: ${STRIPE_PRICE_RELEASE_PACK:?Set STRIPE_PRICE_RELEASE_PACK}
+      Stripe__PriceIds__clean_cover: ${STRIPE_PRICE_CLEAN_COVER:?Set STRIPE_PRICE_CLEAN_COVER}
+      Stripe__PriceIds__active_artist: ${STRIPE_PRICE_ACTIVE_ARTIST:?Set STRIPE_PRICE_ACTIVE_ARTIST}
+      OperationalPolicy__RetentionSweepEnabled: "false"
+    configs:
+      - source: dotnet_load_secrets
+        target: /opt/hook2stream/load-secrets.sh
+        mode: 0555
+      - source: dotnet_http_healthcheck
+        target: /opt/hook2stream/http-healthcheck.sh
+        mode: 0555
+    secrets:
+      - postgres_password
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
+      - google_client_secret
+      - stripe_secret_key
+      - stripe_webhook_secret
+    healthcheck:
+      test:
+        - CMD
+        - /bin/sh
+        - /opt/hook2stream/http-healthcheck.sh
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 45s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+    networks:
+      - edge
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+          pids: 512
+        reservations:
+          memory: 256M
+
+  worker-media:
+    <<: *worker-runtime
+    environment:
+      <<: *worker-environment
+      OTEL_SERVICE_NAME: hook2stream-worker-media
+      Worker__Capabilities__0: media
+      OperationalPolicy__RetentionSweepEnabled: "false"
+    volumes:
+      - worker_media_scratch:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.50"
+          memory: 1536M
+          pids: 512
+        reservations:
+          memory: 256M
+
+  worker-analysis:
+    <<: *worker-runtime
+    environment:
+      <<: *worker-environment
+      OTEL_SERVICE_NAME: hook2stream-worker-analysis
+      Worker__Capabilities__0: analysis
+      OperationalPolicy__RetentionSweepEnabled: "false"
+    volumes:
+      - worker_analysis_scratch:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.50"
+          memory: 1536M
+          pids: 512
+        reservations:
+          memory: 256M
+
+  worker-control:
+    <<: *worker-runtime
+    environment:
+      <<: *worker-environment
+      OTEL_SERVICE_NAME: hook2stream-worker-control
+      Worker__Capabilities__0: control
+      OperationalPolicy__RetentionSweepEnabled: "true"
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
+      OpenRouter__BaseUrl: https://openrouter.ai/api/v1/
+      OpenRouter__AppTitle: Hook2Stream
+      OpenRouter__HttpReferer: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      OpenRouter__TranscriptionModel: openai/whisper-large-v3
+      OpenRouter__ImageModel: bytedance-seed/seedream-4.5
+      OpenRouter__CampaignModel: openai/gpt-oss-120b
+      OpenRouter__TranscriptionTimeoutSeconds: "120"
+      OpenRouter__ImageTimeoutSeconds: "300"
+      OpenRouter__CampaignTimeoutSeconds: "120"
+      OpenRouter__MaxRetries: "2"
+      OpenRouter__TranscriptionChunkSeconds: "50"
+      OpenRouter__TranscriptionOverlapSeconds: "2"
+      OpenRouter__RequireZeroDataRetention: "true"
+      OpenRouter__DenyDataCollection: "true"
+      OpenRouter__RequireParameters: "true"
+      OpenRouter__AccountOrGuardrailZdrEnforced: "true"
+    secrets:
+      - postgres_password
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
+      - openrouter_api_key
+    volumes:
+      - worker_control_scratch:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+          pids: 512
+        reservations:
+          memory: 256M
+
+  worker-render:
+    <<: *worker-runtime
+    environment:
+      <<: *worker-environment
+      OTEL_SERVICE_NAME: hook2stream-worker-render
+      Worker__Capabilities__0: render
+      OperationalPolicy__RetentionSweepEnabled: "false"
+    volumes:
+      - worker_render_scratch:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "3.00"
+          memory: 3G
+          pids: 512
+        reservations:
+          memory: 512M
+
+  worker-export:
+    <<: *worker-runtime
+    environment:
+      <<: *worker-environment
+      OTEL_SERVICE_NAME: hook2stream-worker-export
+      Worker__Capabilities__0: export
+      OperationalPolicy__RetentionSweepEnabled: "false"
+    volumes:
+      - worker_export_scratch:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+          pids: 512
+        reservations:
+          memory: 256M
+
+  bootstrapper:
+    <<: *dotnet-runtime
+    profiles:
+      - tools
+    image: ${BOOTSTRAPPER_IMAGE:?Set BOOTSTRAPPER_IMAGE to an immutable image reference}
+    restart: "no"
+    command:
+      - dotnet
+      - Hook2Stream.Bootstrapper.dll
+    environment:
+      <<: *dotnet-environment
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_MAX_POOL_SIZE: "5"
+      DB_COMMAND_TIMEOUT_SECONDS: "900"
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      OTEL_SERVICE_NAME: hook2stream-bootstrapper
+      STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_bootstrap_access_key
+      STORAGE_SECRET_FILE: /run/secrets/s3_bootstrap_secret_key
+      Storage__ConfigureBucketCors: "true"
+      Storage__ConfigureBucketLifecycle: "true"
+      Storage__ConfigureMultipartAbortLifecycle: ${S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE:-false}
+      Storage__BrowserUploadOrigins__0: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      OperationalPolicy__RetentionSweepEnabled: "false"
+    secrets:
+      - postgres_password
+      - s3_bootstrap_access_key
+      - s3_bootstrap_secret_key
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 768M
+          pids: 512
+
+  pgbouncer:
+    image: ${PGBOUNCER_IMAGE:-edoburu/pgbouncer:v1.25.2-p0}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    stop_grace_period: 30s
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-hook2stream}
+      POSTGRES_USER: ${POSTGRES_USER:-hook2stream}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGBOUNCER_CONFIG: /etc/pgbouncer/pgbouncer.ini
+    entrypoint:
+      - /bin/sh
+      - /opt/hook2stream/pgbouncer-entrypoint.sh
+    configs:
+      - source: pgbouncer_config
+        target: /etc/pgbouncer/pgbouncer.ini
+        mode: 0444
+      - source: pgbouncer_entrypoint
+        target: /opt/hook2stream/pgbouncer-entrypoint.sh
+        mode: 0555
+    secrets:
+      - postgres_password
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -q -h 127.0.0.1 -p 6432 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *json-logging
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+        reservations:
+          memory: 64M
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17.10-alpine3.24}
+    restart: unless-stopped
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    shm_size: 256m
+    stop_grace_period: 60s
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hook2stream}
+      POSTGRES_USER: ${POSTGRES_USER:-hook2stream}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-768MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-2GB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-128MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-2GB}
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=2000
+      - -c
+      - log_parameter_max_length=0
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    tmpfs:
+      - /var/run/postgresql:rw,nosuid,nodev,noexec,size=16m,mode=1777
+    configs:
+      - source: postgres_set_password
+        target: /opt/hook2stream/postgres-set-password.sh
+        mode: 0555
+    secrets:
+      - postgres_password
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -q -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    logging: *json-logging
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 3G
+          pids: 256
+        reservations:
+          memory: 1G
+
+  postgres-backup:
+    image: ${POSTGRES_BACKUP_IMAGE:?Set POSTGRES_BACKUP_IMAGE to an immutable image reference}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: postgres
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    stop_grace_period: 30s
+    command:
+      - daemon
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-hook2stream}
+      POSTGRES_USER: ${POSTGRES_USER:-hook2stream}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      BACKUP_S3_ENDPOINT: "${BACKUP_S3_ENDPOINT:-}"
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:?Set BACKUP_S3_REGION}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?Set BACKUP_S3_BUCKET}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-hook2stream/production/postgres}
+      BACKUP_S3_ACCESS_KEY_FILE: /run/secrets/backup_s3_access_key
+      BACKUP_S3_SECRET_KEY_FILE: /run/secrets/backup_s3_secret_key
+      BACKUP_ENCRYPTION_KEY_ID_FILE: /run/secrets/backup_encryption_key_id
+      BACKUP_ENCRYPTION_PASSPHRASE_FILE: /run/secrets/backup_encryption_passphrase
+      BACKUP_HEARTBEAT_URL_FILE: /run/secrets/backup_heartbeat_url
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-3600}
+      BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-7200}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-35}
+      BACKUP_RETENTION_SAFETY_SECONDS: ${BACKUP_RETENTION_SAFETY_SECONDS:-7200}
+      BACKUP_KDF_ITERATIONS: ${BACKUP_KDF_ITERATIONS:-200000}
+    secrets:
+      - postgres_password
+      - backup_s3_access_key
+      - backup_s3_secret_key
+      - backup_encryption_key_id
+      - backup_encryption_passphrase
+      - backup_heartbeat_url
+    configs:
+      - source: dotnet_load_secrets
+        target: /opt/hook2stream/load-secrets.sh
+        mode: 0555
+    entrypoint:
+      - /bin/sh
+      - /opt/hook2stream/load-secrets.sh
+      - /usr/local/bin/postgres-backup
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=512m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/postgres-backup-healthcheck
+      interval: 5m
+      timeout: 10s
+      retries: 2
+      start_period: 10m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *json-logging
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+          pids: 128
+        reservations:
+          memory: 128M
+
+configs:
+  caddyfile:
+    file: ./Caddyfile
+  dotnet_load_secrets:
+    file: ./scripts/load-secrets.sh
+  dotnet_http_healthcheck:
+    file: ./scripts/http-healthcheck.sh
+  pgbouncer_config:
+    file: ./pgbouncer/pgbouncer.ini
+  pgbouncer_entrypoint:
+    file: ./scripts/pgbouncer-entrypoint.sh
+  postgres_set_password:
+    file: ./scripts/postgres-set-password.sh
+
+secrets:
+  postgres_password:
+    file: ${SECRETS_DIR:-./secrets}/postgres_password
+  s3_runtime_access_key:
+    file: ${SECRETS_DIR:-./secrets}/s3_runtime_access_key
+  s3_runtime_secret_key:
+    file: ${SECRETS_DIR:-./secrets}/s3_runtime_secret_key
+  s3_bootstrap_access_key:
+    file: ${SECRETS_DIR:-./secrets}/s3_bootstrap_access_key
+  s3_bootstrap_secret_key:
+    file: ${SECRETS_DIR:-./secrets}/s3_bootstrap_secret_key
+  google_client_secret:
+    file: ${SECRETS_DIR:-./secrets}/google_client_secret
+  stripe_secret_key:
+    file: ${SECRETS_DIR:-./secrets}/stripe_secret_key
+  stripe_webhook_secret:
+    file: ${SECRETS_DIR:-./secrets}/stripe_webhook_secret
+  openrouter_api_key:
+    file: ${SECRETS_DIR:-./secrets}/openrouter_api_key
+  backup_s3_access_key:
+    file: ${SECRETS_DIR:-./secrets}/backup_s3_access_key
+  backup_s3_secret_key:
+    file: ${SECRETS_DIR:-./secrets}/backup_s3_secret_key
+  backup_encryption_key_id:
+    file: ${SECRETS_DIR:-./secrets}/backup_encryption_key_id
+  backup_encryption_passphrase:
+    file: ${SECRETS_DIR:-./secrets}/backup_encryption_passphrase
+  backup_heartbeat_url:
+    file: ${SECRETS_DIR:-./secrets}/backup_heartbeat_url
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+  worker_media_scratch:
+  worker_analysis_scratch:
+  worker_control_scratch:
+  worker_render_scratch:
+  worker_export_scratch:
+
+networks:
+  edge:
+  backend:

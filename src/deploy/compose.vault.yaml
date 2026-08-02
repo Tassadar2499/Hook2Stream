@@ -1,0 +1,110 @@
+name: ${COMPOSE_PROJECT_NAME:-hook2stream}
+
+services:
+  vault-renderer:
+    image: ${VAULT_AGENT_IMAGE:?Set VAULT_AGENT_IMAGE to a digest-pinned hashicorp/vault image}
+    profiles:
+      - tools
+    restart: "no"
+    user: "${VAULT_RENDER_UID:-0}:${VAULT_RENDER_GID:-2000}"
+    entrypoint:
+      - /bin/vault
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    environment:
+      HOME: /tmp
+      VAULT_ADDR: ${VAULT_ADDR:?Set VAULT_ADDR to the external HTTPS Vault origin}
+      VAULT_CACERT: /vault/tls/ca.pem
+      VAULT_NAMESPACE: ${VAULT_NAMESPACE:-}
+      VAULT_LOG_FORMAT: json
+      VAULT_LOG_LEVEL: info
+    command:
+      - agent
+      - -exit-after-auth
+      - -config=/vault/config/agent.hcl
+    configs:
+      - source: vault_agent_config
+        target: /vault/config/agent.hcl
+        mode: 0444
+      - source: vault_template_foundation
+        target: /vault/templates/foundation.json.ctmpl
+        mode: 0444
+      - source: vault_template_runtime_s3
+        target: /vault/templates/runtime-s3.json.ctmpl
+        mode: 0444
+      - source: vault_template_bootstrap_s3
+        target: /vault/templates/bootstrap-s3.json.ctmpl
+        mode: 0444
+      - source: vault_template_api
+        target: /vault/templates/api.json.ctmpl
+        mode: 0444
+      - source: vault_template_control
+        target: /vault/templates/control.json.ctmpl
+        mode: 0444
+      - source: vault_template_backup_s3
+        target: /vault/templates/backup-s3.json.ctmpl
+        mode: 0444
+      - source: vault_template_backup_encryption
+        target: /vault/templates/backup-encryption.json.ctmpl
+        mode: 0444
+    volumes:
+      - type: bind
+        source: ${VAULT_AUTH_DIR:-/etc/hook2stream/vault-auth}
+        target: /vault/auth
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VAULT_CACERT:?Set VAULT_CACERT}
+        target: /vault/tls/ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VAULT_CANDIDATE_DIR:?Set VAULT_CANDIDATE_DIR}
+        target: /vault/rendered
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - vault-egress
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+          pids: 128
+        reservations:
+          memory: 64M
+
+configs:
+  vault_agent_config:
+    file: ./vault/agent.hcl
+  vault_template_foundation:
+    file: ./vault/templates/foundation.json.ctmpl
+  vault_template_runtime_s3:
+    file: ./vault/templates/runtime-s3.json.ctmpl
+  vault_template_bootstrap_s3:
+    file: ./vault/templates/bootstrap-s3.json.ctmpl
+  vault_template_api:
+    file: ./vault/templates/api.json.ctmpl
+  vault_template_control:
+    file: ./vault/templates/control.json.ctmpl
+  vault_template_backup_s3:
+    file: ./vault/templates/backup-s3.json.ctmpl
+  vault_template_backup_encryption:
+    file: ./vault/templates/backup-encryption.json.ctmpl
+
+networks:
+  vault-egress:
+    driver: bridge

@@ -1,0 +1,35 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: src/Hook2Stream.Api/Dockerfile
+      args:
+        DOTNET_SDK_VERSION: ${DOTNET_SDK_VERSION:-10.0.302}
+
+  worker-media:
+    build:
+      context: ../..
+      dockerfile: src/Hook2Stream.Worker/Dockerfile
+      args:
+        DOTNET_SDK_VERSION: ${DOTNET_SDK_VERSION:-10.0.302}
+
+  bootstrapper:
+    build:
+      context: ../..
+      dockerfile: src/Hook2Stream.Bootstrapper/Dockerfile
+      args:
+        DOTNET_SDK_VERSION: ${DOTNET_SDK_VERSION:-10.0.302}
+
+  web:
+    build:
+      context: ../..
+      dockerfile: src/web/Dockerfile
+      args:
+        NEXT_PUBLIC_AUTH_MODE: oauth
+
+  postgres-backup:
+    build:
+      context: ../..
+      dockerfile: src/deploy/backup/Dockerfile
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:-postgres:17.10-alpine3.24}

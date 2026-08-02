@@ -1,0 +1,9 @@
+{{- with secret "hook2stream-kv/data/production/bootstrap-s3" -}}
+{
+  "kv_version": {{ .Data.metadata.version }},
+  "secrets": {
+    "access_key_id": {{ .Data.data.access_key_id | toJSON }},
+    "secret_access_key": {{ .Data.data.secret_access_key | toJSON }}
+  }
+}
+{{- end -}}
