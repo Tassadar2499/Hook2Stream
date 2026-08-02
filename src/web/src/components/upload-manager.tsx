@@ -278,11 +278,13 @@ export function UploadManager({
   }
 
   return (
-    <section className="rounded-2xl border border-[var(--line)] bg-white/55 p-5">
+    <section className="surface-soft rounded-2xl border border-[var(--line)] p-5">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
         <div>
           <h3 className="text-lg font-black">{title}</h3>
-          <p className="mt-1 text-sm leading-6 opacity-70">{description}</p>
+          <p className="mt-1 text-sm leading-6 text-[var(--muted)]">
+            {description}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <label className={`button-secondary cursor-pointer ${busy ? "pointer-events-none opacity-55" : ""}`}>
@@ -305,7 +307,7 @@ export function UploadManager({
         </div>
       </div>
       <div
-        className="mt-5 h-2 overflow-hidden rounded-full bg-black/10"
+        className="surface-inset mt-5 h-2 overflow-hidden rounded-full"
         role="progressbar"
         aria-label={`${title} upload progress`}
         aria-valuemin={0}
@@ -317,14 +319,30 @@ export function UploadManager({
           style={{ width: `${progress}%` }}
         />
       </div>
-      <div className="mt-2 flex justify-between gap-4 text-xs font-black uppercase tracking-wider">
-        <span aria-live="polite">{stage}</span>
-        <span>{progress}%</span>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <span className="status-chip surface-inset" aria-live="polite">
+          <span
+            className={`size-1.5 rounded-full ${
+              error
+                ? "bg-[var(--danger)]"
+                : progress === 100
+                  ? "bg-[var(--success)]"
+                  : "bg-[var(--violet)]"
+            }`}
+            aria-hidden="true"
+          />
+          {stage}
+        </span>
+        <span className="status-chip surface-inset tabular-nums">{progress}%</span>
       </div>
       {error ? (
-        <p className="mt-4 rounded-xl bg-red-100 p-3 text-sm font-bold text-red-950" role="alert">
-          {error}
-        </p>
+        <div
+          className="surface-inset mt-4 rounded-xl border border-[var(--line)] p-4"
+          role="alert"
+        >
+          <p className="font-black text-[var(--danger)]">Upload needs attention</p>
+          <p className="mt-1 text-sm leading-6 text-[var(--muted)]">{error}</p>
+        </div>
       ) : null}
     </section>
   );

@@ -354,7 +354,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
           </p>
         </div>
         {transcript ? (
-          <span className="rounded-full border border-[var(--line)] bg-white/60 px-4 py-2 text-sm font-black uppercase">
+          <span className="status-chip surface-inset">
             {titleCase(transcript.state)} · revision {transcript.number}
           </span>
         ) : null}
@@ -402,11 +402,15 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
           ) : null}
 
           {hasEditableDraft ? (
-            <section className="paper-card mt-7 p-6 sm:p-8">
+            <section
+              className="paper-card mt-7 p-6 sm:p-8"
+              aria-labelledby="transcript-review-title"
+              aria-busy={saving}
+            >
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <p className="eyebrow text-[var(--violet)]">Review queue</p>
-                  <h2 className="display mt-2 text-4xl">
+                  <h2 id="transcript-review-title" className="display mt-2 text-4xl">
                     {transcript ? `${unresolvedWarnings} issues left` : "Manual draft"}
                   </h2>
                 </div>
@@ -419,31 +423,86 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
                 </div>
               </div>
               {validation.length > 0 ? (
-                <ul className="mt-5 rounded-2xl bg-red-100 p-4 text-sm font-bold text-red-950" role="alert">
+                <ul
+                  id="transcript-validation"
+                  className="surface-inset mt-5 rounded-2xl border border-[var(--danger)] p-4 text-sm font-bold text-[var(--danger)]"
+                  role="alert"
+                >
                   {validation.map((message) => <li key={message}>{message}</li>)}
                 </ul>
               ) : null}
               <div className="mt-6 grid gap-3">
                 {phrases.map((phrase, index) => {
                   const flagged = (phrase.confidence ?? 1) < 0.75;
+                  const invalidText = !phrase.text.trim();
+                  const invalidTiming =
+                    phrase.startMilliseconds < 0 ||
+                    phrase.endMilliseconds <= phrase.startMilliseconds ||
+                    (index > 0 &&
+                      phrase.startMilliseconds < phrases[index - 1].endMilliseconds);
                   return (
-                    <article key={phrase.id} className={`rounded-2xl border p-4 ${flagged && !phrase.warningAcknowledged ? "border-amber-600 bg-amber-50" : "border-[var(--line)] bg-white/55"}`}>
+                    <article
+                      key={phrase.id}
+                      className={`surface-soft rounded-2xl border p-4 ${
+                        flagged && !phrase.warningAcknowledged
+                          ? "border-[var(--warning)]"
+                          : "border-[var(--line)]"
+                      }`}
+                    >
                       <div className="grid gap-3 lg:grid-cols-[5rem_5rem_1fr_auto] lg:items-start">
                         <label className="field">
                           <span>Start, s</span>
-                          <input type="number" min={0} step={0.01} value={(phrase.startMilliseconds / 1000).toFixed(2)} onChange={(event) => updatePhrase(phrase.id, { startMilliseconds: Math.round(Number(event.target.value) * 1000) })} />
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={(phrase.startMilliseconds / 1000).toFixed(2)}
+                            aria-invalid={invalidTiming || undefined}
+                            aria-describedby={invalidTiming ? "transcript-validation" : undefined}
+                            onChange={(event) => updatePhrase(phrase.id, { startMilliseconds: Math.round(Number(event.target.value) * 1000) })}
+                          />
                         </label>
                         <label className="field">
                           <span>End, s</span>
-                          <input type="number" min={0} step={0.01} value={(phrase.endMilliseconds / 1000).toFixed(2)} onChange={(event) => updatePhrase(phrase.id, { endMilliseconds: Math.round(Number(event.target.value) * 1000) })} />
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={(phrase.endMilliseconds / 1000).toFixed(2)}
+                            aria-invalid={invalidTiming || undefined}
+                            aria-describedby={invalidTiming ? "transcript-validation" : undefined}
+                            onChange={(event) => updatePhrase(phrase.id, { endMilliseconds: Math.round(Number(event.target.value) * 1000) })}
+                          />
                         </label>
                         <label className="field">
                           <span>Phrase {index + 1}</span>
-                          <textarea className="min-h-20" value={phrase.text} onChange={(event) => updatePhrase(phrase.id, { text: event.target.value, words: undefined })} />
+                          <textarea
+                            className="min-h-20"
+                            value={phrase.text}
+                            aria-invalid={invalidText || undefined}
+                            aria-describedby={invalidText ? "transcript-validation" : undefined}
+                            onChange={(event) => updatePhrase(phrase.id, { text: event.target.value, words: undefined })}
+                          />
                         </label>
                         <div className="flex flex-wrap gap-2 lg:pt-6">
-                          <button className="button-quiet" type="button" onClick={() => splitPhrase(index)} disabled={phrase.text.trim().split(/\s+/).length < 2}>Split</button>
-                          <button className="button-quiet" type="button" onClick={() => mergePhrase(index)} disabled={index === phrases.length - 1}>Merge next</button>
+                          <button
+                            className="button-quiet"
+                            type="button"
+                            onClick={() => splitPhrase(index)}
+                            disabled={phrase.text.trim().split(/\s+/).length < 2}
+                            aria-label={`Split phrase ${index + 1}`}
+                          >
+                            Split
+                          </button>
+                          <button
+                            className="button-quiet"
+                            type="button"
+                            onClick={() => mergePhrase(index)}
+                            disabled={index === phrases.length - 1}
+                            aria-label={`Merge phrase ${index + 1} with the next phrase`}
+                          >
+                            Merge next
+                          </button>
                         </div>
                       </div>
                       <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm">
@@ -478,7 +537,15 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
                 />
               </label>
               <div className="mt-4 flex flex-wrap gap-2">
-                <label className="button-quiet cursor-pointer"><input className="sr-only" type="file" accept=".txt,text/plain" onChange={importFile} />Choose UTF-8 .txt</label>
+                <label className="button-quiet cursor-pointer focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-[var(--violet)]">
+                  <input
+                    className="sr-only"
+                    type="file"
+                    accept=".txt,text/plain"
+                    onChange={importFile}
+                  />
+                  Choose UTF-8 .txt
+                </label>
                 <button className="button-secondary" type="button" onClick={importPreparedLyrics} disabled={!importText.trim()}>Create timed draft</button>
                 <button className="button-primary" type="button" onClick={() => save()} disabled={saving || draftSource !== "imported" || !phraseDraftDirty || phrases.length === 0 || validation.length > 0}>Save imported revision</button>
               </div>

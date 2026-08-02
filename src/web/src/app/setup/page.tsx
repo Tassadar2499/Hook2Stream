@@ -9,9 +9,9 @@ export default function SetupPage() {
   }
 
   return (
-    <>
+    <div className="min-h-screen">
       <SiteHeader />
       <ConfigurationRequired />
-    </>
+    </div>
   );
 }

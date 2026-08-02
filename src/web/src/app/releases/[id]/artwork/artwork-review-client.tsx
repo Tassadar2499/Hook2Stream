@@ -343,7 +343,10 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
             AI creates the raster concept; Hook2Stream applies precise artist and title typography locally.
           </p>
         </div>
-        <div className="rounded-2xl border border-[var(--line)] bg-white/60 p-4 text-sm font-black">
+        <div
+          className="surface-soft rounded-2xl border border-[var(--line)] p-4 text-sm font-black"
+          role="status"
+        >
           <p>Included operations remaining: {remainingIncluded}</p>
           <p className="mt-1">Purchased operations: {billing?.workspaceArtworkCredits ?? 0}</p>
         </div>
@@ -356,7 +359,12 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
         <div className="mt-7"><StatusPanel title="Loading artwork" message="Reading candidate history…" tone="neutral" /></div>
       ) : (
         <>
-          <form className="paper-card mt-7 p-6 sm:p-8" onSubmit={generate}>
+          <form
+            className="paper-card mt-7 p-6 sm:p-8"
+            onSubmit={generate}
+            aria-label="Artwork generation"
+            aria-busy={busy}
+          >
             <div className="grid gap-5 lg:grid-cols-[1fr_.45fr_auto] lg:items-end">
               <label className="field">
                 <span>Visual brief</span>
@@ -375,11 +383,11 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                 {artwork ? "Generate new pack" : "Start cover pack"}
               </button>
             </div>
-            <p className="mt-3 text-sm opacity-65">
+            <p className="mt-3 text-sm text-[var(--muted)]">
               A successful pack contains three candidates. Technical retries and moderation corrections do not spend another operation.
             </p>
             {availableArtworkOperations === 0 ? (
-              <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--line)] bg-white/55 p-4">
+              <div className="surface-inset mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--line)] p-4">
                 <p className="flex-1 font-bold">Need another direction? Add five complete artwork generations for $1.</p>
                 <button className="button-quiet" type="button" disabled={busy} onClick={() => checkout("art_credits_5")}>Add 5 generations · $1</button>
               </div>
@@ -388,11 +396,17 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
 
           {artwork ? (
             <>
-              <section className="mt-6 grid gap-4 lg:grid-cols-3" aria-label="Cover candidates">
+              <fieldset className="mt-6 grid gap-4 lg:grid-cols-3">
+                <legend className="sr-only">Cover candidates</legend>
                 {candidateAssetIds.map((assetId, index) => (
-                  <label key={assetId} className={`paper-card cursor-pointer overflow-hidden p-3 ${selectedAssetId === assetId ? "ring-4 ring-[var(--violet)]" : ""}`}>
+                  <label
+                    key={assetId}
+                    className={`paper-card cursor-pointer overflow-hidden p-3 focus-within:ring-4 focus-within:ring-[var(--violet)] ${
+                      selectedAssetId === assetId ? "ring-4 ring-[var(--violet)]" : ""
+                    }`}
+                  >
                     <span className="sr-only">Candidate {index + 1}</span>
-                    <div className="aspect-square overflow-hidden rounded-2xl bg-[var(--ink)]/10">
+                    <div className="surface-inset aspect-square overflow-hidden rounded-2xl">
                       {assetUrls[assetId] ? (
                         // Generated images are copied into owner-scoped storage before display.
                         // eslint-disable-next-line @next/next/no-img-element
@@ -407,7 +421,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                     </div>
                   </label>
                 ))}
-              </section>
+              </fieldset>
 
               <section className="paper-card mt-6 grid gap-7 p-6 sm:p-8 xl:grid-cols-[.75fr_1fr]">
                 <div
@@ -483,12 +497,28 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                     ] as const).map(([key, label]) => (
                       <label className="field" key={key}>
                         <span>{label}</span>
-                        <input type="range" min={0} max={1} step={0.01} value={edit[key]} onChange={(event) => setEdit((current) => ({ ...current, [key]: Number(event.target.value) }))} />
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={edit[key]}
+                          aria-valuetext={`${Math.round(edit[key] * 100)}%`}
+                          onChange={(event) => setEdit((current) => ({ ...current, [key]: Number(event.target.value) }))}
+                        />
                       </label>
                     ))}
                     <label className="field sm:col-span-2">
                       <span>Crop scale</span>
-                      <input type="range" min={1} max={2} step={0.01} value={edit.cropScale} onChange={(event) => setEdit((current) => ({ ...current, cropScale: Number(event.target.value) }))} />
+                      <input
+                        type="range"
+                        min={1}
+                        max={2}
+                        step={0.01}
+                        value={edit.cropScale}
+                        aria-valuetext={`${Math.round(edit.cropScale * 100)}%`}
+                        onChange={(event) => setEdit((current) => ({ ...current, cropScale: Number(event.target.value) }))}
+                      />
                     </label>
                     <label className="field sm:col-span-2">
                       <span>Font family</span>
@@ -532,24 +562,27 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                     {cleanCover ? (
                       <a className="button-quiet" href={cleanCover.url}>Download clean 3000×3000 cover</a>
                     ) : artwork.state === "approved" && hasCleanCoverEntitlement ? (
-                      <span className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-black">Clean cover is rendering…</span>
+                      <span className="status-chip surface-inset">
+                        <span className="size-1.5 rounded-full bg-[var(--violet)]" aria-hidden="true" />
+                        Clean cover is rendering…
+                      </span>
                     ) : artwork.state === "approved" ? (
                       <button className="button-quiet" type="button" disabled={busy} onClick={() => checkout("clean_cover")}>Clean 3000×3000 cover · $2</button>
                     ) : null}
                   </div>
-                  <p className="mt-3 text-sm opacity-65">Changing an approved cover starts a new artwork operation because its three backgrounds must be rebuilt.</p>
+                  <p className="mt-3 text-sm text-[var(--muted)]">Changing an approved cover starts a new artwork operation because its three backgrounds must be rebuilt.</p>
                 </div>
               </section>
               {artwork.backgroundAssetIds.length > 0 ? (
                 <section className="paper-card mt-6 p-6 sm:p-8">
                   <p className="eyebrow text-[var(--violet)]">Coherent 9:16 pack</p>
                   <h2 className="display mt-2 text-4xl">Campaign backgrounds.</h2>
-                  <p className="mt-3 max-w-2xl text-sm leading-6 opacity-70">
+                  <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--muted)]">
                     These three backgrounds inherit the approved cover. Individual campaign cards can switch between them and adjust fit or focal point.
                   </p>
                   <div className="mt-6 grid gap-4 sm:grid-cols-3">
                     {artwork.backgroundAssetIds.map((assetId, index) => (
-                      <div key={assetId} className="aspect-[9/16] overflow-hidden rounded-2xl bg-[var(--ink)]/10">
+                      <div key={assetId} className="surface-inset aspect-[9/16] overflow-hidden rounded-2xl">
                         {assetUrls[assetId] ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img className="size-full object-cover" src={assetUrls[assetId]} alt={`Generated campaign background ${index + 1}`} />

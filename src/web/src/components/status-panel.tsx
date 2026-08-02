@@ -7,16 +7,40 @@ export function StatusPanel({
   message: string;
   tone?: "neutral" | "error" | "success";
 }) {
-  const colors = {
-    neutral: "border-[var(--line)] bg-white/60",
-    error: "border-red-700/30 bg-red-100 text-red-950",
-    success: "border-green-800/30 bg-green-100 text-green-950",
+  const tones = {
+    neutral: {
+      label: "Update",
+      color: "var(--violet)",
+    },
+    error: {
+      label: "Needs attention",
+      color: "var(--danger)",
+    },
+    success: {
+      label: "Ready",
+      color: "var(--success)",
+    },
   };
+  const currentTone = tones[tone];
 
   return (
-    <div className={`rounded-2xl border p-5 ${colors[tone]}`} role="status">
-      <p className="font-black">{title}</p>
-      <p className="mt-1 text-sm leading-6">{message}</p>
+    <div
+      className="surface-soft rounded-2xl border border-[var(--line)] p-5"
+      role={tone === "error" ? "alert" : "status"}
+      data-tone={tone}
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="status-chip surface-inset">
+          <span
+            className="size-1.5 rounded-full"
+            style={{ backgroundColor: currentTone.color }}
+            aria-hidden="true"
+          />
+          {currentTone.label}
+        </span>
+        <p className="font-black">{title}</p>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-[var(--muted)]">{message}</p>
     </div>
   );
 }

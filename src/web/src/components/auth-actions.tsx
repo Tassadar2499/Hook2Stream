@@ -12,7 +12,11 @@ export function AuthActions() {
         <Link className="button-primary" href="/dashboard">
           Dashboard
         </Link>
-        <span className="hidden rounded-full border border-[var(--line)] bg-[var(--lime)] px-3 py-2 text-xs font-black uppercase sm:inline-flex">
+        <span className="status-chip surface-inset hidden sm:inline-flex">
+          <span
+            className="size-1.5 rounded-full bg-[var(--success)]"
+            aria-hidden="true"
+          />
           Local developer
         </span>
       </>
@@ -28,7 +32,11 @@ export function AuthActions() {
   }
 
   if (!isLoaded) {
-    return <span className="text-sm font-bold opacity-60">Loading…</span>;
+    return (
+      <span className="status-chip surface-inset text-[var(--muted)]">
+        Loading…
+      </span>
+    );
   }
 
   if (!isSignedIn) {
@@ -36,7 +44,7 @@ export function AuthActions() {
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className="button-quiet"
+          className="button-quiet hidden sm:inline-flex"
           onClick={() => signIn("/dashboard")}
         >
           Sign in
@@ -46,7 +54,8 @@ export function AuthActions() {
           className="button-primary"
           onClick={() => signIn("/onboarding")}
         >
-          Make a release pack
+          <span className="sm:hidden">Get started</span>
+          <span className="hidden sm:inline">Make a release pack</span>
         </button>
       </div>
     );
@@ -57,7 +66,7 @@ export function AuthActions() {
       <Link className="button-primary" href="/dashboard">
         Dashboard
       </Link>
-      <button type="button" className="button-quiet" onClick={signOut}>
+      <button type="button" className="button-quiet hidden sm:inline-flex" onClick={signOut}>
         Sign out
       </button>
     </div>

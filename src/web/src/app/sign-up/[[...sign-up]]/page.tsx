@@ -23,12 +23,26 @@ function SignUpClient() {
 
   return (
     <main className="shell grid min-h-screen place-items-center py-10">
-      <section className="paper-card mx-auto w-full max-w-xl p-7 sm:p-10">
-        <p className="eyebrow text-[var(--orange)]">Start your first release</p>
+      <section className="paper-card surface-soft mx-auto w-full max-w-xl p-7 sm:p-10">
+        <Link
+          className="brand-mark display inline-flex text-xl"
+          href="/"
+          aria-label="Hook2Stream home"
+        >
+          Hook<span className="text-[var(--orange)]">2</span>Stream
+        </Link>
+        <span className="status-chip surface-inset mt-9">
+          <span
+            className="size-1.5 rounded-full bg-[var(--violet)]"
+            aria-hidden="true"
+          />
+          Your private release room
+        </span>
+        <p className="eyebrow mt-5 text-[var(--orange)]">Start your first release</p>
         <h1 className="display mt-3 text-4xl sm:text-5xl">
           Create your Hook2Stream account
         </h1>
-        <p className="mt-5 text-lg leading-7 opacity-80">
+        <p className="mt-5 text-lg leading-7 text-[var(--muted)]">
           Sign in with Google to upload your first MP3 or WAV and generate a 21-day
           short-form campaign.
         </p>

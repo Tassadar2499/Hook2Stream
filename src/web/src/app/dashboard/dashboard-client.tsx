@@ -73,17 +73,17 @@ export function DashboardClient() {
 
   return (
     <AppShell>
-      <section className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
-        <div>
+      <section className="surface-soft flex flex-col justify-between gap-6 rounded-3xl border border-[var(--line)] p-6 sm:flex-row sm:items-end sm:p-8">
+        <div className="max-w-3xl">
           <p className="eyebrow text-[var(--violet)]">Workspace</p>
           <h1 className="display mt-2 text-5xl sm:text-7xl">
             {account?.workspaceName ?? "Your releases"}
           </h1>
-          <p className="mt-3 max-w-xl text-lg">
+          <p className="mt-4 max-w-xl text-lg leading-7 opacity-75">
             One song in. A complete three-week content campaign out.
           </p>
         </div>
-        <Link className="button-primary" href="/releases/new">
+        <Link className="button-primary shrink-0" href="/releases/new">
           New release
         </Link>
       </section>
@@ -93,9 +93,9 @@ export function DashboardClient() {
           <StatusPanel title="Could not load dashboard" message={error} tone="error" />
         </div>
       ) : releases.length === 0 ? (
-        <section className="paper-card mt-8 overflow-hidden">
-          <div className="grid gap-8 p-7 sm:p-10 lg:grid-cols-[1fr_.75fr]">
-            <div>
+        <section className="paper-card mt-6 overflow-hidden p-2">
+          <div className="grid gap-2 lg:grid-cols-[1.1fr_.9fr]">
+            <div className="p-5 sm:p-8">
               <p className="eyebrow text-[var(--orange)]">First release</p>
               <h2 className="display mt-3 text-5xl sm:text-6xl">
                 Bring one finished track.
@@ -108,43 +108,55 @@ export function DashboardClient() {
                 Set up the release
               </Link>
             </div>
-            <div className="rounded-3xl bg-[var(--ink)] p-6 text-white">
-              <p className="eyebrow text-[var(--lime)]">The flow</p>
-              <ul className="mt-5 grid gap-4 font-bold">
-                <li>01 · Upload one MP3 or WAV</li>
-                <li>02 · Review the transcript</li>
-                <li>03 · Choose the official cover</li>
-                <li>04 · Tune hooks and storyboard</li>
-                <li>05 · Preview, purchase and export</li>
+            <div className="surface-inset rounded-[1.35rem] p-6 sm:p-7">
+              <p className="eyebrow text-[var(--violet)]">The flow</p>
+              <ul className="mt-5 grid gap-1 font-bold">
+                <li className="border-b border-[var(--line)] py-3 first:pt-0">
+                  01 · Upload one MP3 or WAV
+                </li>
+                <li className="border-b border-[var(--line)] py-3">
+                  02 · Review the transcript
+                </li>
+                <li className="border-b border-[var(--line)] py-3">
+                  03 · Choose the official cover
+                </li>
+                <li className="border-b border-[var(--line)] py-3">
+                  04 · Tune hooks and storyboard
+                </li>
+                <li className="pt-3">05 · Preview, purchase and export</li>
               </ul>
             </div>
           </div>
         </section>
       ) : (
-        <section className="mt-8 grid gap-4 lg:grid-cols-2">
+        <section className="mt-6 grid gap-4 lg:grid-cols-2">
           {releases.map((release) => (
             <Link
               key={release.id}
               href={`/releases/${release.id}`}
-              className="paper-card group p-6 transition hover:-translate-y-1"
+              className="paper-card group flex min-h-56 flex-col overflow-hidden p-6 transition hover:-translate-y-1 sm:p-7"
             >
               <div className="flex items-start justify-between gap-4">
-                <div>
+                <div className="min-w-0">
                   <p className="eyebrow text-[var(--orange)]">{release.state}</p>
-                  <h2 className="display mt-2 text-4xl">{release.trackTitle}</h2>
-                  <p className="mt-2 font-bold">{release.artistName}</p>
+                  <h2 className="display mt-3 text-4xl sm:text-5xl">
+                    {release.trackTitle}
+                  </h2>
+                  <p className="mt-3 font-bold opacity-75">{release.artistName}</p>
                 </div>
-                <span className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-black uppercase">
+                <span className="status-chip shrink-0">
                   {release.mode}
                 </span>
               </div>
-              <div className="mt-7 flex items-center justify-between text-sm font-bold">
-                <span>
+              <div className="mt-auto flex items-end justify-between gap-5 border-t border-[var(--line)] pt-6 text-sm font-bold">
+                <span className="max-w-[65%] opacity-70">
                   {workflows[release.id]?.nextAction
                     ? titleCase(workflows[release.id].nextAction ?? "")
                     : `${release.assets.filter((asset) => asset.isActive).length} assets`}
                 </span>
-                <span className="group-hover:text-[var(--violet)]">Open workflow →</span>
+                <span className="text-right text-[var(--violet)] transition group-hover:translate-x-1">
+                  Open workflow →
+                </span>
               </div>
             </Link>
           ))}

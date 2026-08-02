@@ -23,10 +23,24 @@ function SignInClient() {
 
   return (
     <main className="shell grid min-h-screen place-items-center py-10">
-      <section className="paper-card mx-auto w-full max-w-xl p-7 sm:p-10">
-        <p className="eyebrow text-[var(--orange)]">Welcome back</p>
+      <section className="paper-card surface-soft mx-auto w-full max-w-xl p-7 sm:p-10">
+        <Link
+          className="brand-mark display inline-flex text-xl"
+          href="/"
+          aria-label="Hook2Stream home"
+        >
+          Hook<span className="text-[var(--orange)]">2</span>Stream
+        </Link>
+        <span className="status-chip surface-inset mt-9">
+          <span
+            className="size-1.5 rounded-full bg-[var(--success)]"
+            aria-hidden="true"
+          />
+          Secure workspace access
+        </span>
+        <p className="eyebrow mt-5 text-[var(--orange)]">Welcome back</p>
         <h1 className="display mt-3 text-4xl sm:text-5xl">Sign in to Hook2Stream</h1>
-        <p className="mt-5 text-lg leading-7 opacity-80">
+        <p className="mt-5 text-lg leading-7 text-[var(--muted)]">
           Continue your release campaign. Sign in with the Google account that
           owns your releases and billing.
         </p>

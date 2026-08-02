@@ -44,10 +44,17 @@ function AuthCallbackInner() {
   if (error) {
     return (
       <main className="shell grid min-h-screen place-items-center py-10">
-        <section className="paper-card mx-auto max-w-xl p-7 text-center">
-          <p className="eyebrow text-[var(--orange)]">Sign-in failed</p>
+        <section className="paper-card surface-soft mx-auto w-full max-w-xl p-7 text-center sm:p-10">
+          <Link
+            className="brand-mark display inline-flex text-xl"
+            href="/"
+            aria-label="Hook2Stream home"
+          >
+            Hook<span className="text-[var(--orange)]">2</span>Stream
+          </Link>
+          <p className="eyebrow mt-9 text-[var(--danger)]">Sign-in failed</p>
           <h1 className="display mt-4 text-4xl">Couldn&apos;t sign you in</h1>
-          <p className="mt-5 text-lg leading-7 opacity-80">{error}</p>
+          <p className="mt-5 text-lg leading-7 text-[var(--muted)]">{error}</p>
           <Link className="button-primary mt-7" href="/sign-in">
             Back to sign in
           </Link>
@@ -62,10 +69,20 @@ function AuthCallbackInner() {
 function AuthCallbackFallback() {
   return (
     <main className="shell grid min-h-screen place-items-center py-10">
-      <section className="paper-card mx-auto max-w-xl p-7 text-center">
-        <p className="eyebrow text-[var(--orange)]">Signing you in</p>
+      <section className="paper-card surface-soft mx-auto w-full max-w-xl p-7 text-center sm:p-10">
+        <p className="brand-mark display text-xl">
+          Hook<span className="text-[var(--orange)]">2</span>Stream
+        </p>
+        <span className="status-chip surface-inset mt-9">
+          <span
+            className="size-1.5 animate-pulse rounded-full bg-[var(--violet)]"
+            aria-hidden="true"
+          />
+          Secure session
+        </span>
+        <p className="eyebrow mt-5 text-[var(--orange)]">Signing you in</p>
         <h1 className="display mt-4 text-4xl">Finishing your session…</h1>
-        <p className="mt-5 text-lg leading-7 opacity-80">
+        <p className="mt-5 text-lg leading-7 text-[var(--muted)]">
           Returning you to your release workspace.
         </p>
       </section>

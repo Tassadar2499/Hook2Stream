@@ -156,7 +156,11 @@ export function ReleaseWorkflowHub({
             {release.artistName || "Artist name pending"}
           </p>
         </div>
-        <div className="max-w-sm rounded-2xl border border-[var(--line)] bg-white/65 p-4">
+        <div
+          className="surface-soft max-w-sm rounded-2xl border border-[var(--line)] p-4"
+          role="status"
+          aria-live="polite"
+        >
           <p className="eyebrow">Next action</p>
           <p className="mt-2 font-black">
             {workflow.nextAction ? titleCase(workflow.nextAction) : "Pipeline is up to date"}
@@ -210,7 +214,7 @@ export function ReleaseWorkflowHub({
               </div>
               <p className="mt-3 text-lg font-black">{titleCase(lane.state)}</p>
               <div
-                className="mt-4 h-2 overflow-hidden rounded-full bg-black/10"
+                className="surface-inset mt-4 h-2 overflow-hidden rounded-full"
                 role="progressbar"
                 aria-label={`${titleCase(lane.lane)} progress`}
                 aria-valuemin={0}
@@ -222,7 +226,7 @@ export function ReleaseWorkflowHub({
                   style={{ width: `${Math.max(0, Math.min(100, lane.progressPercent))}%` }}
                 />
               </div>
-              <p className="mt-3 min-h-10 text-sm leading-5 opacity-70">
+              <p className="mt-3 min-h-10 text-sm leading-5 text-[var(--muted)]">
                 {lane.blockerCode
                   ? titleCase(lane.blockerCode)
                   : lane.message || descriptionForLane(normalized)}
@@ -250,7 +254,10 @@ export function ReleaseWorkflowHub({
           <p className="eyebrow text-[var(--orange)]">Before campaign generation</p>
           <ul className="mt-4 grid gap-2 sm:grid-cols-2">
             {workflow.blockers.map((blocker) => (
-              <li key={blocker} className="rounded-xl border border-[var(--line)] bg-white/55 p-3 font-bold">
+              <li
+                key={blocker}
+                className="surface-inset rounded-xl border border-[var(--line)] p-3 font-bold"
+              >
                 {titleCase(blocker)}
               </li>
             ))}
@@ -259,10 +266,17 @@ export function ReleaseWorkflowHub({
       ) : null}
 
       <section className="mt-6 grid gap-6 xl:grid-cols-2">
-        <form className="paper-card p-6 sm:p-8" onSubmit={saveSetup}>
+        <form
+          className="paper-card p-6 sm:p-8"
+          onSubmit={saveSetup}
+          aria-labelledby="release-checkpoint-title"
+          aria-busy={setupSaving}
+        >
           <p className="eyebrow text-[var(--orange)]">Release checkpoint</p>
-          <h2 className="display mt-2 text-4xl">Confirm the details.</h2>
-          <p className="mt-3 text-sm leading-6 opacity-70">
+          <h2 id="release-checkpoint-title" className="display mt-2 text-4xl">
+            Confirm the details.
+          </h2>
+          <p className="mt-3 text-sm leading-6 text-[var(--muted)]">
             ID3 and filename values are suggestions. Confirmation unlocks the first artwork pack.
           </p>
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -302,11 +316,11 @@ export function ReleaseWorkflowHub({
                 <input name="campaignStartDate" type="date" defaultValue={release.campaignStartDate ?? ""} required />
               </label>
             ) : null}
-            <label className="flex min-h-12 items-center gap-3 rounded-xl border border-[var(--line)] bg-white/55 p-3 font-bold sm:col-span-2">
+            <label className="surface-inset flex min-h-12 items-center gap-3 rounded-xl border border-[var(--line)] p-3 font-bold sm:col-span-2">
               <input type="checkbox" name="instrumental" defaultChecked={release.isInstrumental} />
               This is an instrumental track
             </label>
-            <label className="flex min-h-12 items-center gap-3 rounded-xl border border-[var(--line)] bg-white/55 p-3 font-bold sm:col-span-2">
+            <label className="surface-inset flex min-h-12 items-center gap-3 rounded-xl border border-[var(--line)] p-3 font-bold sm:col-span-2">
               <input
                 type="checkbox"
                 name="instrumentalConfirmed"
@@ -330,14 +344,22 @@ export function ReleaseWorkflowHub({
           </button>
         </form>
 
-        <form className="paper-card p-6 sm:p-8" onSubmit={saveRights}>
+        <form
+          className="paper-card p-6 sm:p-8"
+          onSubmit={saveRights}
+          aria-labelledby="rights-checkpoint-title"
+          aria-busy={rightsSaving}
+        >
           <p className="eyebrow text-[var(--violet)]">Rights checkpoint</p>
-          <h2 className="display mt-2 text-4xl">Allow the processing.</h2>
-          <p className="mt-3 text-sm leading-6 opacity-70">
+          <h2 id="rights-checkpoint-title" className="display mt-2 text-4xl">
+            Allow the processing.
+          </h2>
+          <p className="mt-3 text-sm leading-6 text-[var(--muted)]">
             Transcription, artwork and campaign drafting use OpenRouter only after this
             confirmation. Requests are restricted to Zero Data Retention endpoints.
           </p>
-          <div className="mt-6 grid gap-3">
+          <fieldset className="mt-6 grid gap-3">
+            <legend className="sr-only">Rights confirmations</legend>
             {[
               ["audio", "I have the right to process this audio."],
               ["lyrics", "I have the right to use the lyrics or performance."],
@@ -346,7 +368,10 @@ export function ReleaseWorkflowHub({
             ].map(([name, label]) => {
               const field = rightsField(name);
               return (
-                <label key={name} className="flex min-h-12 items-start gap-3 rounded-xl border border-[var(--line)] bg-white/55 p-3 font-bold">
+                <label
+                  key={name}
+                  className="surface-inset flex min-h-12 items-start gap-3 rounded-xl border border-[var(--line)] p-3 font-bold"
+                >
                   <input
                     className="mt-0.5 size-5"
                     type="checkbox"
@@ -382,7 +407,7 @@ export function ReleaseWorkflowHub({
                 <option value="unknown">Not classified</option>
               </select>
             </label>
-          </div>
+          </fieldset>
           <button className="button-primary mt-6" type="submit" disabled={rightsSaving}>
             {rightsSaving ? "Saving…" : "Save rights confirmation"}
           </button>

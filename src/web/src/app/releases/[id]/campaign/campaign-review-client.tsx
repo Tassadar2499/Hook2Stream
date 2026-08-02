@@ -373,6 +373,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
   }
 
   function openItem(item: CampaignItem) {
+    setError(undefined);
     setSelectedItem(item);
     setItemDraft({ ...item });
     setComposition(parseComposition(item.compositionJson, item.slot));
@@ -519,12 +520,20 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
           <h1 className="display mt-2 text-5xl sm:text-7xl">18 posts. 21 days.</h1>
           <p className="mt-4 max-w-2xl leading-7">Three hooks become twelve lyric, cover and visual-loop variants. Six campaign cards complete the release arc.</p>
         </div>
-        <span className={`rounded-full border px-4 py-2 text-sm font-black uppercase ${campaign?.items.length === 18 ? "border-green-700 bg-green-100" : "border-amber-700 bg-amber-100"}`}>
+        <span className="status-chip surface-inset" role="status" aria-live="polite">
+          <span
+            className={`size-1.5 rounded-full ${
+              campaign?.items.length === 18
+                ? "bg-[var(--success)]"
+                : "bg-[var(--warning)]"
+            }`}
+            aria-hidden="true"
+          />
           {campaign?.items.length ?? 0} / 18 items
         </span>
       </div>
 
-      {error ? <div className="mt-6"><StatusPanel title="Campaign needs attention" message={error} tone="error" /></div> : null}
+      {error && !selectedItem ? <div className="mt-6"><StatusPanel title="Campaign needs attention" message={error} tone="error" /></div> : null}
       {notice ? <div className="mt-6"><StatusPanel title="Campaign updated" message={notice} tone="success" /></div> : null}
 
       {loading ? (
@@ -544,19 +553,19 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
             ) : (
               <div className="mt-6 grid gap-4 lg:grid-cols-3">
                 {hookDrafts.map((hook, index) => (
-                  <article className="rounded-2xl border border-[var(--line)] bg-white/55 p-4" key={hook.id}>
+                  <article className="surface-soft rounded-2xl border border-[var(--line)] p-4" key={hook.id}>
                     <p className="eyebrow text-[var(--orange)]">{titleCase(hook.kind)}</p>
-                    <label className="field mt-4"><span>Label</span><input value={hook.label ?? ""} onChange={(event) => updateHook(hook.id, { label: event.target.value })} /></label>
+                    <label className="field mt-4"><span>Label</span><input value={hook.label ?? ""} aria-invalid={hookErrors.length > 0 || undefined} aria-describedby={hookErrors.length > 0 ? "hook-validation" : undefined} onChange={(event) => updateHook(hook.id, { label: event.target.value })} /></label>
                     <div className="mt-3 grid grid-cols-2 gap-3">
-                      <label className="field"><span>In, s</span><input type="number" min={0} step={0.1} value={(hook.startMilliseconds / 1000).toFixed(1)} onChange={(event) => updateHook(hook.id, { startMilliseconds: Math.round(Number(event.target.value) * 1000) })} /></label>
-                      <label className="field"><span>Out, s</span><input type="number" min={0} step={0.1} value={(hook.endMilliseconds / 1000).toFixed(1)} onChange={(event) => updateHook(hook.id, { endMilliseconds: Math.round(Number(event.target.value) * 1000) })} /></label>
+                      <label className="field"><span>In, s</span><input type="number" min={0} step={0.1} value={(hook.startMilliseconds / 1000).toFixed(1)} aria-invalid={hookErrors.length > 0 || undefined} aria-describedby={hookErrors.length > 0 ? "hook-validation" : undefined} onChange={(event) => updateHook(hook.id, { startMilliseconds: Math.round(Number(event.target.value) * 1000) })} /></label>
+                      <label className="field"><span>Out, s</span><input type="number" min={0} step={0.1} value={(hook.endMilliseconds / 1000).toFixed(1)} aria-invalid={hookErrors.length > 0 || undefined} aria-describedby={hookErrors.length > 0 ? "hook-validation" : undefined} onChange={(event) => updateHook(hook.id, { endMilliseconds: Math.round(Number(event.target.value) * 1000) })} /></label>
                     </div>
                     <p className="mt-3 text-sm font-bold">{((hook.endMilliseconds - hook.startMilliseconds) / 1000).toFixed(1)} seconds · hook {index + 1}</p>
                   </article>
                 ))}
               </div>
             )}
-            {hookErrors.length > 0 ? <ul className="mt-4 rounded-xl bg-red-100 p-3 text-sm font-bold text-red-950" role="alert">{hookErrors.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+            {hookErrors.length > 0 ? <ul id="hook-validation" className="surface-inset mt-4 rounded-xl border border-[var(--danger)] p-3 text-sm font-bold text-[var(--danger)]" role="alert">{hookErrors.map((item) => <li key={item}>{item}</li>)}</ul> : null}
           </section>
 
           {!campaign ? (
@@ -579,13 +588,13 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
                       <div className="p-5">
                         <div className="flex items-center justify-between gap-3">
                           <span className="eyebrow">Slot {item.slot}</span>
-                          <span className="rounded-full bg-[var(--lime)] px-2.5 py-1 text-xs font-black uppercase">{controls.phase}</span>
+                          <span className="rounded-full bg-[var(--lime)] px-2.5 py-1 text-xs font-black uppercase text-[var(--on-accent)]">{controls.phase}</span>
                         </div>
-                        <p className="mt-3 text-sm leading-6 opacity-70">{controls.caption || `${titleCase(item.template)} campaign variation`}</p>
+                        <p className="mt-3 text-sm leading-6 text-[var(--muted)]">{controls.caption || `${titleCase(item.template)} campaign variation`}</p>
                         <div className="mt-4 flex flex-wrap gap-2">
-                          <button className="button-quiet" type="button" onClick={() => openItem(item)}>Edit card</button>
+                          <button className="button-quiet" type="button" onClick={() => openItem(item)} aria-label={`Edit card ${item.slot}`}>Edit card</button>
                           <label className="flex items-center gap-2 rounded-full border border-[var(--line)] px-3 py-2 text-xs font-black uppercase">
-                            <input type="checkbox" checked={miniSelected} onChange={(event) => setMiniSelection((current) => event.target.checked ? current.length < 6 ? [...current, item.id] : current : current.filter((id) => id !== item.id))} />Mini
+                            <input type="checkbox" checked={miniSelected} aria-label={`Include card ${item.slot} in Mini Release`} onChange={(event) => setMiniSelection((current) => event.target.checked ? current.length < 6 ? [...current, item.id] : current : current.filter((id) => id !== item.id))} />Mini
                           </label>
                         </div>
                       </div>
@@ -640,14 +649,14 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
                 <PlanCard title="Active Artist" price="$29/mo" description="One Release Pack per billing period" action="Subscribe" disabled={busy} onClick={() => checkout("active_artist")} />
               </div>
               {videoEntitlements.length > 0 ? (
-                <div className="mt-6 rounded-2xl border border-[var(--line)] bg-white/60 p-5">
+                <div className="surface-soft mt-6 rounded-2xl border border-[var(--line)] p-5">
                   <p className="eyebrow text-[var(--violet)]">Purchased clean exports</p>
                   <div className="mt-4 grid gap-3">
                     {videoEntitlements.map((entitlement) => (
                       <div className="flex flex-wrap items-center justify-between gap-3" key={entitlement.id}>
                         <div>
                           <p className="font-black">{titleCase(entitlement.productCode)}</p>
-                          <p className="text-sm opacity-70">
+                          <p className="text-sm text-[var(--muted)]">
                             {entitlement.itemIds.length || entitlement.includedItemCount} videos · {entitlement.remainingContentRerenders} content rerenders remain
                           </p>
                         </div>
@@ -701,16 +710,30 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       )}
 
       {selectedItem && itemDraft && composition ? (
-        <div className="fixed inset-0 z-50 grid bg-black/45 p-3 sm:place-items-center" role="dialog" aria-modal="true" aria-labelledby="item-editor-title">
-          <section className="paper-card max-h-[calc(100vh-1.5rem)] w-full max-w-3xl overflow-y-auto p-6 sm:p-8">
+        <div
+          className="fixed inset-0 z-50 grid bg-black/45 p-3 sm:place-items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="item-editor-title"
+          aria-describedby="item-editor-description"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setSelectedItem(undefined);
+          }}
+        >
+          <section className="paper-card max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl overflow-y-auto p-6 sm:p-8">
             <div className="flex items-start justify-between gap-4">
               <div><p className="eyebrow text-[var(--violet)]">Item {selectedItem.slot}</p><h2 id="item-editor-title" className="display mt-2 text-4xl">Edit one composition.</h2></div>
-              <button className="button-quiet" type="button" onClick={() => setSelectedItem(undefined)}>Close</button>
+              <button className="button-quiet" type="button" autoFocus onClick={() => setSelectedItem(undefined)}>Close</button>
             </div>
+            {error ? (
+              <div className="mt-5">
+                <StatusPanel title="Campaign needs attention" message={error} tone="error" />
+              </div>
+            ) : null}
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
               <label className="field"><span>Template · fixed for this slot</span><input value={titleCase(itemDraft.template)} readOnly /></label>
               <label className="field"><span>Hook · fixed for this slot</span><input value={hookLabel(itemDraft.hookId, hookDrafts)} readOnly /></label>
-              <p className="sm:col-span-2 text-sm font-bold opacity-70">Edit the card content and composition below. Template and hook assignments stay stable so the 18-item campaign contract remains valid.</p>
+              <p id="item-editor-description" className="sm:col-span-2 text-sm font-bold text-[var(--muted)]">Edit the card content and composition below. Template and hook assignments stay stable so the 18-item campaign contract remains valid.</p>
               <label className="field sm:col-span-2"><span>On-screen text</span><textarea value={itemDraft.text} onChange={(event) => setItemDraft({ ...itemDraft, text: event.target.value })} /></label>
               <label className="field"><span>Opening</span><select value={composition.opening} onChange={(event) => setComposition({ ...composition, opening: event.target.value })}><option value="fade">Fade</option><option value="punch">Punch</option><option value="reveal">Reveal</option></select></label>
               <label className="field"><span>Text layout</span><select value={composition.textLayout} onChange={(event) => setComposition({ ...composition, textLayout: event.target.value })}><option value="center">Center</option><option value="lowerThird">Lower third</option><option value="stacked">Stacked</option></select></label>
@@ -733,7 +756,23 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
 }
 
 function PlanCard({ title, price, description, action, disabled, onClick }: { title: string; price: string; description: string; action: string; disabled: boolean; onClick: () => void }) {
-  return <article className="rounded-2xl border border-[var(--line)] bg-white/55 p-5"><p className="eyebrow">{title}</p><p className="display mt-2 text-4xl">{price}</p><p className="mt-3 min-h-12 text-sm leading-6 opacity-70">{description}</p><button className="button-secondary mt-4 w-full" type="button" disabled={disabled} onClick={onClick}>{action}</button></article>;
+  return (
+    <article className="surface-soft rounded-2xl border border-[var(--line)] p-5">
+      <h3 className="eyebrow">{title}</h3>
+      <p className="display mt-2 text-4xl">{price}</p>
+      <p className="mt-3 min-h-12 text-sm leading-6 text-[var(--muted)]">
+        {description}
+      </p>
+      <button
+        className="button-secondary mt-4 w-full"
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+      >
+        {action}
+      </button>
+    </article>
+  );
 }
 
 function hookLabel(hookId: string, hooks: HookCandidate[]) {
@@ -762,7 +801,7 @@ function RenderProgress({
     .map((item) => item.campaignItemId);
   const progress = batch.items.length === 0 ? 0 : Math.round((completed / batch.items.length) * 100);
   return (
-    <div className="mt-6 rounded-2xl border border-[var(--line)] bg-[var(--ink)] p-5 text-white">
+    <div className="surface-inset mt-6 rounded-2xl border border-[var(--line)] p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="eyebrow text-[var(--lime)]">Clean render · {titleCase(batch.state)}</p>
@@ -772,27 +811,28 @@ function RenderProgress({
           <a className="button-primary" href={batch.export.url}>Download ZIP</a>
         ) : null}
       </div>
-      <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/20" role="progressbar" aria-label="Clean video render progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+      <div className="surface-soft mt-4 h-2 overflow-hidden rounded-full" role="progressbar" aria-label="Clean video render progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
         <div className="h-full bg-[var(--lime)]" style={{ width: `${progress}%` }} />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
         {batch.items.map((item, index) => (
           <div className="flex items-center gap-1" key={item.campaignItemId}>
             {item.download ? (
-              <a className="button-quiet border-white/30 text-white" href={item.download.url}>
+              <a className="button-quiet" href={item.download.url}>
                 Video {index + 1}
               </a>
             ) : (
-              <span className="rounded-full border border-white/20 px-3 py-2 text-xs font-black uppercase opacity-70">
+              <span className="status-chip surface-soft">
                 {index + 1} · {titleCase(item.state)}
               </span>
             )}
             {item.download && batch.kind === "initial" ? (
               <button
-                className="rounded-full border border-white/20 px-3 py-2 text-xs font-black uppercase"
+                className="rounded-full border border-[var(--line)] px-3 py-2 text-xs font-black uppercase"
                 type="button"
                 disabled={busy || remainingContentRerenders === 0}
                 onClick={() => onContentRerender(item.campaignItemId)}
+                aria-label={`Rerender edit for video ${index + 1}`}
               >
                 Rerender edit
               </button>
@@ -811,7 +851,7 @@ function RenderProgress({
         </button>
       ) : null}
       {onBackToInitial ? (
-        <button className="button-quiet ml-2 mt-4 border-white/30 text-white" type="button" onClick={onBackToInitial}>
+        <button className="button-quiet ml-2 mt-4" type="button" onClick={onBackToInitial}>
           Back to full render batch
         </button>
       ) : null}

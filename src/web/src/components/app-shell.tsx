@@ -10,40 +10,54 @@ const navigation = [
   { href: "/settings/brand", label: "Brand kit" },
 ];
 
+function isNavigationActive(pathname: string, href: string) {
+  if (href === "/dashboard") {
+    return (
+      pathname === href ||
+      (pathname.startsWith("/releases/") && pathname !== "/releases/new")
+    );
+  }
+
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { mode, signOut } = useAppAuth();
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-[var(--line)] bg-[var(--paper)]/85 backdrop-blur">
+    <div className="min-h-dvh pb-32 md:pb-0">
+      <a className="skip-link button-primary" href="#workspace-main">
+        Skip to workspace
+      </a>
+      <header className="surface-soft sticky top-0 z-30 border-b border-[var(--line)] backdrop-blur-xl">
         <div className="shell flex min-h-20 items-center justify-between gap-4">
-          <Link className="display text-2xl" href="/dashboard">
-            Hook<span className="text-[var(--orange)]">2</span>Stream
-          </Link>
-          <nav
-            className="hidden items-center gap-1 md:flex"
-            aria-label="Workspace navigation"
+          <Link
+            className="brand-mark"
+            href="/dashboard"
+            aria-label="Hook2Stream dashboard"
           >
-            {navigation.map((item) => {
-              const active =
-                pathname === item.href ||
-                (item.href !== "/dashboard" && pathname.startsWith(item.href));
-              return (
-                <Link
-                  key={item.href}
-                  className={`rounded-full px-4 py-2 text-sm font-black ${
-                    active ? "bg-[var(--ink)] text-white" : "hover:bg-white/60"
-                  }`}
-                  href={item.href}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
+            <span className="brand-mark-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+                <path
+                  d="M4 13.5h3l1.4-5 2.6 9 2.1-7 1.4 3H20"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+            <span>
+              Hook<span className="text-[var(--orange)]">2</span>Stream
+            </span>
+          </Link>
           {mode === "local" ? (
-            <span className="rounded-full border border-[var(--line)] bg-[var(--lime)] px-3 py-2 text-xs font-black uppercase">
+            <span className="status-chip surface-inset">
+              <span
+                className="size-1.5 rounded-full bg-[var(--success)]"
+                aria-hidden="true"
+              />
               Local developer
             </span>
           ) : (
@@ -57,42 +71,69 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
         </div>
       </header>
-      <div className="shell grid gap-7 py-7 md:grid-cols-[13rem_1fr] md:py-10">
-        <aside className="paper-card hidden h-fit p-3 md:block">
-          {navigation.map((item) => {
-            const active =
-              pathname === item.href ||
-              (item.href !== "/dashboard" && pathname.startsWith(item.href));
-            return (
-              <Link
-                key={item.href}
-                className={`block rounded-xl px-4 py-3 font-bold ${
-                  active ? "bg-[var(--lime)]" : "hover:bg-white/60"
-                }`}
-                href={item.href}
-              >
-                {item.label}
-              </Link>
-            );
-          })}
+      <div className="shell grid gap-7 py-7 md:grid-cols-[14rem_minmax(0,1fr)] md:py-10 xl:grid-cols-[15rem_minmax(0,1fr)]">
+        <aside className="hidden md:block">
+          <nav
+            className="paper-card surface-soft sticky top-28 grid gap-1 p-3"
+            aria-label="Workspace navigation"
+          >
+            <p className="eyebrow px-3 pb-2 pt-1 text-[var(--muted)]">
+              Workspace
+            </p>
+            {navigation.map((item, index) => {
+              const active = isNavigationActive(pathname, item.href);
+              return (
+                <Link
+                  key={item.href}
+                  className={`group flex min-h-12 items-center gap-3 rounded-xl border px-3 py-2.5 font-bold transition-colors ${
+                    active
+                      ? "surface-inset border-[var(--line-strong)]"
+                      : "border-transparent text-[var(--muted)] hover:border-[var(--line)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                  }`}
+                  href={item.href}
+                  aria-current={active ? "page" : undefined}
+                >
+                  <span
+                    className={`grid size-7 shrink-0 place-items-center rounded-lg text-[0.65rem] font-black ${
+                      active
+                        ? "bg-[var(--violet)] text-[var(--on-accent)]"
+                        : "surface-inset text-[var(--muted)]"
+                    }`}
+                    aria-hidden="true"
+                  >
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  {item.label}
+                </Link>
+              );
+            })}
+          </nav>
         </aside>
-        <main className="min-w-0">{children}</main>
+        <main id="workspace-main" className="min-w-0">
+          {children}
+        </main>
       </div>
       <nav
-        className="fixed inset-x-3 bottom-3 z-20 flex justify-around rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)]/95 p-2 shadow-xl backdrop-blur md:hidden"
+        className="workspace-mobile-nav paper-card surface-soft fixed inset-x-3 z-40 grid grid-cols-3 gap-1 p-2 backdrop-blur-xl md:hidden"
         aria-label="Mobile workspace navigation"
       >
-        {navigation.map((item) => (
-          <Link
-            key={item.href}
-            className={`min-h-11 rounded-xl px-3 py-2 text-center text-xs font-black ${
-              pathname === item.href ? "bg-[var(--lime)]" : ""
-            }`}
-            href={item.href}
-          >
-            {item.label}
-          </Link>
-        ))}
+        {navigation.map((item) => {
+          const active = isNavigationActive(pathname, item.href);
+          return (
+            <Link
+              key={item.href}
+              className={`grid min-h-12 place-items-center rounded-xl px-2 py-2 text-center text-xs font-black transition-colors ${
+                active
+                  ? "surface-inset text-[var(--text)]"
+                  : "text-[var(--muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+              }`}
+              href={item.href}
+              aria-current={active ? "page" : undefined}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
       </nav>
     </div>
   );

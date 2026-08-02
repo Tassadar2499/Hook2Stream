@@ -174,25 +174,29 @@ export function NewReleaseClient() {
 
   return (
     <AppShell>
-      <p className="eyebrow text-[var(--orange)]">New release</p>
-      <h1 className="display mt-2 text-5xl sm:text-7xl">Drop the song. We build the campaign.</h1>
-      <p className="mt-4 max-w-2xl text-lg leading-8">
-        Start quickly with one finished MP3, or prepare an Audio-first draft for
-        WAV. Transcription and music analysis begin after upload; you review every
-        result before anything is rendered.
-      </p>
+      <section className="surface-soft rounded-3xl border border-[var(--line)] p-6 sm:p-8">
+        <p className="eyebrow text-[var(--orange)]">New release</p>
+        <h1 className="display mt-3 max-w-4xl text-5xl sm:text-7xl">
+          Drop the song. We build the campaign.
+        </h1>
+        <p className="mt-5 max-w-2xl text-lg leading-8 opacity-75">
+          Start quickly with one finished MP3, or prepare an Audio-first draft for
+          WAV. Transcription and music analysis begin after upload; you review every
+          result before anything is rendered.
+        </p>
+      </section>
 
-      <section className="paper-card mt-8 overflow-hidden p-6 sm:p-9">
-        <div className="grid gap-7 lg:grid-cols-[1fr_.72fr] lg:items-center">
-          <div>
+      <section className="paper-card mt-6 overflow-hidden p-2">
+        <div className="grid gap-2 lg:grid-cols-[1.15fr_.85fr]">
+          <div className="p-5 sm:p-7">
             <p className="eyebrow text-[var(--violet)]">Audio-first quick start</p>
             <h2 className="display mt-2 text-4xl sm:text-6xl">One file is enough.</h2>
-            <p className="mt-4 max-w-xl leading-7">
+            <p className="mt-4 max-w-xl leading-7 opacity-75">
               We create an unscheduled draft, read its tags, analyse rhythm locally and
               prepare an editable transcript through OpenRouter. You review every result
               before the campaign is rendered.
             </p>
-            <label className="mt-6 flex max-w-xl items-start gap-3 rounded-2xl border border-[var(--line)] bg-white/65 p-4 font-bold leading-6">
+            <label className="surface-soft mt-6 flex max-w-xl items-start gap-3 rounded-2xl border border-[var(--line)] p-4 font-bold leading-6">
               <input
                 className="mt-0.5 size-5 shrink-0"
                 type="checkbox"
@@ -206,45 +210,55 @@ export function NewReleaseClient() {
                 using Zero Data Retention.
               </span>
             </label>
-            <label
-              className={`button-secondary mt-6 cursor-pointer ${
-                quickStartBusy || !externalAiConsent
-                  ? "pointer-events-none opacity-55"
-                  : ""
-              }`}
-            >
-              <input
-                className="sr-only"
-                type="file"
-                accept=".mp3,audio/mpeg"
-                disabled={quickStartBusy || !externalAiConsent}
-                onChange={quickStart}
-              />
-              {quickStartBusy ? "Uploading…" : "Choose MP3"}
-            </label>
-            {quickStartBusy ? (
-              <button
-                className="button-quiet ml-3"
-                type="button"
-                onClick={() => uploadCancellation.current?.abort()}
+            <div className="mt-6 flex flex-wrap gap-3">
+              <label
+                className={`button-secondary cursor-pointer ${
+                  quickStartBusy || !externalAiConsent
+                    ? "pointer-events-none opacity-55"
+                    : ""
+                }`}
               >
-                Pause
-              </button>
-            ) : null}
+                <input
+                  className="sr-only"
+                  type="file"
+                  accept=".mp3,audio/mpeg"
+                  disabled={quickStartBusy || !externalAiConsent}
+                  onChange={quickStart}
+                />
+                {quickStartBusy ? "Uploading…" : "Choose MP3"}
+              </label>
+              {quickStartBusy ? (
+                <button
+                  className="button-quiet"
+                  type="button"
+                  onClick={() => uploadCancellation.current?.abort()}
+                >
+                  Pause
+                </button>
+              ) : null}
+            </div>
           </div>
-          <div className="rounded-3xl bg-[var(--ink)] p-6 text-white">
-            <p className="eyebrow text-[var(--lime)]">Automatic first pass</p>
-            <ol className="mt-5 grid gap-3 font-bold">
-              <li>01 · Validate audio and read ID3</li>
-              <li>02 · Transcribe RU / EN via OpenRouter</li>
-              <li>03 · Find three musical hooks</li>
-              <li>04 · Generate editable artwork via OpenRouter</li>
-              <li>05 · Build an editable 18-post campaign</li>
+          <div className="surface-inset rounded-[1.35rem] p-6 sm:p-7">
+            <p className="eyebrow text-[var(--violet)]">Automatic first pass</p>
+            <ol className="mt-5 grid gap-1 font-bold">
+              <li className="border-b border-[var(--line)] py-3 first:pt-0">
+                01 · Validate audio and read ID3
+              </li>
+              <li className="border-b border-[var(--line)] py-3">
+                02 · Transcribe RU / EN via OpenRouter
+              </li>
+              <li className="border-b border-[var(--line)] py-3">
+                03 · Find three musical hooks
+              </li>
+              <li className="border-b border-[var(--line)] py-3">
+                04 · Generate editable artwork via OpenRouter
+              </li>
+              <li className="pt-3">05 · Build an editable 18-post campaign</li>
             </ol>
           </div>
         </div>
         <div
-          className="mt-7 h-2 overflow-hidden rounded-full bg-black/10"
+          className="surface-inset mx-5 mt-3 h-2 overflow-hidden rounded-full sm:mx-7"
           role="progressbar"
           aria-label="MP3 upload"
           aria-valuemin={0}
@@ -256,133 +270,135 @@ export function NewReleaseClient() {
             style={{ width: `${uploadProgress}%` }}
           />
         </div>
-        <div className="mt-2 flex justify-between gap-3 text-xs font-black uppercase tracking-wider">
+        <div className="mx-5 mb-5 mt-2 flex justify-between gap-3 text-xs font-black uppercase tracking-wider opacity-70 sm:mx-7 sm:mb-7">
           <span aria-live="polite">{uploadStage}</span>
           <span>{uploadProgress}%</span>
         </div>
         {error ? (
-          <div className="mt-5">
+          <div className="mx-5 mb-5 mt-5 sm:mx-7 sm:mb-7">
             <StatusPanel title="Could not start release" message={error} tone="error" />
           </div>
         ) : null}
       </section>
 
-      <details className="paper-card mt-6 p-6 sm:p-8">
-        <summary className="cursor-pointer font-black">
+      <details className="paper-card mt-6 overflow-hidden p-2">
+        <summary className="surface-soft cursor-pointer rounded-[1.2rem] px-5 py-4 font-black sm:px-6">
           Audio-first setup — WAV or MP3, prepared lyrics and full release brief
         </summary>
-      <form className="mt-7 grid gap-7" onSubmit={submit}>
-        <div className="grid gap-5 md:grid-cols-2">
-          <label className="field">
-            <span>Internal project label</span>
-            <input name="projectLabel" required maxLength={160} />
-          </label>
-          <label className="field">
-            <span>Language</span>
-            <select name="language" defaultValue="en">
-              <option value="en">English</option>
-              <option value="ru">Russian</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>Artist name</span>
-            <input name="artistName" required maxLength={160} />
-          </label>
-          <label className="field">
-            <span>Track title</span>
-            <input name="trackTitle" required maxLength={160} />
-          </label>
-        </div>
-
-        <fieldset className="grid gap-3">
-          <legend className="eyebrow mb-2">Release timing</legend>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {(["upcoming", "released"] as ReleaseMode[]).map((value) => (
-              <label
-                key={value}
-                className={`flex min-h-20 cursor-pointer items-center gap-3 rounded-2xl border p-4 font-black ${
-                  mode === value
-                    ? "border-black bg-[var(--lime)]"
-                    : "border-[var(--line)] bg-white/55"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="mode"
-                  value={value}
-                  checked={mode === value}
-                  onChange={() => setMode(value)}
-                />
-                {value === "upcoming" ? "Upcoming release" : "Already released"}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <div className="grid gap-5 md:grid-cols-2">
-          <label className="field">
-            <span>{mode === "upcoming" ? "Release date" : "Actual release date"}</span>
-            <input
-              type="date"
-              name="releaseDate"
-              required
-              defaultValue={
-                mode === "upcoming"
-                  ? defaults.upcomingRelease
-                  : defaults.releasedDate
-              }
-              key={mode}
-            />
-          </label>
-          {mode === "released" ? (
+        <form className="grid gap-4 p-3 sm:p-5" onSubmit={submit}>
+          <div className="surface-soft grid gap-5 rounded-3xl border border-[var(--line)] p-5 md:grid-cols-2 sm:p-6">
             <label className="field">
-              <span>Campaign start</span>
+              <span>Internal project label</span>
+              <input name="projectLabel" required maxLength={160} />
+            </label>
+            <label className="field">
+              <span>Language</span>
+              <select name="language" defaultValue="en">
+                <option value="en">English</option>
+                <option value="ru">Russian</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Artist name</span>
+              <input name="artistName" required maxLength={160} />
+            </label>
+            <label className="field">
+              <span>Track title</span>
+              <input name="trackTitle" required maxLength={160} />
+            </label>
+          </div>
+
+          <fieldset className="surface-soft grid gap-3 rounded-3xl border border-[var(--line)] p-5 sm:p-6">
+            <legend className="eyebrow px-1">Release timing</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["upcoming", "released"] as ReleaseMode[]).map((value) => (
+                <label
+                  key={value}
+                  className={`flex min-h-20 cursor-pointer items-center gap-3 rounded-2xl border p-4 font-black transition ${
+                    mode === value
+                      ? "border-[var(--lime)] bg-[var(--lime)] text-[var(--on-accent)]"
+                      : "surface-inset border-[var(--line)]"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="mode"
+                    value={value}
+                    checked={mode === value}
+                    onChange={() => setMode(value)}
+                  />
+                  {value === "upcoming" ? "Upcoming release" : "Already released"}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <div className="surface-soft grid gap-5 rounded-3xl border border-[var(--line)] p-5 md:grid-cols-2 sm:p-6">
+            <label className="field">
+              <span>{mode === "upcoming" ? "Release date" : "Actual release date"}</span>
               <input
                 type="date"
-                name="campaignStartDate"
+                name="releaseDate"
                 required
-                defaultValue={defaults.campaignStart}
+                defaultValue={
+                  mode === "upcoming"
+                    ? defaults.upcomingRelease
+                    : defaults.releasedDate
+                }
+                key={mode}
               />
             </label>
-          ) : null}
-        </div>
+            {mode === "released" ? (
+              <label className="field">
+                <span>Campaign start</span>
+                <input
+                  type="date"
+                  name="campaignStartDate"
+                  required
+                  defaultValue={defaults.campaignStart}
+                />
+              </label>
+            ) : null}
+          </div>
 
-        <label className="flex min-h-12 items-center gap-3 rounded-2xl border border-[var(--line)] bg-white/55 p-4 font-bold">
-          <input
-            className="size-5"
-            type="checkbox"
-            checked={instrumental}
-            onChange={(event) => setInstrumental(event.target.checked)}
-          />
-          This track is instrumental
-        </label>
-
-        {!instrumental ? (
-          <label className="field">
-            <span>Lyrics</span>
-            <textarea
-              name="lyricsText"
-              required
-              maxLength={100000}
-              placeholder="Paste the final lyrics. Phrase timing comes in the analysis increment."
+          <label className="surface-soft flex min-h-12 items-center gap-3 rounded-2xl border border-[var(--line)] p-4 font-bold">
+            <input
+              className="size-5"
+              type="checkbox"
+              checked={instrumental}
+              onChange={(event) => setInstrumental(event.target.checked)}
             />
+            This track is instrumental
           </label>
-        ) : null}
 
-        <label className="field">
-          <span>Internal notes</span>
-          <textarea
-            name="internalNotes"
-            maxLength={4000}
-            placeholder="Creative direction, references or launch context."
-          />
-        </label>
+          <div className="surface-soft grid gap-5 rounded-3xl border border-[var(--line)] p-5 sm:p-6">
+            {!instrumental ? (
+              <label className="field">
+                <span>Lyrics</span>
+                <textarea
+                  name="lyricsText"
+                  required
+                  maxLength={100000}
+                  placeholder="Paste the final lyrics. Phrase timing comes in the analysis increment."
+                />
+              </label>
+            ) : null}
 
-        {error ? <StatusPanel title="Could not create release" message={error} tone="error" /> : null}
-        <button className="button-primary justify-self-start" disabled={saving} type="submit">
-          {saving ? "Creating draft…" : "Create draft and upload WAV or MP3"}
-        </button>
-      </form>
+            <label className="field">
+              <span>Internal notes</span>
+              <textarea
+                name="internalNotes"
+                maxLength={4000}
+                placeholder="Creative direction, references or launch context."
+              />
+            </label>
+          </div>
+
+          {error ? <StatusPanel title="Could not create release" message={error} tone="error" /> : null}
+          <button className="button-primary justify-self-start" disabled={saving} type="submit">
+            {saving ? "Creating draft…" : "Create draft and upload WAV or MP3"}
+          </button>
+        </form>
       </details>
     </AppShell>
   );

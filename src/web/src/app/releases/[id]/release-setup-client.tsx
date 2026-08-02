@@ -169,13 +169,22 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
           <p className="mt-3 text-xl font-black">{release.artistName}</p>
         </div>
         <div
-          className={`rounded-2xl border p-4 ${
-            readiness?.ready
-              ? "border-green-800/30 bg-green-100"
-              : "border-[var(--line)] bg-white/60"
-          }`}
+          className="surface-soft max-w-sm rounded-2xl border border-[var(--line)] p-4"
+          role="status"
         >
-          <p className="eyebrow">{readiness?.ready ? "Inputs ready" : "Draft setup"}</p>
+          <div className="flex items-center gap-2">
+            <span
+              className={`size-2 rounded-full ${
+                readiness?.ready
+                  ? "bg-[var(--success)]"
+                  : "bg-[var(--warning)]"
+              }`}
+              aria-hidden="true"
+            />
+            <p className="eyebrow">
+              {readiness?.ready ? "Inputs ready" : "Draft setup"}
+            </p>
+          </div>
           <p className="mt-1 font-bold">
             {readiness?.ready
               ? "Ready for the future analysis increment."
@@ -233,7 +242,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
             <p className="eyebrow">Media state</p>
             <h2 className="display mt-2 text-4xl">Assets and revisions</h2>
           </div>
-          <p className="text-sm font-bold opacity-65">
+          <p className="text-sm font-bold text-[var(--muted)]">
             Replacements become active only after successful ingest.
           </p>
         </div>
@@ -246,37 +255,39 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
             {activeAssets.map((asset) => (
               <article
                 key={asset.id}
-                className="grid gap-3 rounded-2xl border border-[var(--line)] bg-white/55 p-4 sm:grid-cols-[1fr_auto] sm:items-center"
+                className="surface-soft grid gap-3 rounded-2xl border border-[var(--line)] p-4 sm:grid-cols-[1fr_auto] sm:items-center"
               >
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded-full bg-[var(--ink)] px-2.5 py-1 text-xs font-black uppercase text-white">
+                    <span className="status-chip surface-inset">
                       {asset.kind}
                     </span>
-                    <span
-                      className={`rounded-full px-2.5 py-1 text-xs font-black uppercase ${
-                        asset.state === "ready"
-                          ? "bg-green-200"
-                          : asset.state === "rejected"
-                            ? "bg-red-200"
-                            : "bg-amber-200"
-                      }`}
-                    >
+                    <span className="status-chip surface-inset">
+                      <span
+                        className={`size-1.5 rounded-full ${
+                          asset.state === "ready"
+                            ? "bg-[var(--success)]"
+                            : asset.state === "rejected"
+                              ? "bg-[var(--danger)]"
+                              : "bg-[var(--warning)]"
+                        }`}
+                        aria-hidden="true"
+                      />
                       {asset.state}
                     </span>
-                    <span className="text-xs font-bold opacity-60">
+                    <span className="text-xs font-bold text-[var(--muted)]">
                       revision {asset.revision}
                     </span>
                   </div>
                   <p className="mt-2 truncate font-black">{asset.fileName}</p>
-                  <p className="mt-1 text-sm opacity-65">
+                  <p className="mt-1 text-sm text-[var(--muted)]">
                     {formatBytes(Number(asset.actualBytes ?? asset.declaredBytes))}
                     {asset.width && asset.height
                       ? ` · ${asset.width}×${asset.height}`
                       : ""}
                   </p>
                   {asset.failureMessage ? (
-                    <p className="mt-2 text-sm font-bold text-red-800">
+                    <p className="mt-2 text-sm font-bold text-[var(--danger)]" role="alert">
                       {asset.failureMessage}
                     </p>
                   ) : null}
@@ -285,6 +296,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
                   className="button-quiet"
                   type="button"
                   onClick={() => deleteAsset(asset)}
+                  aria-label={`Remove ${asset.fileName}`}
                 >
                   Remove
                 </button>
@@ -298,7 +310,8 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
         <form className="paper-card p-6 sm:p-8" onSubmit={confirmRights}>
           <p className="eyebrow text-[var(--orange)]">Required attestation</p>
           <h2 className="display mt-2 text-4xl">Confirm the rights.</h2>
-          <div className="mt-6 grid gap-3">
+          <fieldset className="mt-6 grid gap-3">
+            <legend className="sr-only">Rights confirmations</legend>
             {[
               ["audio", "I have the right to process this audio."],
               ["lyrics", "I have the right to use these lyrics."],
@@ -307,7 +320,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
             ].map(([name, label]) => (
               <label
                 key={name}
-                className="flex min-h-12 items-start gap-3 rounded-xl border border-[var(--line)] bg-white/55 p-3 font-bold"
+                className="surface-inset flex min-h-12 items-start gap-3 rounded-xl border border-[var(--line)] p-3 font-bold"
               >
                 <input className="mt-0.5 size-5" type="checkbox" name={name} required />
                 {label}
@@ -322,7 +335,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
                 <option value="unknown">Prefer not to classify yet</option>
               </select>
             </label>
-          </div>
+          </fieldset>
           <button
             className="button-primary mt-6"
             type="submit"
@@ -348,7 +361,7 @@ export function ReleaseSetupClient({ projectId }: { projectId: string }) {
               {readiness?.missing.map((item, index) => (
                 <li
                   key={item}
-                  className="flex gap-3 rounded-xl border border-[var(--line)] bg-white/55 p-4 font-bold"
+                  className="surface-inset flex gap-3 rounded-xl border border-[var(--line)] p-4 font-bold"
                 >
                   <span className="display text-2xl text-[var(--orange)]">
                     {String(index + 1).padStart(2, "0")}
