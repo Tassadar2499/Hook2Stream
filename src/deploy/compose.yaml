@@ -145,7 +145,6 @@ services:
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL}
-      WWW_DOMAIN: ${WWW_DOMAIN:-www.hook2stream.invalid}
       ROBOTS_HEADER: ${ROBOTS_HEADER:-noindex, nofollow, noarchive}
     configs:
       - source: caddyfile

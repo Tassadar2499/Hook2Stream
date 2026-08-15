@@ -67,11 +67,22 @@ DNS-only records:
 
 - `A @` to the production app IPv4;
 - `A staging` to the staging app IPv4;
-- `CNAME www` to `@`.
+- `CNAME www` to `Tassadar2499.github.io` for the static GitHub Pages landing
+  site.
 
 Do not create application AAAA records until equivalent IPv6 UFW rules have
-been tested. Caddy owns public TLS. Production redirects `www` with status 308;
-staging emits `X-Robots-Tag: noindex, nofollow, noarchive`. Google callbacks are
+been tested. Keep every record DNS-only. Caddy owns TLS only for the apex and
+staging application hosts; GitHub Pages owns `www` and its certificate. Verify
+the apex domain in the GitHub account and keep the
+`_github-pages-challenge-Tassadar2499` TXT record permanently. Then save
+`www.hook2stream.com` as the repository Pages custom domain, create the `www`
+CNAME, and verify both records from a public resolver with
+`dig @1.1.1.1 +short TXT _github-pages-challenge-Tassadar2499.hook2stream.com`
+and `dig @1.1.1.1 +short CNAME www.hook2stream.com`. Only then enable HTTPS and
+declare the Pages hostname live.
+The checked-in `site/CNAME` is an artifact assertion, not a substitute for the
+repository setting. Staging emits
+`X-Robots-Tag: noindex, nofollow, noarchive`. Google callbacks are
 `/api/v1/auth/callback`; Stripe webhooks are
 `/api/v1/billing/stripe/webhook`. Unknown Google accounts must fail closed and
 production accepts only pre-issued invites.
@@ -320,7 +331,8 @@ throttling. Any throttling, AUP conflict, OOM, sustained queue growth, or
 unacceptable render time blocks production.
 
 Production additionally requires the signed staging receipts, both recovery
-drills, TLS/security headers, 308 `www`, controlled live payment/refund,
+drills, TLS/security headers, a valid GitHub Pages certificate on `www`,
+controlled live payment/refund,
 encrypted upload/download/range, actual image digest verification, and at least
 30 minutes of observation after release. Lack of two GitHub reviewers blocks
 live payments but not staging.

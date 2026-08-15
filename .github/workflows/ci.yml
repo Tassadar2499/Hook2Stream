@@ -56,6 +56,7 @@ jobs:
         run: |
           bash src/ci/tests/release-candidate.test.sh
           node src/ci/tests/workflow-contract.test.mjs
+          node src/ci/tests/pages-contract.test.mjs
           bash src/ci/tests/storage-candidate.test.sh
           node src/ci/tests/storage-workflow-contract.test.mjs
           node src/ci/tests/storage-minio-security-gate.test.mjs

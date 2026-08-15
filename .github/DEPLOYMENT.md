@@ -6,6 +6,43 @@ The workflows are fail-closed until the GitHub and host controls below exist. No
 
 Protect `main`: require the `CI` workflow checks, require pull requests and approval, dismiss stale approvals, require conversation resolution, block force pushes and deletion, and do not permit bypass. Configure every deployment Environment (`staging`, `production`, `storage-staging`, and `storage-production`) to allow only the protected `main` branch and no tags. The production environments must require two reviewers and prevent self-review; lack of either the branch restriction or reviewer protection blocks live payments.
 
+## GitHub Pages landing
+
+The static public landing in `site/` is intentionally separate from the
+standalone/dynamic Next.js application. It owns only
+`www.hook2stream.com`; the production application stays at the apex and
+staging stays at `staging.hook2stream.com`. Caddy must never claim or redirect
+`www`.
+
+For the first publication, do not merge merely to enable Pages: every push to
+`main` also starts the application CI and automatic staging deployment. First
+confirm that the repository visibility and the owner's GitHub plan permit Pages,
+then use this order:
+
+1. verify `hook2stream.com` in the GitHub account with the provided Cloudflare
+   DNS TXT challenge, wait for verification, and keep that TXT record
+   permanently;
+2. publish the exact contents of `site/` on a dedicated `gh-pages` branch;
+3. configure Settings → Pages to publish from the `gh-pages` branch root;
+4. set `www.hook2stream.com` as the repository Pages custom domain;
+5. create the DNS-only `CNAME www` to `Tassadar2499.github.io`;
+6. use
+   `dig @1.1.1.1 +short TXT _github-pages-challenge-Tassadar2499.hook2stream.com`
+   and `dig @1.1.1.1 +short CNAME www.hook2stream.com` to verify both records
+   through a public resolver;
+7. wait for the Pages certificate and enable "Enforce HTTPS".
+
+Once the application bootstrap is ready and this change is merged through the
+protected `main` branch, switch the Pages publishing source to GitHub Actions.
+The manual-only `Pages` workflow validates the domain/Caddy contract and
+publishes `site/`; it rejects non-main dispatches and never triggers on push.
+Protect the `github-pages` Environment so only protected `main` can deploy.
+Leave "Enforce HTTPS" enabled. A checked-in `CNAME` file alone does not create
+the repository custom-domain setting. Smoke-test `/`, `/styles.css`, and a
+nested missing URL such as `/nested/missing` after every Pages publication; the
+last request must render the styled custom 404 without requesting
+`/nested/styles.css`.
+
 Create GitHub Environments named `staging` and `production`. Each environment has its own values for:
 
 - `DEPLOY_HOST` secret: Tailscale DNS name or IP of that environment's host.
