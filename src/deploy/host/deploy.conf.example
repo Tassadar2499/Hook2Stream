@@ -1,0 +1,11 @@
+HOOK2STREAM_ENV_FILE=/srv/hook2stream/config/staging.env
+HOOK2STREAM_RELEASES_DIR=/srv/hook2stream/releases
+HOOK2STREAM_RELEASE_STATE_DIR=/srv/hook2stream/release-state
+HOOK2STREAM_REPOSITORY=OWNER/Hook2Stream
+HOOK2STREAM_E2E_HOOK=/usr/local/libexec/hook2stream/post-deploy-e2e.sh
+HOOK2STREAM_AUTHENTICATED_E2E_HOOK=/usr/local/libexec/hook2stream/authenticated-e2e.sh
+# Before the first deployment, set this to that candidate's exact 40-hex SHA.
+# It is an identity marker, never a lexical SHA floor.
+MIN_ROLLBACK_RELEASE_SHA=REPLACE_WITH_FIRST_H2SE_RELEASE_40_HEX_SHA
+# Production only:
+HOOK2STREAM_STAGING_SIGNERS=/etc/hook2stream/staging-receipt-allowed-signers

@@ -36,8 +36,8 @@ on_exit() {
         if [ -n "$release_snapshot" ]; then
             printf '%s\n' \
                 "deploy-release: previous environment snapshot: ${release_snapshot}" \
-                "deploy-release: do not down-migrate; after checking migration compatibility, restore those image references with:" \
-                "  HOOK2STREAM_ENV_FILE=${release_snapshot} ${deployment_dir}/scripts/deploy-release.sh" >&2
+                "deploy-release: do not run this snapshot through deploy-release.sh and do not down-migrate" \
+                "deploy-release: use the forced application-only rollback for a recorded compatible SHA, or forward-fix" >&2
         fi
     fi
     exit "$release_exit_code"
@@ -62,19 +62,14 @@ esac
 secret_provider=$(deployment_secret_provider)
 case "$secret_provider" in
     file) deployment_validate_file_secrets ;;
-    vault)
-        [ "$storage_mode" != minio ] \
-            || fail "STORAGE_MODE=minio currently requires SECRET_PROVIDER=file"
-        current_stage=vault-secrets-preflight
-        vault_require_configuration
-        vault_preflight_release \
-            || fail "Vault drift must be reconciled before this release"
-        ;;
+    vault) fail "MVP staging/production requires environment-local root-owned file secrets" ;;
     *) fail "SECRET_PROVIDER must be file or vault" ;;
 esac
 
 current_stage=configuration-validation
 compose_tools config --quiet
+deployment_environment=$(read_env_value DEPLOYMENT_ENVIRONMENT)
+case "$deployment_environment" in staging|production) ;; *) fail "DEPLOYMENT_ENVIRONMENT must be staging or production" ;; esac
 public_origin=$(read_env_value PUBLIC_ORIGIN)
 case "$public_origin" in
     https://?*) ;;
@@ -89,6 +84,14 @@ case "$app_domain" in
 esac
 [ "$public_origin" = "https://${app_domain}" ] \
     || fail "PUBLIC_ORIGIN must be exactly https://APP_DOMAIN with no path or port"
+if [ "$storage_mode" = external ]; then
+    case "$deployment_environment:$app_domain" in
+        staging:staging.hook2stream.com|production:hook2stream.com) ;;
+        *) fail "APP_DOMAIN does not match the selected Hook2Stream environment" ;;
+    esac
+fi
+[ "$(read_env_value ROBOTS_HEADER)" = "noindex, nofollow, noarchive" ] || [ "$deployment_environment" = production ] \
+    || fail "staging must emit a noindex X-Robots-Tag"
 case "$app_domain" in
     app.example.com|*.example.com) fail "replace the example APP_DOMAIN before deployment" ;;
 esac
@@ -183,6 +186,7 @@ for image_variable in \
     PGBOUNCER_IMAGE; do
     require_digest_image "$image_variable"
 done
+require_digest_image EGRESS_PROXY_IMAGE
 if [ "$secret_provider" = vault ]; then
     require_digest_image VAULT_AGENT_IMAGE
 fi
@@ -205,8 +209,15 @@ if [ "$pull_images" = true ]; then
     fi
     compose_tools pull \
         caddy web api worker-media worker-analysis worker-control \
-        worker-render worker-export bootstrapper pgbouncer postgres postgres-backup
+        worker-render worker-export bootstrapper pgbouncer postgres postgres-backup \
+        egress-api egress-s3 egress-control
 fi
+
+current_stage=egress-proxies
+compose up -d egress-api egress-s3 egress-control
+for service_name in egress-api egress-s3 egress-control; do
+    wait_for_service "$service_name" || fail "$service_name did not become healthy"
+done
 
 if [ "$storage_mode" = minio ]; then
     current_stage=object-storage-start
@@ -266,11 +277,23 @@ if [ "$storage_mode" = minio ]; then
 fi
 
 current_stage=complete
+if [ "${HOOK2STREAM_DEFER_SUCCESS_MARKER:-false}" != true ]; then
 install -m 0600 "$environment_file" "${last_successful_environment}.tmp"
 mv -f "${last_successful_environment}.tmp" "$last_successful_environment"
+successful_dir=${release_state_dir}/successful
+install -d -m 0700 "$successful_dir"
+release_version=$(read_env_value RELEASE_VERSION)
+case "$release_version" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+        install -m 0600 "$environment_file" "$successful_dir/$release_version.env"
+        ;;
+esac
+else
+    deployment_log "success marker deferred to the forced-command verification gate"
+fi
 printf '%s\n' \
     "deploy-release: release completed successfully" \
-    "deploy-release: last-successful environment recorded at ${last_successful_environment}"
+    "deploy-release: rollout stages completed"
 if [ -n "$release_snapshot" ]; then
     printf '%s\n' "deploy-release: rollback environment snapshot: ${release_snapshot}"
 fi

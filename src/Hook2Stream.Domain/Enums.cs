@@ -73,6 +73,13 @@ public enum UploadState
     Expired = 5
 }
 
+public enum UploadPartState
+{
+    Stored = 0,
+    Committed = 1,
+    Deleted = 2
+}
+
 public enum DerivativeKind
 {
     AudioAnalysisWave = 1,

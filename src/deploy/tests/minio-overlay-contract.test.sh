@@ -71,8 +71,8 @@ assert_contains "$bootstrap_service" \
 assert_contains "$bootstrap_service" \
     'Storage__ConfigureMultipartAbortLifecycle: "false"' \
     "the MinIO bootstrapper must not submit the unsupported abort lifecycle rule"
-grep -Fq 'Storage__ConfigureBucketCors: "true"' "$base_compose" \
-    || fail "external S3 mode no longer retains bucket-level CORS bootstrap"
+grep -Fq 'Storage__ConfigureBucketCors: "false"' "$base_compose" \
+    || fail "external S3 mode must keep browser bucket CORS disabled"
 assert_contains "$minio_service" \
     'MINIO_API_CORS_ALLOW_ORIGIN: "off"' \
     "cluster-wide MinIO CORS must be disabled"

@@ -96,6 +96,50 @@ export async function apiFetch<T>(
   };
 }
 
+export function apiUploadPart(
+  sessionId: string,
+  partNumber: number,
+  body: Blob,
+  token: string,
+  onProgress: (uploadedBytes: number) => void,
+  signal: AbortSignal,
+): Promise<UploadPart> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", buildApiUrl(`/api/v1/uploads/${sessionId}/parts/${partNumber}`));
+    request.withCredentials = true;
+    request.setRequestHeader("Content-Type", "application/octet-stream");
+    request.setRequestHeader("Accept", "application/json");
+    if (token !== COOKIE_SESSION_MARKER) request.setRequestHeader("Authorization", `Bearer ${token}`);
+    else {
+      const csrf = readOAuthCsrfToken();
+      if (csrf) request.setRequestHeader("X-CSRF-Token", csrf);
+    }
+    request.upload.onprogress = (event) => onProgress(event.loaded);
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        try { resolve(JSON.parse(request.responseText) as UploadPart); }
+        catch { reject(new Error("The upload receipt was invalid.")); }
+      } else {
+        let problem: ProblemDetails = {};
+        try { problem = JSON.parse(request.responseText) as ProblemDetails; }
+        catch { /* Keep the safe HTTP fallback. */ }
+        reject(new ApiRequestError(
+          problem.detail ?? `Upload failed with status ${request.status}.`,
+          request.status,
+          problem.code ?? problem.title ?? "upload.part_failed",
+          problem.errors,
+          problem.traceId,
+        ));
+      }
+    };
+    request.onerror = () => reject(new Error("The same-origin upload failed."));
+    request.onabort = () => reject(new DOMException("Upload aborted.", "AbortError"));
+    signal.addEventListener("abort", () => request.abort(), { once: true });
+    request.send(body);
+  });
+}
+
 export async function streamJobEvents(
   jobId: string,
   token: string,

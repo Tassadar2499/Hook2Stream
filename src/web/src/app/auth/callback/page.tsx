@@ -11,6 +11,8 @@ const authErrorCopy: Record<string, string> = {
   missing_code: "The sign-in response was incomplete. Please try again.",
   exchange_failed: "Google did not return a usable session. Please try again.",
   email_unverified: "Verify the Google account email before signing in.",
+  identity_invalid: "Google returned an incomplete account identity.",
+  invite_required: "This closed MVP is invite-only. Ask the operator to allow this Google email.",
 };
 
 export default function AuthCallbackPage() {

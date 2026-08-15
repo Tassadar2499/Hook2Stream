@@ -4,8 +4,10 @@ set -euo pipefail
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ASPNETCORE_ENVIRONMENT=Testing \
+DOTNET_ENVIRONMENT=Testing \
 Auth__Mode=Local \
 Auth__LocalToken=contract-generation-token \
+StorageEncryption__Mode=Plaintext \
 dotnet build "$source_root/Hook2Stream.Api/Hook2Stream.Api.csproj" \
   --no-restore \
   -m:1 \

@@ -1,8 +1,9 @@
 import {
+  ApiRequestError,
   CompleteUpload,
-  UploadPart,
   UploadSession,
   apiFetch,
+  apiUploadPart,
 } from "./api";
 
 export type UploadProgress = {
@@ -17,9 +18,7 @@ export async function uploadToSession(
   onProgress: (progress: UploadProgress) => void,
   signal: AbortSignal,
 ): Promise<CompleteUpload> {
-  const completedParts = session.multipart
-    ? await uploadMultipart(session, file, token, onProgress, signal)
-    : await uploadSingle(session, file, onProgress, signal);
+  const completedParts = await uploadMultipart(session, file, token, onProgress, signal);
 
   onProgress({ percent: 92, stage: "verifying" });
   const completed = await apiFetch<CompleteUpload>(
@@ -34,30 +33,6 @@ export async function uploadToSession(
   return completed.data;
 }
 
-async function uploadSingle(
-  session: UploadSession,
-  file: File,
-  onProgress: (progress: UploadProgress) => void,
-  signal: AbortSignal,
-) {
-  if (!session.uploadUrl) {
-    throw new Error("The upload URL is missing.");
-  }
-
-  await putBlob(
-    session.uploadUrl,
-    file,
-    file.type || "audio/mpeg",
-    (uploaded) =>
-      onProgress({
-        percent: Math.min(90, Math.round((uploaded / file.size) * 90)),
-        stage: "uploading",
-      }),
-    signal,
-  );
-  return [] as Array<{ partNumber: number; eTag: string }>;
-}
-
 async function uploadMultipart(
   session: UploadSession,
   file: File,
@@ -65,8 +40,15 @@ async function uploadMultipart(
   onProgress: (progress: UploadProgress) => void,
   signal: AbortSignal,
 ) {
-  const completed: Array<{ partNumber: number; eTag: string }> = [];
+  await validateResumedUploadParts(session, file, signal);
+  const resumed = new Map(
+    (session.completedParts ?? []).map((part) => [Number(part.partNumber), part]),
+  );
+  const completed: Array<{ partNumber: number; eTag: string }> = Array.from(resumed.values()).map(
+    (part) => ({ partNumber: Number(part.partNumber), eTag: part.eTag }),
+  );
   const uploadedByPart = new Map<number, number>();
+  resumed.forEach((part, number) => uploadedByPart.set(number, Number(part.plaintextLength)));
   const partCount = Number(session.partCount);
   const partSize = Number(session.partSizeBytes);
   let nextPart = 1;
@@ -74,23 +56,17 @@ async function uploadMultipart(
   async function worker() {
     while (nextPart <= partCount) {
       const partNumber = nextPart++;
+      if (resumed.has(partNumber)) continue;
       const start = (partNumber - 1) * partSize;
       const blob = file.slice(start, Math.min(file.size, start + partSize));
       let lastError: unknown;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const signed = await apiFetch<UploadPart>(
-            `/api/v1/uploads/${session.sessionId}/parts`,
-            token,
-            {
-              method: "POST",
-              body: JSON.stringify({ partNumber }),
-            },
-          );
-          const eTag = await putBlob(
-            signed.data.uploadUrl,
+          const receipt = await apiUploadPart(
+            session.sessionId,
+            partNumber,
             blob,
-            file.type || "audio/mpeg",
+            token,
             (uploaded) => {
               uploadedByPart.set(partNumber, uploaded);
               const total = Array.from(uploadedByPart.values()).reduce(
@@ -104,11 +80,12 @@ async function uploadMultipart(
             },
             signal,
           );
-          completed.push({ partNumber, eTag });
+          completed.push({ partNumber, eTag: receipt.eTag });
           lastError = undefined;
           break;
         } catch (caught) {
           lastError = caught;
+          if (caught instanceof ApiRequestError && caught.status === 409) throw caught;
           if (attempt < 3) await delay(400 * attempt, signal);
         }
       }
@@ -122,6 +99,36 @@ async function uploadMultipart(
   return completed.sort((left, right) => left.partNumber - right.partNumber);
 }
 
+export async function validateResumedUploadParts(
+  session: UploadSession,
+  file: Blob,
+  signal: AbortSignal,
+) {
+  const partSize = Number(session.partSizeBytes);
+  for (const part of session.completedParts ?? []) {
+    if (signal.aborted) throw new DOMException("Upload aborted.", "AbortError");
+    const partNumber = Number(part.partNumber);
+    const start = (partNumber - 1) * partSize;
+    const end = Math.min(file.size, start + Number(part.plaintextLength));
+    if (partNumber < 1 || start < 0 || end - start !== Number(part.plaintextLength)) {
+      throw new ApiRequestError(
+        "The saved upload receipt no longer matches this file. A new upload session is required.",
+        409,
+        "upload.resume_hash_conflict",
+      );
+    }
+    const digest = await crypto.subtle.digest("SHA-256", await file.slice(start, end).arrayBuffer());
+    const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+    if (actual !== part.sha256.toLowerCase()) {
+      throw new ApiRequestError(
+        "The saved upload parts belong to different content. A new upload session is required.",
+        409,
+        "upload.resume_hash_conflict",
+      );
+    }
+  }
+}
+
 function delay(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     const timer = window.setTimeout(resolve, milliseconds);
@@ -133,32 +140,5 @@ function delay(milliseconds: number, signal: AbortSignal) {
       },
       { once: true },
     );
-  });
-}
-
-function putBlob(
-  url: string,
-  body: Blob,
-  contentType: string,
-  onProgress: (uploadedBytes: number) => void,
-  signal: AbortSignal,
-) {
-  return new Promise<string>((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("PUT", url);
-    request.setRequestHeader("Content-Type", contentType);
-    request.upload.onprogress = (event) => onProgress(event.loaded);
-    request.onload = () => {
-      if (request.status >= 200 && request.status < 300) {
-        resolve(request.getResponseHeader("ETag") ?? "");
-      } else {
-        reject(new Error(`Object storage returned ${request.status}.`));
-      }
-    };
-    request.onerror = () => reject(new Error("Object storage upload failed."));
-    request.onabort = () =>
-      reject(new DOMException("Upload aborted.", "AbortError"));
-    signal.addEventListener("abort", () => request.abort(), { once: true });
-    request.send(body);
   });
 }

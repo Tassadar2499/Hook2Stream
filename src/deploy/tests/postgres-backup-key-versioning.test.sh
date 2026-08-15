@@ -33,27 +33,26 @@ cat > "${stub_bin}/pg_dump" <<'EOF'
 printf '%s\n' 'deterministic-postgres-dump'
 EOF
 
-cat > "${stub_bin}/openssl" <<'EOF'
+cat > "${stub_bin}/age" <<'EOF'
 #!/bin/sh
 set -eu
 output_file=
-pass_argument=
+recipient=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -out)
+        --output)
             output_file=$2
             shift 2
             ;;
-        -pass)
-            pass_argument=$2
+        --recipient)
+            recipient=$2
             shift 2
             ;;
         *) shift ;;
     esac
 done
-[ -n "$output_file" ] && [ "${pass_argument#file:}" != "$pass_argument" ]
-passphrase_file=${pass_argument#file:}
-cp "$passphrase_file" "${TEST_STATE_DIR}/used-passphrase"
+[ -n "$output_file" ] && [ -n "$recipient" ]
+printf '%s' "$recipient" > "${TEST_STATE_DIR}/used-recipient"
 cat > "$output_file"
 EOF
 
@@ -113,15 +112,14 @@ for (let index = 1; index < args.length - 1;) {
 }
 
 process.stdout.write(JSON.stringify({
-  schemaVersion: 1,
+  schemaVersion: 2,
   kind: values.kind,
   createdAt: values.createdAt,
   database: values.database,
   encryption: {
-    keyId: values.keyId,
-    cipher: "aes-256-cbc",
-    kdf: "pbkdf2-hmac-sha256",
-    kdfIterations: values.kdfIterations,
+    format: "age",
+    recipientType: "X25519",
+    recipientFingerprint: values.recipientFingerprint,
   },
   encryptedDump: {
     objectKey: values.dumpObjectKey,
@@ -138,8 +136,7 @@ chmod 0700 "${stub_bin}"/*
 printf '%s\n' 'database-password' > "${secret_dir}/postgres_password"
 printf '%s\n' 'file-access-key-id' > "${secret_dir}/backup_s3_access_key"
 printf '%s\n' 'file-secret-access-key' > "${secret_dir}/backup_s3_secret_key"
-printf '%s\n' 'high-entropy-backup-passphrase' > "${secret_dir}/backup_encryption_passphrase"
-printf '%s\n' '2026-07' > "${secret_dir}/backup_encryption_key_id"
+printf '%s\n' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' > "${secret_dir}/backup_age_recipient"
 printf '%s\n' 'https://heartbeat.example.test/super-secret-token' \
     > "${secret_dir}/backup_heartbeat_url"
 
@@ -163,13 +160,11 @@ run_backup() {
         BACKUP_S3_PREFIX=rotation-test/postgres \
         BACKUP_S3_ACCESS_KEY_FILE="${secret_dir}/backup_s3_access_key" \
         BACKUP_S3_SECRET_KEY_FILE="${secret_dir}/backup_s3_secret_key" \
-        BACKUP_ENCRYPTION_PASSPHRASE_FILE="${secret_dir}/backup_encryption_passphrase" \
-        BACKUP_ENCRYPTION_KEY_ID_FILE="${secret_dir}/backup_encryption_key_id" \
+        BACKUP_AGE_RECIPIENT_FILE="${secret_dir}/backup_age_recipient" \
         BACKUP_INTERVAL_SECONDS=300 \
         BACKUP_MAX_AGE_SECONDS=7200 \
         BACKUP_RETENTION_DAYS=35 \
         BACKUP_RETENTION_SAFETY_SECONDS=300 \
-        BACKUP_KDF_ITERATIONS=100000 \
         BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
         BACKUP_HEARTBEAT_URL_FILE="${TEST_HEARTBEAT_URL_FILE-${secret_dir}/backup_heartbeat_url}" \
         "$backup_script" backup-once
@@ -199,8 +194,8 @@ fi
     || fail "backup did not load the S3 access-key ID from its file"
 [ "$(cat "${state_dir}/used-secret-access-key")" = 'file-secret-access-key' ] \
     || fail "backup did not load the S3 secret access key from its file"
-[ "$(cat "${state_dir}/used-passphrase")" = 'high-entropy-backup-passphrase' ] \
-    || fail "backup did not snapshot the configured encryption passphrase"
+[ "$(cat "${state_dir}/used-recipient")" = 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' ] \
+    || fail "backup did not use the configured age recipient"
 
 set -- "${upload_dir}"/*.manifest.json
 [ "$#" -eq 1 ] && [ -f "$1" ] || fail "expected exactly one uploaded manifest"
@@ -212,8 +207,8 @@ checksum_file=${dump_file}.sha256
 [ -f "$checksum_file" ] || fail "checksum was not uploaded"
 
 case "$(basename "$dump_file")" in
-    testdb-*-key-2026-07.dump.enc) ;;
-    *) fail "encrypted dump name does not contain the key ID" ;;
+    testdb-*-age-*.dump.age) ;;
+    *) fail "encrypted dump name does not contain the age recipient fingerprint" ;;
 esac
 
 node - "$manifest_file" "$dump_file" <<'EOF'
@@ -225,17 +220,16 @@ const [manifestPath, dumpPath] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const ciphertext = fs.readFileSync(dumpPath);
 
-assert.equal(manifest.schemaVersion, 1);
+assert.equal(manifest.schemaVersion, 2);
 assert.equal(manifest.kind, "hook2stream-postgresql-logical-backup");
 assert.equal(manifest.database, "testdb");
 assert.match(manifest.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
 assert.deepEqual(manifest.encryption, {
-  keyId: "2026-07",
-  cipher: "aes-256-cbc",
-  kdf: "pbkdf2-hmac-sha256",
-  kdfIterations: 100000,
+  format: "age",
+  recipientType: "X25519",
+  recipientFingerprint: crypto.createHash("sha256").update("age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq").digest("hex").slice(0, 16),
 });
-assert.match(manifest.encryptedDump.objectKey, /-key-2026-07\.dump\.enc$/);
+assert.match(manifest.encryptedDump.objectKey, /-age-[0-9a-f]{16}\.dump\.age$/);
 assert.equal(
   manifest.encryptedDump.sha256,
   crypto.createHash("sha256").update(ciphertext).digest("hex"),
@@ -249,25 +243,26 @@ EOF
 [ "$(wc -l < "${state_dir}/upload-order" | tr -d ' ')" -eq 3 ] \
     || fail "successful backup did not upload exactly three objects"
 case "$(sed -n '1p' "${state_dir}/upload-order")" in
-    *.dump.enc) ;;
+    *.dump.age) ;;
     *) fail "encrypted dump was not uploaded first" ;;
 esac
 case "$(sed -n '2p' "${state_dir}/upload-order")" in
-    *.dump.enc.sha256) ;;
+    *.dump.age.sha256) ;;
     *) fail "checksum was not uploaded second" ;;
 esac
 case "$(sed -n '3p' "${state_dir}/upload-order")" in
-    *.dump.enc.manifest.json) ;;
+    *.dump.age.manifest.json) ;;
     *) fail "manifest was not uploaded last" ;;
 esac
 
-[ "$(sed -n '2p' "${state_dir}/last-successful-backup")" = '2026-07' ] \
-    || fail "freshness marker does not record the successful key ID"
+expected_recipient_fingerprint=$(printf '%s' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' | sha256sum | cut -c1-16)
+[ "$(sed -n '2p' "${state_dir}/last-successful-backup")" = "$expected_recipient_fingerprint" ] \
+    || fail "freshness marker does not record the age recipient fingerprint"
 
 env \
     BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
     BACKUP_MAX_AGE_SECONDS=7200 \
-    BACKUP_ENCRYPTION_KEY_ID_FILE="${secret_dir}/backup_encryption_key_id" \
+    BACKUP_AGE_RECIPIENT_FILE="${secret_dir}/backup_age_recipient" \
     "$healthcheck_script"
 
 run_backup >/dev/null
@@ -280,18 +275,16 @@ set -- "${upload_dir}"/*.manifest.json
 [ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
     || fail "the second successful backup did not send its own heartbeat"
 
-printf '%s\n' '2026-08' > "${secret_dir}/backup_encryption_key_id"
+printf '%s\n' 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppp' > "${secret_dir}/backup_age_recipient"
 if env \
     BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
     BACKUP_MAX_AGE_SECONDS=7200 \
-    BACKUP_ENCRYPTION_KEY_ID_FILE="${secret_dir}/backup_encryption_key_id" \
+    BACKUP_AGE_RECIPIENT_FILE="${secret_dir}/backup_age_recipient" \
     "$healthcheck_script"; then
-    fail "healthcheck accepted a marker written with a different encryption key ID"
+    fail "healthcheck accepted a marker written with a different age recipient"
 fi
 
 marker_before_failed_upload=$(cat "${state_dir}/last-successful-backup")
-printf '%s\n' 'rotated-high-entropy-backup-passphrase' \
-    > "${secret_dir}/backup_encryption_passphrase"
 if TEST_FAIL_MANIFEST=true run_backup >"${state_dir}/manifest-failure-output" 2>&1; then
     fail "backup succeeded when the completion manifest upload failed"
 fi
@@ -308,7 +301,7 @@ fi
 [ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
     || fail "failed retention cycle sent a success heartbeat"
 
-printf '%s\n' '2026-08' > "${secret_dir}/backup_encryption_key_id"
+printf '%s\n' 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppp' > "${secret_dir}/backup_age_recipient"
 if ! TEST_FAIL_HEARTBEAT=true run_backup \
     >"${state_dir}/heartbeat-failure-output" 2>&1; then
     fail "heartbeat delivery failure turned a successful backup into a failure"
@@ -363,11 +356,11 @@ fi
 [ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
     || fail "empty optional heartbeat secret invoked the HTTP client"
 
-printf '%s\n' '../invalid-key-id' > "${secret_dir}/backup_encryption_key_id"
+printf '%s\n' '../invalid-recipient' > "${secret_dir}/backup_age_recipient"
 if run_backup >"${state_dir}/invalid-key-output" 2>&1; then
-    fail "backup accepted an unsafe encryption key ID"
+    fail "backup accepted an unsafe age recipient"
 fi
-grep -q 'key ID' "${state_dir}/invalid-key-output" \
-    || fail "unsafe key ID failure did not explain the problem"
+grep -q 'age recipient' "${state_dir}/invalid-key-output" \
+    || fail "unsafe age recipient failure did not explain the problem"
 
 printf '%s\n' "postgres backup key-versioning test: passed"

@@ -33,6 +33,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 builder.Services.Configure<GoogleOAuthOptions>(
     builder.Configuration.GetSection(GoogleOAuthOptions.SectionName));
+builder.Services.Configure<ApplicationAuthenticationOptions>(
+    builder.Configuration.GetSection(ApplicationAuthenticationOptions.SectionName));
 builder.Services.AddSingleton<OAuthCookieManager>();
 builder.Services.AddScoped<OAuthSessionService>();
 builder.Services.AddHttpClient<IGoogleOAuthClient, GoogleOAuthClient>();
@@ -77,6 +79,32 @@ else if (string.Equals(authentication.Mode, ApplicationAuthenticationOptions.OAu
     {
         throw new InvalidOperationException(
             "Google OAuth requires an HTTPS PublicApiBaseUrl and, when configured, an HTTPS PublicWebReturnBaseUrl on the same public host outside Development.");
+    }
+    if (!builder.Environment.IsDevelopment() &&
+        !builder.Environment.IsEnvironment("Testing") &&
+        !authentication.InviteOnly)
+    {
+        throw new InvalidOperationException(
+            "Auth:InviteOnly must be true outside Development and Testing.");
+    }
+    if (!builder.Environment.IsDevelopment() &&
+        !builder.Environment.IsEnvironment("Testing") &&
+        !string.IsNullOrWhiteSpace(authentication.InvitedEmailsFile))
+    {
+        try
+        {
+            using var inviteFile = File.Open(
+                authentication.InvitedEmailsFile,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                "Auth:InvitedEmailsFile is configured but cannot be read.",
+                exception);
+        }
     }
 
     builder.Services

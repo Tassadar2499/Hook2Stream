@@ -67,11 +67,11 @@ export function NewReleaseClient() {
     setUploadStage("Creating a recoverable draft");
     const cancellation = new AbortController();
     uploadCancellation.current = cancellation;
+    const resumeKey = `hook2stream-quick:${file.name}:${file.size}:${file.lastModified}`;
 
     try {
       const token = await getToken();
       if (!token) throw new Error("No session token.");
-      const resumeKey = `hook2stream-quick:${file.name}:${file.size}:${file.lastModified}`;
       const idempotencyKey =
         window.localStorage.getItem(resumeKey) ?? createIdempotencyKey("audio-upload");
       window.localStorage.setItem(resumeKey, idempotencyKey);
@@ -122,6 +122,10 @@ export function NewReleaseClient() {
       window.localStorage.removeItem(resumeKey);
       router.push(`/releases/${started.data.project.id}`);
     } catch (caught) {
+      if (caught instanceof ApiRequestError &&
+          ["upload.resume_hash_conflict", "upload.part_hash_conflict"].includes(caught.code)) {
+        window.localStorage.removeItem(resumeKey);
+      }
       if (caught instanceof DOMException && caught.name === "AbortError") {
         setUploadStage("Upload paused — choose the same file to resume");
       } else {

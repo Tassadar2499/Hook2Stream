@@ -1801,6 +1801,162 @@
         ]
       }
     },
+    "/api/v1/releases/{projectId}/assets/{assetId}/content": {
+      "get": {
+        "tags": [
+          "Hook2Stream.Api"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
+      },
+      "head": {
+        "tags": [
+          "Hook2Stream.Api"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
+      }
+    },
+    "/api/v1/releases/{projectId}/downloads/{assetId}": {
+      "get": {
+        "tags": [
+          "Hook2Stream.Api"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
+      },
+      "head": {
+        "tags": [
+          "Hook2Stream.Api"
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "oauthSession": [ ]
+          },
+          {
+            "localDevelopmentBearer": [ ]
+          }
+        ]
+      }
+    },
     "/api/v1/uploads/{sessionId}": {
       "get": {
         "tags": [
@@ -1839,8 +1995,8 @@
         ]
       }
     },
-    "/api/v1/uploads/{sessionId}/parts": {
-      "post": {
+    "/api/v1/uploads/{sessionId}/parts/{partNumber}": {
+      "put": {
         "tags": [
           "Endpoints"
         ],
@@ -1853,18 +2009,18 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "partNumber",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": "integer",
+              "format": "int32"
+            }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UploadPartRequest"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "description": "OK",
@@ -2710,13 +2866,13 @@
         }
       },
       "CompleteUploadRequest": {
-        "required": [
-          "parts"
-        ],
         "type": "object",
         "properties": {
           "parts": {
-            "type": "array",
+            "type": [
+              "null",
+              "array"
+            ],
             "items": {
               "$ref": "#/components/schemas/CompletedPartRequest"
             }
@@ -4216,9 +4372,12 @@
           }
         }
       },
-      "UploadPartRequest": {
+      "UploadPartReceiptResponse": {
         "required": [
-          "partNumber"
+          "partNumber",
+          "plaintextLength",
+          "sha256",
+          "eTag"
         ],
         "type": "object",
         "properties": {
@@ -4229,14 +4388,29 @@
               "string"
             ],
             "format": "int32"
+          },
+          "plaintextLength": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "eTag": {
+            "type": "string"
           }
         }
       },
       "UploadPartResponse": {
         "required": [
           "partNumber",
-          "uploadUrl",
-          "urlExpiresAt"
+          "plaintextLength",
+          "sha256",
+          "eTag"
         ],
         "type": "object",
         "properties": {
@@ -4248,16 +4422,19 @@
             ],
             "format": "int32"
           },
-          "uploadUrl": {
+          "plaintextLength": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sha256": {
             "type": "string"
           },
-          "urlExpiresAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "expiresAt": {
-            "type": "string",
-            "format": "date-time"
+          "eTag": {
+            "type": "string"
           }
         }
       },
@@ -4321,6 +4498,15 @@
           "sessionExpiresAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "completedParts": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/UploadPartReceiptResponse"
+            }
           },
           "id": {
             "type": "string",

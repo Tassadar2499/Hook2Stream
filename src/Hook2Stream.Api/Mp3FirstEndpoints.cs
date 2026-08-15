@@ -181,18 +181,6 @@ public static class Mp3FirstEndpoints
         };
 
         var multipart = request.SizeBytes >= MediaPolicy.MultipartThresholdBytes;
-        MultipartUpload? multipartUpload = null;
-        Uri? uploadUrl = null;
-        if (multipart)
-        {
-            multipartUpload = await storage.CreateMultipartUploadAsync(
-                asset.ObjectKey, asset.DeclaredContentType, cancellationToken);
-        }
-        else
-        {
-            uploadUrl = await storage.CreateUploadUrlAsync(
-                asset.ObjectKey, asset.DeclaredContentType, uploadUrlLifetime, cancellationToken);
-        }
 
         var session = new UploadSession
         {
@@ -202,8 +190,8 @@ public static class Mp3FirstEndpoints
             AssetId = asset.Id,
             ObjectKey = asset.ObjectKey,
             IsMultipart = multipart,
-            MultipartUploadId = multipartUpload?.UploadId,
-            PartSizeBytes = multipart ? MediaPolicy.MultipartPartSizeBytes : request.SizeBytes,
+            MultipartUploadId = null,
+            PartSizeBytes = Math.Min(MediaPolicy.MultipartPartSizeBytes, request.SizeBytes),
             ExpiresAt = now.Add(uploadSessionLifetime)
         };
         var pipelineRun = Mp3FirstPipelineFactory.CreateInitial(project, "audio-upload");
@@ -258,7 +246,6 @@ public static class Mp3FirstEndpoints
         }
         catch (DbUpdateException)
         {
-            await BestEffortAbortMultipartUploadAsync(storage, asset.ObjectKey, multipartUpload);
             db.ChangeTracker.Clear();
             var winner = await db.ApiIdempotencyRecords.AsNoTracking().SingleOrDefaultAsync(
                 value => value.WorkspaceId == context.Workspace.Id &&
@@ -282,22 +269,19 @@ public static class Mp3FirstEndpoints
             return Results.Ok(new QuickAudioUploadResponse(
                 ToRelease(winnerProject), winnerUpload, await BuildWorkflow(db, winnerProject, cancellationToken)));
         }
-        catch
-        {
-            await BestEffortAbortMultipartUploadAsync(storage, asset.ObjectKey, multipartUpload);
-            throw;
-        }
+        catch { throw; }
 
         var response = new UploadSessionResponse(
             session.Id,
             asset.Id,
             multipart,
-            uploadUrl?.ToString(),
-            multipartUpload?.UploadId,
+            null,
+            null,
             session.PartSizeBytes,
             multipart ? (int)Math.Ceiling(request.SizeBytes / (double)session.PartSizeBytes) : 1,
             Min(now.Add(uploadUrlLifetime), session.ExpiresAt),
-            session.ExpiresAt);
+            session.ExpiresAt,
+            []);
         var initialWorkflow = await BuildWorkflow(db, project, cancellationToken);
         ApiEndpointHelpers.SetEtag(httpResponse, project.Version);
         return Results.Created(
@@ -1477,8 +1461,10 @@ public static class Mp3FirstEndpoints
                 ?? throw Problem(409, "asset.preview_not_ready", "The protected preview is still being prepared.");
         }
         var expiresAt = DateTimeOffset.UtcNow.Add(ReadUrlLifetime);
-        var url = await storage.CreateReadUrlAsync(objectKey, ReadUrlLifetime, cancellationToken);
-        return Results.Ok(new AssetReadUrlResponse(asset.Id, url.ToString(), expiresAt));
+        return Results.Ok(new AssetReadUrlResponse(
+            asset.Id,
+            $"/api/v1/releases/{projectId}/assets/{asset.Id}/content",
+            expiresAt));
     }
 
     private static async Task<WorkflowResponse> BuildWorkflow(
@@ -1832,27 +1818,18 @@ public static class Mp3FirstEndpoints
     {
         if (session.ExpiresAt <= now)
             throw Problem(410, "upload.session_expired", "The upload session expired. Start a new upload.");
-        var urlLifetime = session.ExpiresAt - now < configuredUrlLifetime
-            ? session.ExpiresAt - now
-            : configuredUrlLifetime;
-        Uri? uploadUrl = null;
-        if (!session.IsMultipart && session.State is UploadState.Initiated or UploadState.Uploading)
-            uploadUrl = await storage.CreateUploadUrlAsync(
-                session.ObjectKey,
-                session.Asset.DeclaredContentType,
-                urlLifetime,
-                cancellationToken);
         var partCount = session.IsMultipart ? (int)Math.Ceiling(session.Asset.DeclaredBytes / (double)session.PartSizeBytes) : 1;
         return new UploadSessionResponse(
             session.Id,
             session.AssetId,
             session.IsMultipart,
-            uploadUrl?.ToString(),
-            session.MultipartUploadId,
+            null,
+            null,
             session.PartSizeBytes,
             partCount,
-            now.Add(urlLifetime),
-            session.ExpiresAt);
+            Min(now.Add(configuredUrlLifetime), session.ExpiresAt),
+            session.ExpiresAt,
+            []);
     }
 
     private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) => left <= right ? left : right;

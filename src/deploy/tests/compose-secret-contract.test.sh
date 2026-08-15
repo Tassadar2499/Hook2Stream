@@ -34,10 +34,11 @@ for secret_name in \
     stripe_secret_key \
     stripe_webhook_secret \
     openrouter_api_key \
+    media_keyring \
+    invited_emails \
     backup_s3_access_key \
     backup_s3_secret_key \
-    backup_encryption_key_id \
-    backup_encryption_passphrase \
+    backup_age_recipient \
     backup_heartbeat_url; do
     printf '%s\n' "test-secret" > "$temporary_dir/$secret_name"
 done
@@ -102,34 +103,42 @@ const expectedSecrets = {
     "s3_runtime_secret_key",
     "stripe_secret_key",
     "stripe_webhook_secret",
+    "invited_emails",
+    "media_keyring",
   ],
   "worker-media": [
+    "media_keyring",
     "postgres_password",
     "s3_runtime_access_key",
     "s3_runtime_secret_key",
   ],
   "worker-analysis": [
+    "media_keyring",
     "postgres_password",
     "s3_runtime_access_key",
     "s3_runtime_secret_key",
   ],
   "worker-control": [
+    "media_keyring",
     "openrouter_api_key",
     "postgres_password",
     "s3_runtime_access_key",
     "s3_runtime_secret_key",
   ],
   "worker-render": [
+    "media_keyring",
     "postgres_password",
     "s3_runtime_access_key",
     "s3_runtime_secret_key",
   ],
   "worker-export": [
+    "media_keyring",
     "postgres_password",
     "s3_runtime_access_key",
     "s3_runtime_secret_key",
   ],
   bootstrapper: [
+    "media_keyring",
     "postgres_password",
     "s3_bootstrap_access_key",
     "s3_bootstrap_secret_key",
@@ -137,8 +146,7 @@ const expectedSecrets = {
   pgbouncer: ["postgres_password"],
   postgres: ["postgres_password"],
   "postgres-backup": [
-    "backup_encryption_key_id",
-    "backup_encryption_passphrase",
+    "backup_age_recipient",
     "backup_heartbeat_url",
     "backup_s3_access_key",
     "backup_s3_secret_key",

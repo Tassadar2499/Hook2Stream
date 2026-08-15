@@ -13,6 +13,7 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
     public DbSet<MediaAsset> MediaAssets => Set<MediaAsset>();
     public DbSet<MediaDerivative> MediaDerivatives => Set<MediaDerivative>();
     public DbSet<UploadSession> UploadSessions => Set<UploadSession>();
+    public DbSet<UploadPart> UploadParts => Set<UploadPart>();
     public DbSet<Job> Jobs => Set<Job>();
     public DbSet<JobAttempt> JobAttempts => Set<JobAttempt>();
     public DbSet<JobEvent> JobEvents => Set<JobEvent>();
@@ -50,6 +51,7 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
         ConfigureEntity<MediaAsset>(modelBuilder, "media_assets");
         ConfigureEntity<MediaDerivative>(modelBuilder, "media_derivatives");
         ConfigureEntity<UploadSession>(modelBuilder, "upload_sessions");
+        ConfigureEntity<UploadPart>(modelBuilder, "upload_parts");
         ConfigureEntity<Job>(modelBuilder, "jobs");
         ConfigureEntity<JobAttempt>(modelBuilder, "job_attempts");
         ConfigureEntity<JobEvent>(modelBuilder, "job_events");
@@ -177,6 +179,19 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
             entity.HasIndex(value => new { value.WorkspaceId, value.ProjectId, value.State });
             entity.Property(value => value.ObjectKey).HasMaxLength(512);
             entity.Property(value => value.MultipartUploadId).HasMaxLength(512);
+            entity.HasQueryFilter(value => value.DeletedAt == null);
+        });
+
+        modelBuilder.Entity<UploadPart>(entity =>
+        {
+            entity.HasIndex(value => new { value.UploadSessionId, value.PartNumber }).IsUnique();
+            entity.Property(value => value.PlaintextSha256).HasMaxLength(64);
+            entity.Property(value => value.StorageETag).HasMaxLength(255);
+            entity.Property(value => value.ObjectKey).HasMaxLength(512);
+            entity.HasOne(value => value.UploadSession)
+                .WithMany(value => value.Parts)
+                .HasForeignKey(value => value.UploadSessionId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.HasQueryFilter(value => value.DeletedAt == null);
         });
 

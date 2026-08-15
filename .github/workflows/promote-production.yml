@@ -1,0 +1,202 @@
+name: Promote production
+run-name: Promote CI run ${{ inputs.source_ci_run_id }} to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ci_run_id:
+        description: Successful main CI run ID whose staging-tested candidate will be promoted
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      source-sha: ${{ steps.source.outputs.sha }}
+      candidate-name: ${{ steps.source.outputs.candidate_name }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+    steps:
+      - name: Verify successful main CI source
+        id: source
+        shell: bash
+        run: |
+          case "$SOURCE_CI_RUN_ID" in
+            ''|*[!0-9]*) echo "source_ci_run_id must be numeric" >&2; exit 1 ;;
+          esac
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID")"
+          test "$(jq -r .name <<<"$run_json")" = CI
+          test "$(jq -r .event <<<"$run_json")" = push
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          sha="$(jq -r .head_sha <<<"$run_json")"
+          attempt="$(jq -r .run_attempt <<<"$run_json")"
+          case "$sha" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "source CI returned an invalid head SHA" >&2; exit 1 ;;
+          esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          echo "candidate_name=release-candidate-${sha}-${SOURCE_CI_RUN_ID}-${attempt}" >> "$GITHUB_OUTPUT"
+          echo "receipt_name=staging-receipt-${sha}-${SOURCE_CI_RUN_ID}-${attempt}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+
+      - name: Download candidate and staging receipt from source run
+        shell: bash
+        env:
+          CANDIDATE_NAME: ${{ steps.source.outputs.candidate_name }}
+          RECEIPT_NAME: ${{ steps.source.outputs.receipt_name }}
+        run: |
+          mkdir -p promotion/candidate promotion/approval
+          gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_NAME" --dir promotion/candidate
+          gh run download "$SOURCE_CI_RUN_ID" --name "$RECEIPT_NAME" --dir promotion/approval
+
+      - name: Verify candidate contract and GitHub attestations
+        shell: bash
+        run: |
+          node src/ci/release-candidate.mjs validate \
+            --candidate promotion/candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.source.outputs.sha }}" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ steps.source.outputs.attempt }}"
+          attestation_policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"
+            --source-ref refs/heads/main
+            --source-digest "${{ steps.source.outputs.sha }}"
+            --deny-self-hosted-runners
+          )
+          while read -r _ file; do
+            gh attestation verify "promotion/candidate/$file" "${attestation_policy[@]}"
+          done < promotion/candidate/SHA256SUMS
+          gh attestation verify promotion/approval/staging-receipt.json "${attestation_policy[@]}"
+          gh attestation verify promotion/approval/staging-receipt.sig "${attestation_policy[@]}"
+
+      - name: Verify staging receipt contract and deployment signature
+        shell: bash
+        env:
+          STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STAGING_RECEIPT_ALLOWED_SIGNERS }}
+        run: |
+          node src/ci/staging-receipt.mjs validate \
+            --candidate promotion/candidate \
+            --receipt promotion/approval/staging-receipt.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.source.outputs.sha }}" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ steps.source.outputs.attempt }}"
+          printf '%s\n' "$STAGING_RECEIPT_ALLOWED_SIGNERS" > "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          ssh-keygen -Y verify \
+            -f "$RUNNER_TEMP/staging-receipt-allowed-signers" \
+            -I hook2stream-staging \
+            -n hook2stream-staging-receipt \
+            -s promotion/approval/staging-receipt.sig \
+            < promotion/approval/staging-receipt.json
+
+      - name: Seal verified promotion payload
+        run: tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf promotion-payload.tar.gz promotion
+
+      - name: Upload verified promotion payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-production-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: promotion-payload.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy-production:
+    needs: verify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    concurrency:
+      group: hook2stream-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CANDIDATE_NAME: ${{ needs.verify-source.outputs.candidate-name }}
+      SOURCE_SHA: ${{ needs.verify-source.outputs.source-sha }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: hook2stream-deploy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.verify-source.outputs.source-sha }}
+          persist-credentials: false
+
+      - name: Download verified promotion payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-production-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Revalidate payload after approval boundary
+        shell: bash
+        run: |
+          mkdir promotion-payload
+          tar -xzf promotion-payload.tar.gz --strip-components=1 -C promotion-payload
+          node src/ci/release-candidate.mjs validate \
+            --candidate promotion-payload/candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$SOURCE_SHA"
+          node src/ci/staging-receipt.mjs validate \
+            --candidate promotion-payload/candidate \
+            --receipt promotion-payload/approval/staging-receipt.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$SOURCE_SHA"
+
+      - name: Connect ephemeral production runner to Tailscale
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:hook2stream-ci-production
+          ping: ${{ secrets.DEPLOY_HOST }}
+
+      - name: Configure strict SSH identity
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/hook2stream-ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
+          ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" >/dev/null
+          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" >/dev/null
+
+      - name: Promote exact staging-tested candidate without rebuild
+        shell: bash
+        run: |
+          tar -C promotion-payload -cf - . | ssh \
+            -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "deploy $CANDIDATE_NAME" | tee "$RUNNER_TEMP/deploy-output.log"
+          encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log" | tail -n 1)"
+          test -n "$encoded_result"
+          printf '%s' "$encoded_result" | base64 --decode > production-result.json
+          node src/ci/remote-deploy-result.mjs validate \
+            --candidate promotion-payload/candidate \
+            --result production-result.json \
+            --environment production

@@ -157,6 +157,34 @@ public sealed class OAuthSessionAuthenticationTests
         Assert.Empty(await dbContext.Set<AuthSession>().ToListAsync());
     }
 
+    [Fact]
+    public async Task OAuth_callback_does_not_create_an_uninvited_user()
+    {
+        await using var factory = new OAuthSessionApiFactory(
+            new GoogleUserInfo(
+                "uninvited-google-user",
+                "uninvited@example.test",
+                "Uninvited User",
+                true));
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true,
+            BaseAddress = new Uri("http://localhost")
+        });
+
+        var callback = await StartCallbackAsync(client);
+
+        Assert.Equal(HttpStatusCode.Redirect, callback.StatusCode);
+        Assert.Equal(
+            "http://web.example.test/sign-in?auth=invite_required",
+            callback.Headers.Location!.ToString());
+        using var scope = factory.Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Empty(await dbContext.Users.ToListAsync());
+        Assert.Empty(await dbContext.Set<AuthSession>().ToListAsync());
+    }
+
     [Theory]
     [InlineData("network")]
     [InlineData("json")]
@@ -248,6 +276,30 @@ public sealed class OAuthSessionAuthenticationTests
         Assert.DoesNotContain("domain=", csrfCookie, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Invite_allowlist_is_case_insensitive_and_supports_a_file_secret()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"h2s-invites-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllLinesAsync(path, ["# closed MVP", " Invited@Example.Test ", ""]);
+            var options = new ApplicationAuthenticationOptions
+            {
+                InviteOnly = true,
+                InvitedEmails = ["inline@example.test"],
+                InvitedEmailsFile = path
+            };
+
+            Assert.True(options.IsInvited("INLINE@EXAMPLE.TEST"));
+            Assert.True(options.IsInvited("invited@example.test"));
+            Assert.False(options.IsInvited("unknown@example.test"));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("https://evil.example/path")]
     [InlineData("//evil.example/path")]
@@ -317,8 +369,11 @@ internal sealed class OAuthSessionApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Google:ClientSecret", "google-secret");
         builder.UseSetting("Google:PublicApiBaseUrl", "http://localhost");
         builder.UseSetting("Google:PublicWebReturnBaseUrl", "http://web.example.test");
+        builder.UseSetting("Auth:InviteOnly", "true");
+        builder.UseSetting("Auth:InvitedEmails:0", "google@example.test");
         builder.UseSetting("Storage:AccessKey", "test-access-key");
         builder.UseSetting("Storage:SecretKey", "test-secret-key");
+        builder.UseSetting("StorageEncryption:Mode", "Plaintext");
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<Hook2StreamDbContext>>();

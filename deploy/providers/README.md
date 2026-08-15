@@ -1,5 +1,10 @@
 # Production pipeline providers
 
+Deployment and provider operations for the two Hetzner environments are defined
+in `docs/operations/hook2stream-mvp-runbook.md`. This directory contains only
+application-provider examples; it does not authorize shared staging/production
+credentials.
+
 The MVP uses one external AI gateway: OpenRouter. Copy `appsettings.Production.example.json`, inject `OPENROUTER_API_KEY` through the runtime secret store, and never commit the key to an appsettings file. The key must enforce Zero Data Retention; startup and request routing reject a production OpenRouter configuration that cannot satisfy the ZDR policy.
 
 Pinned production routes:

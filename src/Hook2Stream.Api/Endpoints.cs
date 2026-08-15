@@ -36,6 +36,7 @@ public static class Endpoints
         var releases = api.MapGroup("/releases");
         api.MapMp3FirstApi();
         endpoints.MapBillingApi(api);
+        api.MapMediaContentApi();
         releases.MapGet("/", ListReleases)
             .Produces<IReadOnlyList<ReleaseResponse>>();
         releases.MapPost("/", CreateRelease)
@@ -70,7 +71,7 @@ public static class Endpoints
         var uploads = api.MapGroup("/uploads");
         uploads.MapGet("/{sessionId:guid}", ResumeUpload)
             .Produces<UploadSessionResponse>();
-        uploads.MapPost("/{sessionId:guid}/parts", SignUploadPart)
+        uploads.MapPut("/{sessionId:guid}/parts/{partNumber:int}", UploadPart)
             .Produces<UploadPartResponse>();
         uploads.MapPost("/{sessionId:guid}/complete", CompleteUpload)
             .Produces<CompleteUploadResponse>(StatusCodes.Status202Accepted);
@@ -1062,26 +1063,8 @@ public static class Endpoints
         var now = timeProvider.GetUtcNow();
         var uploadPolicy = policyOptions.Value;
         var sessionExpiresAt = now.AddHours(uploadPolicy.UploadSessionHours);
-        var urlLifetime = GetUploadUrlLifetime(now, sessionExpiresAt, uploadPolicy);
-        var urlExpiresAt = now.Add(urlLifetime);
+        var urlExpiresAt = now.Add(GetUploadUrlLifetime(now, sessionExpiresAt, uploadPolicy));
         var multipart = request.SizeBytes >= MediaPolicy.MultipartThresholdBytes;
-        MultipartUpload? multipartUpload = null;
-        Uri? uploadUrl = null;
-        if (multipart)
-        {
-            multipartUpload = await objectStorage.CreateMultipartUploadAsync(
-                asset.ObjectKey,
-                asset.DeclaredContentType,
-                cancellationToken);
-        }
-        else
-        {
-            uploadUrl = await objectStorage.CreateUploadUrlAsync(
-                asset.ObjectKey,
-                asset.DeclaredContentType,
-                urlLifetime,
-                cancellationToken);
-        }
 
         var session = new UploadSession
         {
@@ -1091,36 +1074,13 @@ public static class Endpoints
             Asset = asset,
             ObjectKey = asset.ObjectKey,
             IsMultipart = multipart,
-            MultipartUploadId = multipartUpload?.UploadId,
-            PartSizeBytes = multipart ? MediaPolicy.MultipartPartSizeBytes : request.SizeBytes,
+            MultipartUploadId = null,
+            PartSizeBytes = Math.Min(MediaPolicy.MultipartPartSizeBytes, request.SizeBytes),
             ExpiresAt = sessionExpiresAt
         };
         dbContext.UploadSessions.Add(session);
         ProjectActivity.Touch(project, now);
-        try
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-        catch
-        {
-            if (multipartUpload is not null)
-            {
-                try
-                {
-                    await objectStorage.AbortMultipartUploadAsync(
-                        asset.ObjectKey,
-                        multipartUpload.UploadId,
-                        CancellationToken.None);
-                }
-                catch
-                {
-                    // The bucket lifecycle rule is the final safety net if the
-                    // best-effort compensation cannot reach object storage.
-                }
-            }
-
-            throw;
-        }
+        await dbContext.SaveChangesAsync(cancellationToken);
 
         var partCount = multipart
             ? (int)Math.Ceiling(request.SizeBytes / (double)MediaPolicy.MultipartPartSizeBytes)
@@ -1131,12 +1091,13 @@ public static class Endpoints
                 session.Id,
                 asset.Id,
                 multipart,
-                uploadUrl?.ToString(),
-                multipartUpload?.UploadId,
+                null,
+                null,
                 session.PartSizeBytes,
                 partCount,
                 urlExpiresAt,
-                session.ExpiresAt));
+                session.ExpiresAt,
+                []));
     }
 
     private static async Task<IResult> ResumeUpload(
@@ -1162,17 +1123,7 @@ public static class Endpoints
         }
 
         var now = timeProvider.GetUtcNow();
-        var urlLifetime = GetUploadUrlLifetime(now, session.ExpiresAt, policyOptions.Value);
-        var urlExpiresAt = now.Add(urlLifetime);
-        Uri? uploadUrl = null;
-        if (!session.IsMultipart)
-        {
-            uploadUrl = await objectStorage.CreateUploadUrlAsync(
-                session.ObjectKey,
-                session.Asset.DeclaredContentType,
-                urlLifetime,
-                cancellationToken);
-        }
+        var urlExpiresAt = now.Add(GetUploadUrlLifetime(now, session.ExpiresAt, policyOptions.Value));
 
         var partCount = session.IsMultipart
             ? (int)Math.Ceiling(session.Asset.DeclaredBytes / (double)session.PartSizeBytes)
@@ -1181,45 +1132,34 @@ public static class Endpoints
             session.Id,
             session.AssetId,
             session.IsMultipart,
-            uploadUrl?.ToString(),
-            session.MultipartUploadId,
+            null,
+            null,
             session.PartSizeBytes,
             partCount,
             urlExpiresAt,
-            session.ExpiresAt));
+            session.ExpiresAt,
+            await dbContext.UploadParts.AsNoTracking()
+                .Where(value => value.UploadSessionId == session.Id && value.State == UploadPartState.Stored)
+                .OrderBy(value => value.PartNumber)
+                .Select(value => new UploadPartReceiptResponse(value.PartNumber, value.PlaintextLength, value.PlaintextSha256, value.StorageETag))
+                .ToListAsync(cancellationToken)));
     }
 
-    private static async Task<IResult> SignUploadPart(
+    private static async Task<IResult> UploadPart(
         Guid sessionId,
-        UploadPartRequest request,
+        int partNumber,
+        HttpRequest request,
         CurrentUserService currentUser,
         Hook2StreamDbContext dbContext,
         IObjectStorage objectStorage,
-        IOptions<OperationalPolicyOptions> policyOptions,
         TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var session = await FindUpload(dbContext, context.Workspace.Id, sessionId, cancellationToken);
-        await RejectExpiredUploadAsync(session, dbContext, timeProvider, cancellationToken);
-        if (session.State is UploadState.Completed or UploadState.Aborted or UploadState.Expired)
-        {
-            throw new ApiProblemException(
-                StatusCodes.Status409Conflict,
-                "upload.not_resumable",
-                "This upload session cannot accept more parts.");
-        }
-
-        if (!session.IsMultipart || string.IsNullOrWhiteSpace(session.MultipartUploadId))
-        {
-            throw new ApiProblemException(
-                StatusCodes.Status409Conflict,
-                "upload.not_multipart",
-                "This upload does not use multipart transfer.");
-        }
 
         var partCount = (int)Math.Ceiling(session.Asset.DeclaredBytes / (double)session.PartSizeBytes);
-        if (request.PartNumber < 1 || request.PartNumber > partCount)
+        if (partNumber < 1 || partNumber > partCount)
         {
             throw new ApiProblemException(
                 StatusCodes.Status422UnprocessableEntity,
@@ -1227,23 +1167,114 @@ public static class Endpoints
                 "Part number is outside this upload.");
         }
 
-        var now = timeProvider.GetUtcNow();
-        var urlLifetime = GetUploadUrlLifetime(now, session.ExpiresAt, policyOptions.Value);
-        var expiresAt = now.Add(urlLifetime);
-        var url = await objectStorage.CreateMultipartPartUploadUrlAsync(
-            session.ObjectKey,
-            session.MultipartUploadId,
-            request.PartNumber,
-            urlLifetime,
-            cancellationToken);
-        session.State = UploadState.Uploading;
-        session.Asset.State = AssetState.Uploading;
-        var project = await dbContext.Projects.SingleAsync(
-            value => value.Id == session.ProjectId,
-            cancellationToken);
-        ProjectActivity.Touch(project, now);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return Results.Ok(new UploadPartResponse(request.PartNumber, url.ToString(), expiresAt));
+        var expectedLength = partNumber == partCount
+            ? session.Asset.DeclaredBytes - (long)(partCount - 1) * session.PartSizeBytes
+            : session.PartSizeBytes;
+        if (request.ContentLength != expectedLength)
+            throw new ApiProblemException(StatusCodes.Status422UnprocessableEntity, "upload.part_size_invalid", "The upload part size does not match the reservation.");
+
+        var temp = Path.Combine(Path.GetTempPath(), $"h2s-part-{Guid.NewGuid():N}");
+        var partObjectKey = $"staging/{session.WorkspaceId:N}/{session.ProjectId:N}/uploads/{session.Id:N}/parts/{partNumber:D6}/{Guid.NewGuid():N}";
+        string sha256;
+        try
+        {
+            await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.Asynchronous))
+            using (var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256))
+            {
+                var buffer = new byte[128 * 1024];
+                long total = 0;
+                while (true)
+                {
+                    var read = await request.Body.ReadAsync(buffer, cancellationToken);
+                    if (read == 0) break;
+                    total += read;
+                    if (total > expectedLength) throw new ApiProblemException(StatusCodes.Status413PayloadTooLarge, "upload.part_too_large", "The upload part exceeds its reservation.");
+                    hash.AppendData(buffer, 0, read);
+                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                }
+                if (total != expectedLength) throw new ApiProblemException(StatusCodes.Status422UnprocessableEntity, "upload.part_size_invalid", "The upload part size does not match the reservation.");
+                sha256 = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+            }
+
+            var lockedResult = await ExecuteWithUploadLockAsync(
+                dbContext,
+                session.Id,
+                shared: true,
+                partNumber,
+                async token =>
+                {
+                    var lockedSession = await FindUpload(
+                        dbContext,
+                        context.Workspace.Id,
+                        session.Id,
+                        token);
+                    if (await ExpireUploadIfNeededAsync(lockedSession, dbContext, timeProvider, token))
+                    {
+                        return UploadPartLockResult.Failed(UploadExpired());
+                    }
+                    if (lockedSession.State is UploadState.Completed or UploadState.Aborted)
+                    {
+                        return UploadPartLockResult.Failed(new ApiProblemException(
+                            StatusCodes.Status409Conflict,
+                            "upload.not_resumable",
+                            "This upload session cannot accept more parts."));
+                    }
+
+                    var existing = await dbContext.UploadParts.SingleOrDefaultAsync(
+                        value => value.UploadSessionId == lockedSession.Id && value.PartNumber == partNumber,
+                        token);
+                    if (existing is not null)
+                    {
+                        if (!string.Equals(existing.PlaintextSha256, sha256, StringComparison.Ordinal))
+                        {
+                            return UploadPartLockResult.Failed(new ApiProblemException(
+                                StatusCodes.Status409Conflict,
+                                "upload.part_hash_conflict",
+                                "This part number was already stored with different content. Start a new upload session."));
+                        }
+
+                        return UploadPartLockResult.Succeeded(Results.Ok(new UploadPartResponse(
+                            partNumber,
+                            existing.PlaintextLength,
+                            existing.PlaintextSha256,
+                            existing.StorageETag)));
+                    }
+
+                    await objectStorage.UploadAsync(
+                        partObjectKey,
+                        temp,
+                        "application/octet-stream",
+                        token);
+                    var info = await objectStorage.HeadAsync(partObjectKey, token)
+                        ?? throw new InvalidOperationException("Encrypted upload part was not published.");
+                    var receipt = new Hook2Stream.Domain.UploadPart
+                    {
+                        UploadSessionId = lockedSession.Id,
+                        PartNumber = partNumber,
+                        PlaintextLength = expectedLength,
+                        PlaintextSha256 = sha256,
+                        StorageETag = info.ETag ?? sha256,
+                        ObjectKey = partObjectKey
+                    };
+                    dbContext.UploadParts.Add(receipt);
+                    await MarkUploadPartStartedAsync(
+                        dbContext,
+                        lockedSession,
+                        timeProvider.GetUtcNow(),
+                        token);
+                    await dbContext.SaveChangesAsync(token);
+                    return UploadPartLockResult.Succeeded(Results.Ok(new UploadPartResponse(
+                        partNumber,
+                        expectedLength,
+                        sha256,
+                        receipt.StorageETag)));
+                },
+                cancellationToken);
+
+            if (lockedResult.Error is not null) throw lockedResult.Error;
+            return lockedResult.Response!;
+        }
+        finally { try { File.Delete(temp); } catch { } }
     }
 
     private static async Task<IResult> CompleteUpload(
@@ -1258,129 +1289,156 @@ public static class Endpoints
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var session = await FindUpload(dbContext, context.Workspace.Id, sessionId, cancellationToken);
-        if (session.State == UploadState.Completed)
-        {
-            var existingJob = await dbContext.Jobs
-                .AsNoTracking()
-                .Where(value => value.AssetId == session.AssetId && value.Type == JobType.MediaIngest)
-                .OrderByDescending(value => value.CreatedAt)
-                .Select(value => value.Id)
-                .FirstOrDefaultAsync(cancellationToken);
-            return Results.Accepted(
-                $"/api/v1/jobs/{existingJob}",
-                new CompleteUploadResponse(session.AssetId, existingJob));
-        }
-
-        await RejectExpiredUploadAsync(session, dbContext, timeProvider, cancellationToken);
-
-        if (session.State is UploadState.Aborted or UploadState.Expired)
-        {
-            throw new ApiProblemException(
-                StatusCodes.Status409Conflict,
-                "upload.not_completable",
-                "This upload session cannot be completed.");
-        }
-
-        if (session.IsMultipart)
-        {
-            var expectedPartCount = (int)Math.Ceiling(
-                session.Asset.DeclaredBytes / (double)session.PartSizeBytes);
-            if (request.Parts.Count != expectedPartCount ||
-                request.Parts.Select(value => value.PartNumber).Distinct().Count() != expectedPartCount ||
-                request.Parts.Any(value => value.PartNumber < 1 ||
-                                           value.PartNumber > expectedPartCount ||
-                                           string.IsNullOrWhiteSpace(value.ETag)))
+        var lockedResult = await ExecuteWithUploadLockAsync(
+            dbContext,
+            session.Id,
+            shared: false,
+            partNumber: null,
+            async token =>
             {
-                throw new ApiProblemException(
-                    StatusCodes.Status422UnprocessableEntity,
-                    "upload.parts_invalid",
-                    "Provide one ETag for every multipart upload part.");
-            }
-
-            await objectStorage.CompleteMultipartUploadAsync(
-                session.ObjectKey,
-                session.MultipartUploadId!,
-                request.Parts.Select(value => new MultipartPart(value.PartNumber, value.ETag)).ToList(),
-                cancellationToken);
-        }
-
-        var objectInfo = await objectStorage.HeadAsync(session.ObjectKey, cancellationToken);
-        if (objectInfo is null || objectInfo.SizeBytes != session.Asset.DeclaredBytes)
-        {
-            throw new ApiProblemException(
-                StatusCodes.Status409Conflict,
-                "upload.object_invalid",
-                "The uploaded object is missing or its size does not match the reservation.");
-        }
-
-        session.State = UploadState.Completed;
-        session.CompletedAt = timeProvider.GetUtcNow();
-        session.Asset.State = AssetState.Uploaded;
-        var project = await dbContext.Projects.SingleAsync(
-            value => value.Id == session.ProjectId,
-            cancellationToken);
-        ProjectActivity.Touch(project, session.CompletedAt.Value);
-        dbContext.OutboxMessages.Add(new OutboxMessage
-        {
-            WorkspaceId = session.WorkspaceId,
-            AggregateId = session.ProjectId,
-            Destination = "pipeline",
-            MessageType = "pipeline.reconcile",
-            DedupeKey = $"pipeline.reconcile:{session.ProjectId:N}:upload:{session.AssetId:N}:r{session.Asset.Revision}",
-            PayloadJson = JsonSerializer.Serialize(new
-            {
-                projectId = session.ProjectId,
-                assetId = session.AssetId,
-                reason = "audio.upload_completed"
-            })
-        });
-        dbContext.ProjectEvents.Add(new ProjectEvent
-        {
-            WorkspaceId = session.WorkspaceId,
-            ProjectId = session.ProjectId,
-            EventType = "audio.upload_completed",
-            DataJson = JsonSerializer.Serialize(new { projectId = session.ProjectId, assetId = session.AssetId })
-        });
-
-        var payload = JsonSerializer.Serialize(new { assetId = session.AssetId });
-        Guid jobId;
-        try
-        {
-            jobId = await jobQueue.EnqueueAsync(
-                session.WorkspaceId,
-                session.ProjectId,
-                session.AssetId,
-                JobType.MediaIngest,
-                payload,
-                $"media-ingest:{session.AssetId:N}:r{session.Asset.Revision}",
-                cancellationToken);
-        }
-        catch
-        {
-            // Multipart completion is an external side effect that precedes the
-            // atomic DB transition. Remove the object if persistence fails so a
-            // completed-but-uncommitted upload cannot be orphaned.
-            try
-            {
-                if (session.IsMultipart && !string.IsNullOrWhiteSpace(session.MultipartUploadId))
+                var lockedSession = await FindUpload(
+                    dbContext,
+                    context.Workspace.Id,
+                    session.Id,
+                    token);
+                var allPartKeys = await dbContext.UploadParts
+                    .Where(value => value.UploadSessionId == lockedSession.Id)
+                    .Select(value => value.ObjectKey)
+                    .ToListAsync(token);
+                if (lockedSession.State == UploadState.Completed)
                 {
-                    await objectStorage.AbortMultipartUploadAsync(
-                        session.ObjectKey,
-                        session.MultipartUploadId,
-                        CancellationToken.None);
+                    var existingJob = await dbContext.Jobs
+                        .AsNoTracking()
+                        .Where(value => value.AssetId == lockedSession.AssetId && value.Type == JobType.MediaIngest)
+                        .OrderByDescending(value => value.CreatedAt)
+                        .Select(value => value.Id)
+                        .FirstOrDefaultAsync(token);
+                    return CompleteUploadLockResult.Succeeded(
+                        lockedSession.AssetId,
+                        existingJob,
+                        allPartKeys);
                 }
-                await objectStorage.DeleteAsync(session.ObjectKey, CancellationToken.None);
-            }
-            catch
-            {
-                // Fixed session expiry plus retention cleanup remains the
-                // safety net when compensation cannot reach object storage.
-            }
-            throw;
+
+                if (await ExpireUploadIfNeededAsync(lockedSession, dbContext, timeProvider, token))
+                {
+                    return CompleteUploadLockResult.Failed(UploadExpired());
+                }
+                if (lockedSession.State == UploadState.Aborted)
+                {
+                    return CompleteUploadLockResult.Failed(new ApiProblemException(
+                        StatusCodes.Status409Conflict,
+                        "upload.not_completable",
+                        "This upload session cannot be completed."));
+                }
+
+                var expectedPartCount = (int)Math.Ceiling(
+                    lockedSession.Asset.DeclaredBytes / (double)lockedSession.PartSizeBytes);
+                var storedParts = await dbContext.UploadParts
+                    .Where(value => value.UploadSessionId == lockedSession.Id && value.State == UploadPartState.Stored)
+                    .OrderBy(value => value.PartNumber)
+                    .ToListAsync(token);
+                if (storedParts.Count != expectedPartCount ||
+                    storedParts.Select(value => value.PartNumber)
+                        .SequenceEqual(Enumerable.Range(1, expectedPartCount)) is false)
+                {
+                    return CompleteUploadLockResult.Failed(new ApiProblemException(
+                        StatusCodes.Status409Conflict,
+                        "upload.parts_incomplete",
+                        "Every upload part must be stored before completion."));
+                }
+
+                var assembled = Path.Combine(Path.GetTempPath(), $"h2s-assembled-{Guid.NewGuid():N}");
+                try
+                {
+                    await using (var output = new FileStream(
+                        assembled,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        128 * 1024,
+                        FileOptions.Asynchronous))
+                    {
+                        foreach (var part in storedParts)
+                        {
+                            await objectStorage.CopyToAsync(part.ObjectKey, output, 0, null, token);
+                        }
+                    }
+                    await objectStorage.UploadAsync(
+                        lockedSession.ObjectKey,
+                        assembled,
+                        lockedSession.Asset.DeclaredContentType,
+                        token);
+                }
+                finally { try { File.Delete(assembled); } catch { } }
+
+                var objectInfo = await objectStorage.HeadAsync(lockedSession.ObjectKey, token);
+                if (objectInfo is null || objectInfo.SizeBytes != lockedSession.Asset.DeclaredBytes)
+                {
+                    return CompleteUploadLockResult.Failed(new ApiProblemException(
+                        StatusCodes.Status409Conflict,
+                        "upload.object_invalid",
+                        "The uploaded object is missing or its size does not match the reservation."));
+                }
+
+                lockedSession.State = UploadState.Completed;
+                lockedSession.CompletedAt = timeProvider.GetUtcNow();
+                lockedSession.Asset.State = AssetState.Uploaded;
+                foreach (var part in storedParts) part.State = UploadPartState.Committed;
+                var project = await dbContext.Projects.SingleAsync(
+                    value => value.Id == lockedSession.ProjectId,
+                    token);
+                ProjectActivity.Touch(project, lockedSession.CompletedAt.Value);
+                dbContext.OutboxMessages.Add(new OutboxMessage
+                {
+                    WorkspaceId = lockedSession.WorkspaceId,
+                    AggregateId = lockedSession.ProjectId,
+                    Destination = "pipeline",
+                    MessageType = "pipeline.reconcile",
+                    DedupeKey = $"pipeline.reconcile:{lockedSession.ProjectId:N}:upload:{lockedSession.AssetId:N}:r{lockedSession.Asset.Revision}",
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        projectId = lockedSession.ProjectId,
+                        assetId = lockedSession.AssetId,
+                        reason = "audio.upload_completed"
+                    })
+                });
+                dbContext.ProjectEvents.Add(new ProjectEvent
+                {
+                    WorkspaceId = lockedSession.WorkspaceId,
+                    ProjectId = lockedSession.ProjectId,
+                    EventType = "audio.upload_completed",
+                    DataJson = JsonSerializer.Serialize(new
+                    {
+                        projectId = lockedSession.ProjectId,
+                        assetId = lockedSession.AssetId
+                    })
+                });
+
+                var payload = JsonSerializer.Serialize(new { assetId = lockedSession.AssetId });
+                var jobId = await jobQueue.EnqueueAsync(
+                    lockedSession.WorkspaceId,
+                    lockedSession.ProjectId,
+                    lockedSession.AssetId,
+                    JobType.MediaIngest,
+                    payload,
+                    $"media-ingest:{lockedSession.AssetId:N}:r{lockedSession.Asset.Revision}",
+                    token);
+                return CompleteUploadLockResult.Succeeded(
+                    lockedSession.AssetId,
+                    jobId,
+                    storedParts.Select(value => value.ObjectKey).ToArray());
+            },
+            cancellationToken);
+
+        if (lockedResult.Error is not null) throw lockedResult.Error;
+        foreach (var partObjectKey in lockedResult.CleanupPartObjectKeys)
+        {
+            try { await objectStorage.DeleteAsync(partObjectKey, CancellationToken.None); }
+            catch { /* staging-prefix retention is the final cleanup safety net */ }
         }
         return Results.Accepted(
-            $"/api/v1/jobs/{jobId}",
-            new CompleteUploadResponse(session.AssetId, jobId));
+            $"/api/v1/jobs/{lockedResult.JobId}",
+            new CompleteUploadResponse(lockedResult.AssetId, lockedResult.JobId));
     }
 
     private static async Task<IResult> AbortUpload(
@@ -1394,70 +1452,103 @@ public static class Endpoints
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
         var session = await FindUpload(dbContext, context.Workspace.Id, sessionId, cancellationToken);
-        if (session.State == UploadState.Completed)
-        {
-            throw new ApiProblemException(
-                StatusCodes.Status409Conflict,
-                "upload.already_completed",
-                "A completed upload cannot be aborted.");
-        }
-        if (session.State is UploadState.Aborted or UploadState.Expired)
-        {
-            return Results.NoContent();
-        }
+        var lockedResult = await ExecuteWithUploadLockAsync(
+            dbContext,
+            session.Id,
+            shared: false,
+            partNumber: null,
+            async token =>
+            {
+                var lockedSession = await FindUpload(
+                    dbContext,
+                    context.Workspace.Id,
+                    session.Id,
+                    token);
+                if (lockedSession.State == UploadState.Completed)
+                {
+                    return AbortUploadLockResult.Failed(new ApiProblemException(
+                        StatusCodes.Status409Conflict,
+                        "upload.already_completed",
+                        "A completed upload cannot be aborted."));
+                }
 
-        if (session.IsMultipart && !string.IsNullOrWhiteSpace(session.MultipartUploadId))
-        {
-            await objectStorage.AbortMultipartUploadAsync(
-                session.ObjectKey,
-                session.MultipartUploadId,
-                cancellationToken);
-        }
-        await objectStorage.DeleteAsync(session.ObjectKey, cancellationToken);
+                var cleanupPartObjectKeys = await dbContext.UploadParts
+                    .Where(value =>
+                        value.UploadSessionId == lockedSession.Id &&
+                        value.State != UploadPartState.Committed)
+                    .Select(value => value.ObjectKey)
+                    .ToListAsync(token);
+                if (lockedSession.State is UploadState.Aborted or UploadState.Expired)
+                {
+                    return AbortUploadLockResult.Succeeded(
+                        lockedSession.ObjectKey,
+                        cleanupPartObjectKeys);
+                }
 
-        var now = timeProvider.GetUtcNow();
-        var cleanupAvailableAt = now.AddMinutes(policyOptions.Value.DeletionFenceMinutes);
-        session.State = UploadState.Aborted;
-        session.AbortedAt = now;
-        session.Asset.State = AssetState.Rejected;
-        session.Asset.FailureCode = "upload.aborted";
-        session.Asset.FailureMessage = "Upload cancelled by the user.";
-        var project = await dbContext.Projects.SingleAsync(
-            value => value.Id == session.ProjectId,
+                var storedParts = await dbContext.UploadParts
+                    .Where(value =>
+                        value.UploadSessionId == lockedSession.Id &&
+                        value.State == UploadPartState.Stored)
+                    .ToListAsync(token);
+                foreach (var part in storedParts) part.State = UploadPartState.Deleted;
+
+                var now = timeProvider.GetUtcNow();
+                var cleanupAvailableAt = now.AddMinutes(policyOptions.Value.DeletionFenceMinutes);
+                lockedSession.State = UploadState.Aborted;
+                lockedSession.AbortedAt = now;
+                lockedSession.Asset.State = AssetState.Rejected;
+                lockedSession.Asset.FailureCode = "upload.aborted";
+                lockedSession.Asset.FailureMessage = "Upload cancelled by the user.";
+                var project = await dbContext.Projects.SingleAsync(
+                    value => value.Id == lockedSession.ProjectId,
+                    token);
+                ProjectActivity.Touch(project, now);
+                var cleanupJob = new Job
+                {
+                    WorkspaceId = lockedSession.WorkspaceId,
+                    ProjectId = lockedSession.ProjectId,
+                    AssetId = lockedSession.AssetId,
+                    Type = JobType.AssetCleanup,
+                    RequiredCapability = JobRoutingRegistry.Control,
+                    HandlerVersion = "v1",
+                    PayloadSchemaVersion = 1,
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        projectId = lockedSession.ProjectId,
+                        uploadSessionId = lockedSession.Id,
+                        notBefore = cleanupAvailableAt
+                    }),
+                    IdempotencyKey = $"retention:upload:{lockedSession.Id:N}",
+                    State = JobState.Queued,
+                    AvailableAt = cleanupAvailableAt
+                };
+                dbContext.Jobs.Add(cleanupJob);
+                dbContext.JobEvents.Add(new JobEvent
+                {
+                    JobId = cleanupJob.Id,
+                    EventType = "queued",
+                    DataJson = JsonSerializer.Serialize(new
+                    {
+                        cleanupJob.RequiredCapability,
+                        cleanupJob.AvailableAt,
+                        reason = "upload.aborted"
+                    })
+                });
+                await dbContext.SaveChangesAsync(token);
+                return AbortUploadLockResult.Succeeded(
+                    lockedSession.ObjectKey,
+                    storedParts.Select(value => value.ObjectKey).ToArray());
+            },
             cancellationToken);
-        ProjectActivity.Touch(project, now);
-        var cleanupJob = new Job
+
+        if (lockedResult.Error is not null) throw lockedResult.Error;
+        foreach (var partObjectKey in lockedResult.CleanupPartObjectKeys)
         {
-            WorkspaceId = session.WorkspaceId,
-            ProjectId = session.ProjectId,
-            AssetId = session.AssetId,
-            Type = JobType.AssetCleanup,
-            RequiredCapability = JobRoutingRegistry.Control,
-            HandlerVersion = "v1",
-            PayloadSchemaVersion = 1,
-            PayloadJson = JsonSerializer.Serialize(new
-            {
-                projectId = session.ProjectId,
-                uploadSessionId = session.Id,
-                notBefore = cleanupAvailableAt
-            }),
-            IdempotencyKey = $"retention:upload:{session.Id:N}",
-            State = JobState.Queued,
-            AvailableAt = cleanupAvailableAt
-        };
-        dbContext.Jobs.Add(cleanupJob);
-        dbContext.JobEvents.Add(new JobEvent
-        {
-            JobId = cleanupJob.Id,
-            EventType = "queued",
-            DataJson = JsonSerializer.Serialize(new
-            {
-                cleanupJob.RequiredCapability,
-                cleanupJob.AvailableAt,
-                reason = "upload.aborted"
-            })
-        });
-        await dbContext.SaveChangesAsync(cancellationToken);
+            try { await objectStorage.DeleteAsync(partObjectKey, CancellationToken.None); }
+            catch { /* the queued cleanup job and retention remain the safety net */ }
+        }
+        try { await objectStorage.DeleteAsync(lockedResult.SessionObjectKey!, CancellationToken.None); }
+        catch { /* the queued cleanup job and retention remain the safety net */ }
         return Results.NoContent();
     }
 
@@ -1699,7 +1790,142 @@ public static class Endpoints
             cancellationToken)
         ?? throw NotFound();
 
+    private static async Task<T> ExecuteWithUploadLockAsync<T>(
+        Hook2StreamDbContext dbContext,
+        Guid sessionId,
+        bool shared,
+        int? partNumber,
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken)
+    {
+        if (!dbContext.Database.IsRelational())
+        {
+            dbContext.ChangeTracker.Clear();
+            return await operation(cancellationToken);
+        }
+
+        var strategy = dbContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(
+            async token =>
+            {
+                // A retry must never reuse tracked state from an attempt whose
+                // commit outcome was ambiguous. Every state decision is made by
+                // re-reading the upload after the advisory lock is held.
+                dbContext.ChangeTracker.Clear();
+                await using var transaction = await dbContext.Database.BeginTransactionAsync(token);
+                if (UsesPostgresAdvisoryLocks(dbContext))
+                {
+                    var sessionLockKey = UploadAdvisoryLockKey(sessionId, partNumber: null);
+                    if (shared)
+                    {
+                        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                            $"SELECT pg_advisory_xact_lock_shared({sessionLockKey})",
+                            token);
+                    }
+                    else
+                    {
+                        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                            $"SELECT pg_advisory_xact_lock({sessionLockKey})",
+                            token);
+                    }
+
+                    if (partNumber is { } value)
+                    {
+                        var partLockKey = UploadAdvisoryLockKey(sessionId, value);
+                        await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                            $"SELECT pg_advisory_xact_lock({partLockKey})",
+                            token);
+                    }
+                }
+
+                var result = await operation(token);
+                await transaction.CommitAsync(token);
+                return result;
+            },
+            cancellationToken);
+    }
+
+    private static bool UsesPostgresAdvisoryLocks(Hook2StreamDbContext dbContext) =>
+        string.Equals(
+            dbContext.Database.ProviderName,
+            "Npgsql.EntityFrameworkCore.PostgreSQL",
+            StringComparison.Ordinal);
+
+    private static async Task MarkUploadPartStartedAsync(
+        Hook2StreamDbContext dbContext,
+        UploadSession session,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (!dbContext.Database.IsRelational())
+        {
+            session.State = UploadState.Uploading;
+            session.Asset.State = AssetState.Uploading;
+            var project = await dbContext.Projects.SingleAsync(
+                value => value.Id == session.ProjectId,
+                cancellationToken);
+            ProjectActivity.Touch(project, now);
+            return;
+        }
+
+        // Different part numbers intentionally hold only a shared session lock.
+        // Atomic, predicate-based updates avoid optimistic-concurrency failures
+        // on the shared session/asset rows while the part receipts remain fully
+        // independent.
+        await dbContext.UploadSessions
+            .Where(value => value.Id == session.Id && value.State == UploadState.Initiated)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(value => value.State, UploadState.Uploading)
+                    .SetProperty(value => value.UpdatedAt, now)
+                    .SetProperty(value => value.Version, value => value.Version + 1),
+                cancellationToken);
+        await dbContext.MediaAssets
+            .Where(value => value.Id == session.AssetId && value.State == AssetState.Reserved)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(value => value.State, AssetState.Uploading)
+                    .SetProperty(value => value.UpdatedAt, now)
+                    .SetProperty(value => value.Version, value => value.Version + 1),
+                cancellationToken);
+        await dbContext.Projects
+            .Where(value => value.Id == session.ProjectId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(
+                        value => value.LastActivityAt,
+                        value => value.LastActivityAt < now ? now : value.LastActivityAt)
+                    .SetProperty(value => value.UpdatedAt, now)
+                    .SetProperty(value => value.Version, value => value.Version + 1),
+                cancellationToken);
+    }
+
+    private static long UploadAdvisoryLockKey(Guid sessionId, int? partNumber)
+    {
+        Span<byte> input = stackalloc byte[21];
+        input[0] = partNumber is null ? (byte)0x53 : (byte)0x50;
+        sessionId.TryWriteBytes(input[1..17]);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(
+            input[17..],
+            partNumber ?? 0);
+        Span<byte> digest = stackalloc byte[32];
+        System.Security.Cryptography.SHA256.HashData(input, digest);
+        return System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(digest);
+    }
+
     private static async Task RejectExpiredUploadAsync(
+        UploadSession session,
+        Hook2StreamDbContext dbContext,
+        TimeProvider timeProvider,
+        CancellationToken cancellationToken)
+    {
+        if (await ExpireUploadIfNeededAsync(session, dbContext, timeProvider, cancellationToken))
+        {
+            throw UploadExpired();
+        }
+    }
+
+    private static async Task<bool> ExpireUploadIfNeededAsync(
         UploadSession session,
         Hook2StreamDbContext dbContext,
         TimeProvider timeProvider,
@@ -1728,13 +1954,51 @@ public static class Endpoints
             await dbContext.SaveChangesAsync(cancellationToken);
         }
 
-        if (session.State == UploadState.Expired)
-        {
-            throw new ApiProblemException(
-                StatusCodes.Status410Gone,
-                "upload.session_expired",
-                "This upload session has expired. Start a new upload.");
-        }
+        return session.State == UploadState.Expired;
+    }
+
+    private static ApiProblemException UploadExpired() =>
+        new(
+            StatusCodes.Status410Gone,
+            "upload.session_expired",
+            "This upload session has expired. Start a new upload.");
+
+    private sealed record UploadPartLockResult(
+        IResult? Response,
+        ApiProblemException? Error)
+    {
+        public static UploadPartLockResult Succeeded(IResult response) => new(response, null);
+        public static UploadPartLockResult Failed(ApiProblemException error) => new(null, error);
+    }
+
+    private sealed record CompleteUploadLockResult(
+        Guid AssetId,
+        Guid JobId,
+        IReadOnlyList<string> CleanupPartObjectKeys,
+        ApiProblemException? Error)
+    {
+        public static CompleteUploadLockResult Succeeded(
+            Guid assetId,
+            Guid jobId,
+            IReadOnlyList<string> cleanupPartObjectKeys) =>
+            new(assetId, jobId, cleanupPartObjectKeys, null);
+
+        public static CompleteUploadLockResult Failed(ApiProblemException error) =>
+            new(Guid.Empty, Guid.Empty, [], error);
+    }
+
+    private sealed record AbortUploadLockResult(
+        string? SessionObjectKey,
+        IReadOnlyList<string> CleanupPartObjectKeys,
+        ApiProblemException? Error)
+    {
+        public static AbortUploadLockResult Succeeded(
+            string sessionObjectKey,
+            IReadOnlyList<string> cleanupPartObjectKeys) =>
+            new(sessionObjectKey, cleanupPartObjectKeys, null);
+
+        public static AbortUploadLockResult Failed(ApiProblemException error) =>
+            new(null, [], error);
     }
 
     private static TimeSpan GetUploadUrlLifetime(

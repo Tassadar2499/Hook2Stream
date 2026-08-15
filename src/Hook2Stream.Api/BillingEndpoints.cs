@@ -1324,7 +1324,6 @@ public static class BillingEndpoints
         DateTimeOffset expiresAt,
         CancellationToken cancellationToken)
     {
-        var url = await storage.CreateReadUrlAsync(asset.ObjectKey, DownloadUrlLifetime, cancellationToken);
         return new DownloadGrantResponse(
             asset.Id,
             asset.OriginalFileName,
@@ -1332,7 +1331,7 @@ public static class BillingEndpoints
             asset.ActualBytes ?? asset.DeclaredBytes,
             asset.Width,
             asset.Height,
-            url.ToString(),
+            $"/api/v1/releases/{asset.ProjectId}/downloads/{asset.Id}",
             expiresAt);
     }
 

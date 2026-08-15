@@ -11,7 +11,8 @@
 		protocols tls1.2 tls1.3
 	}
 
-	encode zstd gzip
+	@compressible not path /api/v1/uploads/* /api/v1/releases/*/assets/*/content /api/v1/releases/*/downloads/*
+	encode @compressible zstd gzip
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -19,8 +20,12 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+		X-Robots-Tag "{$ROBOTS_HEADER}"
 		-Server
 	}
+
+	@sensitive path /api/v1/uploads/* /api/v1/releases/*/assets/*/content /api/v1/releases/*/downloads/*
+	log_skip @sensitive
 
 	@api_ready path /health/api-ready
 	handle @api_ready {
@@ -64,6 +69,14 @@
 
 	log {
 		output stdout
-		format json
+		format filter {
+			wrap json
+			fields {
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>headers>Set-Cookie delete
+				request>uri query replace redacted
+			}
+		}
 	}
 }

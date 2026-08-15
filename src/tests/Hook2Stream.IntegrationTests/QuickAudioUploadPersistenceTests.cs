@@ -23,7 +23,7 @@ public sealed class QuickAudioUploadPersistenceTests
 
     [Theory]
     [MemberData(nameof(PersistenceFailures))]
-    public async Task Multipart_upload_is_aborted_without_masking_the_persistence_failure(
+    public async Task Reservation_failure_has_no_object_storage_side_effect_and_preserves_the_failure(
         Exception persistenceFailure)
     {
         var interceptor = new FailMultipartPersistenceInterceptor(persistenceFailure);
@@ -40,7 +40,6 @@ public sealed class QuickAudioUploadPersistenceTests
 
         var storage = Assert.IsType<FakeObjectStorage>(
             factory.Services.GetRequiredService<IObjectStorage>());
-        storage.AbortMultipartException = new IOException("Simulated cleanup failure.");
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/releases/audio-uploads")
         {
@@ -59,9 +58,7 @@ public sealed class QuickAudioUploadPersistenceTests
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Same(persistenceFailure, exceptionCapture.Exception);
-        var aborted = Assert.Single(storage.AbortedMultipartUploads);
-        Assert.Equal("test-upload", aborted.UploadId);
-        Assert.Contains("/assets/", aborted.ObjectKey, StringComparison.Ordinal);
+        Assert.Empty(storage.AbortedMultipartUploads);
     }
 
     private static async Task Onboard(HttpClient client)

@@ -73,6 +73,7 @@ internal sealed class ProductionProxyApiFactory(IPAddress remoteAddress)
     : WebApplicationFactory<Program>
 {
     private readonly string _databaseName = $"hook2stream-proxy-tests-{Guid.NewGuid():N}";
+    private readonly string _keyringPath = CreateKeyring();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -89,6 +90,8 @@ internal sealed class ProductionProxyApiFactory(IPAddress remoteAddress)
         builder.UseSetting("Storage:CredentialMode", "Static");
         builder.UseSetting("Storage:AccessKey", "test-access-key");
         builder.UseSetting("Storage:SecretKey", "test-secret-key");
+        builder.UseSetting("StorageEncryption:Mode", "H2se");
+        builder.UseSetting("StorageEncryption:KeyringPath", _keyringPath);
         builder.UseSetting("Stripe:Mode", "Stripe");
         builder.UseSetting("Stripe:PublicWebBaseUrl", "https://app.example.test");
         builder.UseSetting("Stripe:SecretKey", "sk_test_secret");
@@ -113,5 +116,19 @@ internal sealed class ProductionProxyApiFactory(IPAddress remoteAddress)
             services.AddSingleton<IObjectStorage, FakeObjectStorage>();
             services.AddSingleton<IStartupFilter>(new ConnectionAddressStartupFilter(remoteAddress));
         });
+    }
+
+    private static string CreateKeyring()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"hook2stream-keyring-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            activeKeyId = "test",
+            keys = new Dictionary<string, string>
+            {
+                ["test"] = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32))
+            }
+        }));
+        return path;
     }
 }

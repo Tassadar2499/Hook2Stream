@@ -37,10 +37,11 @@ for secret_name in \
     stripe_secret_key \
     stripe_webhook_secret \
     openrouter_api_key \
+    media_keyring \
+    invited_emails \
     backup_s3_access_key \
     backup_s3_secret_key \
-    backup_encryption_key_id \
-    backup_encryption_passphrase \
+    backup_age_recipient \
     minio_root_user \
     minio_root_password; do
     printf '%s\n' "test-${secret_name}" > "${secret_dir}/${secret_name}"
@@ -52,6 +53,8 @@ COMPOSE_PROJECT_NAME=hook2stream-test
 RELEASE_VERSION=test-release
 SECRET_PROVIDER=file
 STORAGE_MODE=minio
+DEPLOYMENT_ENVIRONMENT=staging
+ROBOTS_HEADER=noindex, nofollow, noarchive
 API_IMAGE=registry.invalid/api@sha256:${digest}
 WORKER_IMAGE=registry.invalid/worker@sha256:${digest}
 BOOTSTRAPPER_IMAGE=registry.invalid/bootstrapper@sha256:${digest}
@@ -60,6 +63,7 @@ POSTGRES_BACKUP_IMAGE=registry.invalid/postgres-backup@sha256:${digest}
 CADDY_IMAGE=registry.invalid/caddy@sha256:${digest}
 POSTGRES_IMAGE=registry.invalid/postgres@sha256:${digest}
 PGBOUNCER_IMAGE=registry.invalid/pgbouncer@sha256:${digest}
+EGRESS_PROXY_IMAGE=registry.invalid/squid@sha256:${digest}
 MINIO_IMAGE=registry.invalid/minio@sha256:${digest}
 MINIO_MC_IMAGE=registry.invalid/minio-mc@sha256:${digest}
 APP_DOMAIN=staging.test.invalid
@@ -293,13 +297,15 @@ sed 's/^SECRET_PROVIDER=.*/SECRET_PROVIDER=vault/' \
     "$environment_file" > "$vault_environment"
 assert_rejected_environment \
     "$vault_environment" \
-    'STORAGE_MODE=minio currently requires SECRET_PROVIDER=file'
+    'MVP staging/production requires environment-local root-owned file secrets'
 
 external_environment=${temporary_dir}/external.env
 sed \
     -e '/^STORAGE_MODE=/d' \
     -e '/^MINIO_/d' \
     -e '/^S3_PUBLIC_DOMAIN=/d' \
+    -e 's/^APP_DOMAIN=.*/APP_DOMAIN=staging.hook2stream.com/' \
+    -e 's#^PUBLIC_ORIGIN=.*#PUBLIC_ORIGIN=https://staging.hook2stream.com#' \
     -e 's#^S3_SERVICE_URL=.*#S3_SERVICE_URL=https://s3.test.invalid#' \
     -e 's#^S3_PUBLIC_SERVICE_URL=.*#S3_PUBLIC_SERVICE_URL=https://s3.test.invalid#' \
     -e 's#^BACKUP_S3_ENDPOINT=.*#BACKUP_S3_ENDPOINT=#' \

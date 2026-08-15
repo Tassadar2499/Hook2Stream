@@ -45,6 +45,12 @@ x-dotnet-environment: &dotnet-environment
   Storage__RequireCredentials: "true"
   Storage__ConfigureBucketCors: "false"
   Storage__ConfigureBucketLifecycle: "false"
+  StorageEncryption__KeyringPath: /run/secrets/media_keyring
+  StorageEncryption__Mode: H2se
+  StorageEncryption__AllowLegacyPlaintextReads: "false"
+  StorageEncryption__MaxConcurrentEncryptions: "8"
+  StorageEncryption__MaxConcurrentDownloads: "4"
+  TMPDIR: /tmp
   STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
   STORAGE_SECRET_FILE: /run/secrets/s3_runtime_secret_key
   OperationalPolicy__UploadUrlMinutes: "10"
@@ -61,7 +67,10 @@ x-dotnet-environment: &dotnet-environment
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_SERVICE_VERSION: ${RELEASE_VERSION:?Set RELEASE_VERSION}
   Telemetry__ServiceVersion: ${RELEASE_VERSION:?Set RELEASE_VERSION}
-  OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production,service.version=${RELEASE_VERSION:?Set RELEASE_VERSION}
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment=${DEPLOYMENT_ENVIRONMENT:?Set DEPLOYMENT_ENVIRONMENT},service.version=${RELEASE_VERSION:?Set RELEASE_VERSION}
+  HTTP_PROXY: http://egress-s3:3128
+  HTTPS_PROXY: http://egress-s3:3128
+  NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web
 
 x-worker-environment: &worker-environment
   <<: *dotnet-environment
@@ -118,6 +127,7 @@ x-worker-runtime: &worker-runtime
     - postgres_password
     - s3_runtime_access_key
     - s3_runtime_secret_key
+    - media_keyring
 
 services:
   caddy:
@@ -135,6 +145,8 @@ services:
     environment:
       APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL}
+      WWW_DOMAIN: ${WWW_DOMAIN:-www.hook2stream.invalid}
+      ROBOTS_HEADER: ${ROBOTS_HEADER:-noindex, nofollow, noarchive}
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile
@@ -169,6 +181,7 @@ services:
     logging: *json-logging
     networks:
       - edge
+      - public-egress
     deploy:
       resources:
         limits:
@@ -224,6 +237,8 @@ services:
       - Hook2Stream.Api.dll
     environment:
       <<: *dotnet-environment
+      HTTP_PROXY: http://egress-api:3128
+      HTTPS_PROXY: http://egress-api:3128
       ReverseProxy__Enabled: "true"
       ReverseProxy__ForwardLimit: "1"
       ReverseProxy__TrustAllProxies: "true"
@@ -232,6 +247,8 @@ services:
       DB_PASSWORD_FILE: /run/secrets/postgres_password
       OTEL_SERVICE_NAME: hook2stream-api
       Auth__Mode: OAuth
+      Auth__InviteOnly: "true"
+      Auth__InvitedEmailsFile: /run/secrets/invited_emails
       AllowedHosts: ${APP_DOMAIN:?Set APP_DOMAIN}
       HEALTHCHECK_HOST_HEADER: ${APP_DOMAIN:?Set APP_DOMAIN}
       Cors__Origins__0: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
@@ -263,6 +280,8 @@ services:
       - google_client_secret
       - stripe_secret_key
       - stripe_webhook_secret
+      - media_keyring
+      - invited_emails
     healthcheck:
       test:
         - CMD
@@ -272,14 +291,15 @@ services:
       timeout: 8s
       retries: 3
       start_period: 45s
-    tmpfs:
-      - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
+    volumes:
+      - api_scratch:/tmp
     depends_on:
       pgbouncer:
         condition: service_healthy
     networks:
       - edge
       - backend
+      - api-egress
     deploy:
       resources:
         limits:
@@ -330,6 +350,8 @@ services:
     environment:
       <<: *worker-environment
       OTEL_SERVICE_NAME: hook2stream-worker-control
+      HTTP_PROXY: http://egress-control:3128
+      HTTPS_PROXY: http://egress-control:3128
       Worker__Capabilities__0: control
       OperationalPolicy__RetentionSweepEnabled: "true"
       OPENROUTER_API_KEY_FILE: /run/secrets/openrouter_api_key
@@ -354,8 +376,12 @@ services:
       - s3_runtime_access_key
       - s3_runtime_secret_key
       - openrouter_api_key
+      - media_keyring
     volumes:
       - worker_control_scratch:/tmp
+    networks:
+      - backend
+      - control-egress
     deploy:
       resources:
         limits:
@@ -420,7 +446,9 @@ services:
       OTEL_SERVICE_NAME: hook2stream-bootstrapper
       STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_bootstrap_access_key
       STORAGE_SECRET_FILE: /run/secrets/s3_bootstrap_secret_key
-      Storage__ConfigureBucketCors: "true"
+      Storage__ConfigureBucketCors: "false"
+      StorageEncryption__KeyringPath: /run/secrets/media_keyring
+      StorageEncryption__AllowLegacyPlaintextReads: "false"
       Storage__ConfigureBucketLifecycle: "true"
       Storage__ConfigureMultipartAbortLifecycle: ${S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE:-false}
       Storage__BrowserUploadOrigins__0: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
@@ -429,6 +457,7 @@ services:
       - postgres_password
       - s3_bootstrap_access_key
       - s3_bootstrap_secret_key
+      - media_keyring
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
     depends_on:
@@ -605,20 +634,20 @@ services:
       BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-hook2stream/production/postgres}
       BACKUP_S3_ACCESS_KEY_FILE: /run/secrets/backup_s3_access_key
       BACKUP_S3_SECRET_KEY_FILE: /run/secrets/backup_s3_secret_key
-      BACKUP_ENCRYPTION_KEY_ID_FILE: /run/secrets/backup_encryption_key_id
-      BACKUP_ENCRYPTION_PASSPHRASE_FILE: /run/secrets/backup_encryption_passphrase
+      BACKUP_AGE_RECIPIENT_FILE: /run/secrets/backup_age_recipient
       BACKUP_HEARTBEAT_URL_FILE: /run/secrets/backup_heartbeat_url
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-3600}
       BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-7200}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-35}
       BACKUP_RETENTION_SAFETY_SECONDS: ${BACKUP_RETENTION_SAFETY_SECONDS:-7200}
-      BACKUP_KDF_ITERATIONS: ${BACKUP_KDF_ITERATIONS:-200000}
+      HTTP_PROXY: http://egress-s3:3128
+      HTTPS_PROXY: http://egress-s3:3128
+      NO_PROXY: 127.0.0.1,localhost,postgres
     secrets:
       - postgres_password
       - backup_s3_access_key
       - backup_s3_secret_key
-      - backup_encryption_key_id
-      - backup_encryption_passphrase
+      - backup_age_recipient
       - backup_heartbeat_url
     configs:
       - source: dotnet_load_secrets
@@ -628,8 +657,8 @@ services:
       - /bin/sh
       - /opt/hook2stream/load-secrets.sh
       - /usr/local/bin/postgres-backup
-    tmpfs:
-      - /tmp:rw,nosuid,nodev,noexec,size=512m,mode=1777
+    volumes:
+      - backup_scratch:/tmp
     healthcheck:
       test:
         - CMD
@@ -653,9 +682,108 @@ services:
         reservations:
           memory: 128M
 
+  egress-api:
+    image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    configs:
+      - source: egress_api_config
+        target: /etc/squid/squid.conf
+        mode: 0444
+    tmpfs:
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
+      - /var/run:rw,nosuid,nodev,noexec,size=4m
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+    healthcheck:
+      test: [CMD, squid, -k, parse]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [api-egress, public-egress]
+    logging: *json-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+          pids: 128
+        reservations:
+          memory: 32M
+
+  egress-s3:
+    image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    configs:
+      - source: egress_s3_config
+        target: /etc/squid/squid.conf
+        mode: 0444
+    tmpfs:
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
+      - /var/run:rw,nosuid,nodev,noexec,size=4m
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+    healthcheck:
+      test: [CMD, squid, -k, parse]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [backend, public-egress]
+    logging: *json-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+          pids: 128
+        reservations:
+          memory: 32M
+
+  egress-control:
+    image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    configs:
+      - source: egress_control_config
+        target: /etc/squid/squid.conf
+        mode: 0444
+    tmpfs:
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
+      - /var/run:rw,nosuid,nodev,noexec,size=4m
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+    healthcheck:
+      test: [CMD, squid, -k, parse]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [control-egress, public-egress]
+    logging: *json-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+          pids: 128
+        reservations:
+          memory: 32M
+
 configs:
   caddyfile:
-    file: ./Caddyfile
+    file: ${CADDYFILE_PATH:-./Caddyfile}
+  egress_api_config:
+    file: ./egress/api.conf
+  egress_s3_config:
+    file: ./egress/s3.conf
+  egress_control_config:
+    file: ./egress/control.conf
   dotnet_load_secrets:
     file: ./scripts/load-secrets.sh
   dotnet_http_healthcheck:
@@ -690,10 +818,12 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/backup_s3_access_key
   backup_s3_secret_key:
     file: ${SECRETS_DIR:-./secrets}/backup_s3_secret_key
-  backup_encryption_key_id:
-    file: ${SECRETS_DIR:-./secrets}/backup_encryption_key_id
-  backup_encryption_passphrase:
-    file: ${SECRETS_DIR:-./secrets}/backup_encryption_passphrase
+  backup_age_recipient:
+    file: ${SECRETS_DIR:-./secrets}/backup_age_recipient
+  media_keyring:
+    file: ${SECRETS_DIR:-./secrets}/media_keyring
+  invited_emails:
+    file: ${SECRETS_DIR:-./secrets}/invited_emails
   backup_heartbeat_url:
     file: ${SECRETS_DIR:-./secrets}/backup_heartbeat_url
 
@@ -701,12 +831,21 @@ volumes:
   caddy_data:
   caddy_config:
   postgres_data:
+  api_scratch:
   worker_media_scratch:
   worker_analysis_scratch:
   worker_control_scratch:
   worker_render_scratch:
   worker_export_scratch:
+  backup_scratch:
 
 networks:
   edge:
+    internal: true
   backend:
+    internal: true
+  api-egress:
+    internal: true
+  control-egress:
+    internal: true
+  public-egress:

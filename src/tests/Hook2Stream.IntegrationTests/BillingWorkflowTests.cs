@@ -270,9 +270,9 @@ public sealed class BillingWorkflowTests
         Assert.All(status.GetProperty("items").EnumerateArray(), item =>
         {
             Assert.Equal("succeeded", item.GetProperty("state").GetString());
-            Assert.Contains("?read=true", item.GetProperty("download").GetProperty("url").GetString());
+            Assert.Contains($"/api/v1/releases/{seeded.ProjectId}/downloads/", item.GetProperty("download").GetProperty("url").GetString());
         });
-        Assert.Contains("?read=true", status.GetProperty("export").GetProperty("url").GetString());
+        Assert.Contains($"/api/v1/releases/{seeded.ProjectId}/downloads/", status.GetProperty("export").GetProperty("url").GetString());
 
         var contentChange = await StartRender(client, seeded.ProjectId, "render-content-1", entitlementId, selected, "contentChange");
         Assert.Equal(HttpStatusCode.Accepted, contentChange.StatusCode);
@@ -479,7 +479,7 @@ public sealed class BillingWorkflowTests
         Assert.Equal(seeded.CleanAssetId, download.GetProperty("assetId").GetGuid());
         Assert.Equal(3000, download.GetProperty("width").GetInt32());
         Assert.Equal(3000, download.GetProperty("height").GetInt32());
-        Assert.Contains("?read=true", download.GetProperty("url").GetString());
+        Assert.Equal($"/api/v1/releases/{seeded.ProjectId}/downloads/{seeded.CleanAssetId}", download.GetProperty("url").GetString());
 
         var summary = await client.GetFromJsonAsync<JsonElement>("/api/v1/billing/summary");
         var entitlement = Assert.Single(summary.GetProperty("entitlements").EnumerateArray());

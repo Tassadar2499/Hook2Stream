@@ -18,6 +18,7 @@ fail_test() {
 environment_file=${temporary_dir}/deployment.env
 cat > "$environment_file" <<'EOF'
 API_IMAGE=registry.invalid/hook2stream-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+HOOK2STREAM_RELEASE_STATE_DIR=/srv/hook2stream/release-state
 EOF
 
 deployment_program=environment-override-preflight-test
@@ -44,5 +45,19 @@ if (COMPOSE_PROFILES=tools; export COMPOSE_PROFILES; \
 fi
 grep -F 'COMPOSE_PROFILES' "$override_output" >/dev/null \
     || fail_test "the rejected Compose control variable was not identified"
+
+if (HOOK2STREAM_RELEASE_STATE_DIR=/srv/hook2stream/release-state; export HOOK2STREAM_RELEASE_STATE_DIR; \
+    deployment_reject_compose_environment_overrides) >"$override_output" 2>&1; then
+    fail_test "an exported launcher release-state variable bypassed preflight"
+fi
+env -u HOOK2STREAM_RELEASE_STATE_DIR sh -c '
+  deployment_dir=$1
+  deployment_program=forced-child-regression
+  HOOK2STREAM_ENV_FILE=$2
+  export HOOK2STREAM_ENV_FILE
+  . "$deployment_dir/scripts/lib/deployment-common.sh"
+  deployment_reject_compose_environment_overrides
+' _ "$deployment_dir" "$environment_file" \
+    || fail_test "forced child env-unset boundary still exports a Compose override"
 
 printf '%s\n' "environment override preflight test: exported overrides are rejected"

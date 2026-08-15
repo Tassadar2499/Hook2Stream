@@ -13,7 +13,7 @@ namespace Hook2Stream.UnitTests;
 public sealed class S3ObjectStorageTests
 {
     [Fact]
-    public async Task Presigned_urls_are_created_by_the_public_client()
+    public void Raw_transport_uses_only_the_internal_endpoint()
     {
         var options = new StorageOptions
         {
@@ -23,39 +23,13 @@ public sealed class S3ObjectStorageTests
             AccessKey = "test-access-key",
             SecretKey = "test-secret-key"
         };
-        using var internalClient = S3ClientFactory.Create(options, usePublicServiceUrl: false);
-        using var publicPresigner = S3ClientFactory.Create(options, usePublicServiceUrl: true);
-        var storage = new S3ObjectStorage(
-            internalClient,
-            publicPresigner,
-            Options.Create(options),
-            Options.Create(new OperationalPolicyOptions()));
-
-        var upload = await storage.CreateUploadUrlAsync(
-            "w/workspace/p/project/source.mp3",
-            "audio/mpeg",
-            TimeSpan.FromMinutes(10),
-            CancellationToken.None);
-        var read = await storage.CreateReadUrlAsync(
-            "w/workspace/p/project/source.mp3",
-            TimeSpan.FromMinutes(10),
-            CancellationToken.None);
-        var multipartPart = await storage.CreateMultipartPartUploadUrlAsync(
-            "w/workspace/p/project/source.wav",
-            "upload-id",
-            2,
-            TimeSpan.FromMinutes(10),
-            CancellationToken.None);
-
-        Assert.Collection(
-            new[] { upload, read, multipartPart },
-            AssertPublicSignedUrl,
-            AssertPublicSignedUrl,
-            AssertPublicSignedUrl);
+        using var client = S3ClientFactory.Create(options);
+        var config = Assert.IsType<AmazonS3Config>(client.Config);
+        Assert.Equal("http://localhost:9000", new Uri(config.ServiceURL).GetLeftPart(UriPartial.Authority));
     }
 
     [Fact]
-    public void Registration_keeps_internal_operations_and_public_presigning_on_distinct_clients()
+    public void Registration_does_not_create_a_public_presigner()
     {
         var configuration = StorageConfiguration(
             serviceUrl: "http://localhost:9000",
@@ -68,20 +42,11 @@ public sealed class S3ObjectStorageTests
         using var provider = services.BuildServiceProvider();
 
         var internalClient = provider.GetRequiredService<IAmazonS3>();
-        var publicPresigner = provider.GetRequiredKeyedService<IAmazonS3>(
-            S3ClientFactory.PublicPresignerKey);
-
         var internalConfig = Assert.IsType<AmazonS3Config>(internalClient.Config);
-        var publicConfig = Assert.IsType<AmazonS3Config>(publicPresigner.Config);
         Assert.Equal(
             "http://localhost:9000",
             new Uri(internalConfig.ServiceURL).GetLeftPart(UriPartial.Authority));
-        Assert.Equal(
-            "http://127.0.0.1:9000",
-            new Uri(publicConfig.ServiceURL).GetLeftPart(UriPartial.Authority));
         Assert.True(internalConfig.UseHttp);
-        Assert.True(publicConfig.UseHttp);
-        Assert.NotSame(internalClient, publicPresigner);
     }
 
     [Theory]

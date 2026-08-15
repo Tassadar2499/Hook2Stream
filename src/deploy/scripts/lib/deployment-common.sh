@@ -180,10 +180,11 @@ deployment_required_secret_files() {
         stripe_secret_key \
         stripe_webhook_secret \
         openrouter_api_key \
+        media_keyring \
+        invited_emails \
         backup_s3_access_key \
         backup_s3_secret_key \
-        backup_encryption_key_id \
-        backup_encryption_passphrase
+        backup_age_recipient
     if [ "$(deployment_storage_mode)" = minio ]; then
         printf '%s\n' \
             minio_root_user \

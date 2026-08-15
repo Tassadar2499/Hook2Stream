@@ -36,6 +36,7 @@ public sealed class Hook2StreamApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Auth:Mode", "OAuth");
         builder.UseSetting("Storage:AccessKey", "test-access-key");
         builder.UseSetting("Storage:SecretKey", "test-secret-key");
+        builder.UseSetting("StorageEncryption:Mode", "Plaintext");
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<DbContextOptions<Hook2StreamDbContext>>();
@@ -89,6 +90,7 @@ internal sealed class TestAuthHandler(
 internal sealed class FakeObjectStorage : IObjectStorage
 {
     private readonly ConcurrentQueue<(string ObjectKey, string UploadId)> _abortedMultipartUploads = new();
+    private readonly ConcurrentDictionary<string, byte[]> _objects = new();
 
     public IReadOnlyCollection<(string ObjectKey, string UploadId)> AbortedMultipartUploads =>
         _abortedMultipartUploads.ToArray();
@@ -142,20 +144,24 @@ internal sealed class FakeObjectStorage : IObjectStorage
     }
 
     public Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken) =>
-        Task.FromResult<StorageObjectInfo?>(new StorageObjectInfo(1, "\"etag\"", "application/octet-stream"));
+        Task.FromResult<StorageObjectInfo?>(_objects.TryGetValue(objectKey, out var bytes)
+            ? new StorageObjectInfo(bytes.LongLength, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(), "application/octet-stream")
+            : new StorageObjectInfo(1, "etag", "application/octet-stream"));
 
     public Task DownloadAsync(
         string objectKey,
         string destinationPath,
         CancellationToken cancellationToken) =>
-        throw new NotSupportedException();
+        _objects.TryGetValue(objectKey, out var bytes)
+            ? File.WriteAllBytesAsync(destinationPath, bytes, cancellationToken)
+            : File.WriteAllBytesAsync(destinationPath, [0], cancellationToken);
 
     public Task UploadAsync(
         string objectKey,
         string sourcePath,
         string contentType,
         CancellationToken cancellationToken) =>
-        throw new NotSupportedException();
+        StoreAsync(objectKey, sourcePath, cancellationToken);
 
     public Task DeleteAsync(string objectKey, CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -166,4 +172,14 @@ internal sealed class FakeObjectStorage : IObjectStorage
     public Task DeleteAssetObjectsAsync(
         AssetStorageScope scope,
         CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public Task CopyToAsync(string objectKey, Stream destination, long offset, long? length, CancellationToken cancellationToken)
+    {
+        var bytes = _objects.TryGetValue(objectKey, out var stored) ? stored : new byte[] { 0 };
+        var count = checked((int)(length ?? bytes.LongLength - offset));
+        return destination.WriteAsync(bytes.AsMemory(checked((int)offset), count), cancellationToken).AsTask();
+    }
+
+    private async Task StoreAsync(string objectKey, string sourcePath, CancellationToken cancellationToken) =>
+        _objects[objectKey] = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
 }

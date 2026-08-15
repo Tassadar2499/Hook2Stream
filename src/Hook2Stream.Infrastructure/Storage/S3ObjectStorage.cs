@@ -4,24 +4,29 @@ using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Hook2Stream.Application;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Infrastructure.Storage;
 
+internal interface IRawObjectStorage
+{
+    Task EnsureBucketAsync(CancellationToken cancellationToken);
+    Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken);
+    Task DownloadAsync(string objectKey, string destinationPath, CancellationToken cancellationToken);
+    Task UploadAsync(string objectKey, string sourcePath, string contentType, CancellationToken cancellationToken);
+    Task CopyToAsync(string objectKey, Stream destination, long offset, long length, CancellationToken cancellationToken);
+    Task DeleteAsync(string objectKey, CancellationToken cancellationToken);
+    Task DeleteProjectObjectsAsync(ProjectStorageScope scope, CancellationToken cancellationToken);
+    Task DeleteAssetObjectsAsync(AssetStorageScope scope, CancellationToken cancellationToken);
+}
+
 public sealed class S3ObjectStorage(
     IAmazonS3 internalClient,
-    [FromKeyedServices(S3ClientFactory.PublicPresignerKey)]
-    IAmazonS3 publicPresigner,
     IOptions<StorageOptions> options,
-    IOptions<OperationalPolicyOptions> policyOptions) : IObjectStorage
+    IOptions<OperationalPolicyOptions> policyOptions) : IRawObjectStorage
 {
     private readonly StorageOptions _options = options.Value;
     private readonly OperationalPolicyOptions _policy = policyOptions.Value;
-    private readonly Protocol _publicProtocol =
-        new Uri(options.Value.PublicServiceUrl).Scheme == Uri.UriSchemeHttp
-            ? Protocol.HTTP
-            : Protocol.HTTPS;
 
     public async Task EnsureBucketAsync(CancellationToken cancellationToken)
     {
@@ -87,126 +92,6 @@ public sealed class S3ObjectStorage(
         }
     }
 
-    public Task<Uri> CreateUploadUrlAsync(
-        string objectKey,
-        string contentType,
-        TimeSpan lifetime,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var request = new GetPreSignedUrlRequest
-        {
-            BucketName = _options.Bucket,
-            Key = objectKey,
-            Verb = HttpVerb.PUT,
-            Protocol = _publicProtocol,
-            Expires = DateTime.UtcNow.Add(lifetime),
-            ContentType = contentType
-        };
-
-        return Task.FromResult(new Uri(publicPresigner.GetPreSignedURL(request)));
-    }
-
-    public Task<Uri> CreateReadUrlAsync(
-        string objectKey,
-        TimeSpan lifetime,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var request = new GetPreSignedUrlRequest
-        {
-            BucketName = _options.Bucket,
-            Key = objectKey,
-            Verb = HttpVerb.GET,
-            Protocol = _publicProtocol,
-            Expires = DateTime.UtcNow.Add(lifetime)
-        };
-
-        return Task.FromResult(new Uri(publicPresigner.GetPreSignedURL(request)));
-    }
-
-    public async Task<Hook2Stream.Application.MultipartUpload> CreateMultipartUploadAsync(
-        string objectKey,
-        string contentType,
-        CancellationToken cancellationToken)
-    {
-        var response = await internalClient.InitiateMultipartUploadAsync(
-            new InitiateMultipartUploadRequest
-            {
-                BucketName = _options.Bucket,
-                Key = objectKey,
-                ContentType = contentType
-            },
-            cancellationToken);
-
-        return new Hook2Stream.Application.MultipartUpload(response.UploadId);
-    }
-
-    public Task<Uri> CreateMultipartPartUploadUrlAsync(
-        string objectKey,
-        string uploadId,
-        int partNumber,
-        TimeSpan lifetime,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var request = new GetPreSignedUrlRequest
-        {
-            BucketName = _options.Bucket,
-            Key = objectKey,
-            Verb = HttpVerb.PUT,
-            Protocol = _publicProtocol,
-            Expires = DateTime.UtcNow.Add(lifetime),
-            UploadId = uploadId,
-            PartNumber = partNumber
-        };
-
-        return Task.FromResult(new Uri(publicPresigner.GetPreSignedURL(request)));
-    }
-
-    public async Task CompleteMultipartUploadAsync(
-        string objectKey,
-        string uploadId,
-        IReadOnlyList<MultipartPart> parts,
-        CancellationToken cancellationToken)
-    {
-        var request = new CompleteMultipartUploadRequest
-        {
-            BucketName = _options.Bucket,
-            Key = objectKey,
-            UploadId = uploadId,
-            PartETags = parts
-                .OrderBy(part => part.PartNumber)
-                .Select(part => new PartETag(part.PartNumber, part.ETag))
-                .ToList()
-        };
-
-        await internalClient.CompleteMultipartUploadAsync(request, cancellationToken);
-    }
-
-    public async Task AbortMultipartUploadAsync(
-        string objectKey,
-        string uploadId,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await internalClient.AbortMultipartUploadAsync(
-                new AbortMultipartUploadRequest
-                {
-                    BucketName = _options.Bucket,
-                    Key = objectKey,
-                    UploadId = uploadId
-                },
-                cancellationToken);
-        }
-        catch (AmazonS3Exception exception) when (
-            exception.StatusCode == HttpStatusCode.NotFound ||
-            string.Equals(exception.ErrorCode, "NoSuchUpload", StringComparison.Ordinal))
-        {
-            // Retention and deletion jobs are intentionally retryable.
-        }
-    }
 
     public async Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken)
     {
@@ -267,6 +152,20 @@ public sealed class S3ObjectStorage(
                 AutoCloseStream = true
             },
             cancellationToken);
+    }
+
+    public async Task CopyToAsync(string objectKey, Stream destination, long offset, long length, CancellationToken cancellationToken)
+    {
+        if (length == 0) return;
+        using var response = await internalClient.GetObjectAsync(
+            new GetObjectRequest
+            {
+                BucketName = _options.Bucket,
+                Key = objectKey,
+                ByteRange = new ByteRange(offset, offset + length - 1)
+            },
+            cancellationToken);
+        await response.ResponseStream.CopyToAsync(destination, cancellationToken);
     }
 
     public Task DeleteAsync(string objectKey, CancellationToken cancellationToken) =>
@@ -360,11 +259,9 @@ public sealed class S3ObjectStorage(
 
 internal static class S3ClientFactory
 {
-    internal const string PublicPresignerKey = "hook2stream-public-s3-presigner";
-
-    internal static IAmazonS3 Create(StorageOptions options, bool usePublicServiceUrl)
+    internal static IAmazonS3 Create(StorageOptions options)
     {
-        var serviceUrl = usePublicServiceUrl ? options.PublicServiceUrl : options.ServiceUrl;
+        var serviceUrl = options.ServiceUrl;
         var config = new AmazonS3Config
         {
             ServiceURL = serviceUrl,

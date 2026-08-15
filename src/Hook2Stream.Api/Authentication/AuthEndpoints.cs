@@ -73,6 +73,7 @@ public static class AuthEndpoints
         HttpRequest httpRequest,
         HttpResponse httpResponse,
         IOptions<GoogleOAuthOptions> googleOptions,
+        IOptions<ApplicationAuthenticationOptions> authenticationOptions,
         IGoogleOAuthClient googleClient,
         OAuthCookieManager cookieManager,
         OAuthSessionService sessionService,
@@ -147,6 +148,10 @@ public static class AuthEndpoints
             cancellationToken);
         if (user is null)
         {
+            var access = authenticationOptions.Value;
+            if (access.InviteOnly && !access.IsInvited(email))
+                return RedirectToSignIn(redirectBase, "invite_required");
+
             user = new AppUser
             {
                 ExternalSubject = externalSubject,

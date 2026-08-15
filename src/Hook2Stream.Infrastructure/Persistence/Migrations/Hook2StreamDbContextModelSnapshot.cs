@@ -2775,6 +2775,74 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                     b.ToTable("transcript_revisions", (string)null);
                 });
 
+            modelBuilder.Entity("Hook2Stream.Domain.UploadPart", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<string>("ObjectKey")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("object_key");
+
+                    b.Property<int>("PartNumber")
+                        .HasColumnType("integer")
+                        .HasColumnName("part_number");
+
+                    b.Property<long>("PlaintextLength")
+                        .HasColumnType("bigint")
+                        .HasColumnName("plaintext_length");
+
+                    b.Property<string>("PlaintextSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("plaintext_sha256");
+
+                    b.Property<int>("State")
+                        .HasColumnType("integer")
+                        .HasColumnName("state");
+
+                    b.Property<string>("StorageETag")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("storage_e_tag");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid>("UploadSessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("upload_session_id");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id")
+                        .HasName("pk_upload_parts");
+
+                    b.HasIndex("UploadSessionId", "PartNumber")
+                        .IsUnique()
+                        .HasDatabaseName("ix_upload_parts_upload_session_id_part_number");
+
+                    b.ToTable("upload_parts", (string)null);
+                });
+
             modelBuilder.Entity("Hook2Stream.Domain.UploadSession", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3094,6 +3162,18 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                     b.Navigation("Project");
                 });
 
+            modelBuilder.Entity("Hook2Stream.Domain.UploadPart", b =>
+                {
+                    b.HasOne("Hook2Stream.Domain.UploadSession", "UploadSession")
+                        .WithMany("Parts")
+                        .HasForeignKey("UploadSessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_upload_parts_upload_sessions_upload_session_id");
+
+                    b.Navigation("UploadSession");
+                });
+
             modelBuilder.Entity("Hook2Stream.Domain.UploadSession", b =>
                 {
                     b.HasOne("Hook2Stream.Domain.MediaAsset", "Asset")
@@ -3151,6 +3231,11 @@ namespace Hook2Stream.Infrastructure.Persistence.Migrations
                     b.Navigation("PipelineRuns");
 
                     b.Navigation("RightsAttestation");
+                });
+
+            modelBuilder.Entity("Hook2Stream.Domain.UploadSession", b =>
+                {
+                    b.Navigation("Parts");
                 });
 
             modelBuilder.Entity("Hook2Stream.Domain.Workspace", b =>

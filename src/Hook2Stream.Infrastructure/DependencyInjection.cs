@@ -74,11 +74,30 @@ public static class DependencyInjection
                            options.BrowserUploadOrigins.All(origin =>
                                IsValidBrowserOrigin(origin, environment.IsProduction())),
                 "Storage BrowserUploadOrigins must contain absolute HTTPS origins without paths in Production.")
+            .Validate(options => !options.ConfigureBucketCors,
+                "Browser bucket CORS is forbidden when the same-origin encrypted gateway is enabled.")
             .ValidateOnStart();
 
         services.AddOptions<MediaToolsOptions>()
             .Bind(configuration.GetSection(MediaToolsOptions.SectionName))
             .Validate(options => options.ProcessTimeoutSeconds is >= 10 and <= 900, "Media process timeout is out of range.")
+            .ValidateOnStart();
+
+        services.AddOptions<StorageEncryptionOptions>()
+            .Bind(configuration.GetSection(StorageEncryptionOptions.SectionName))
+            .Validate(options => environment.IsDevelopment() || environment.IsEnvironment("Testing") ||
+                                 options.Mode == StorageEncryptionMode.H2se,
+                "StorageEncryption:Mode=Plaintext is allowed only in Development and Testing.")
+            .Validate(options => options.Mode != StorageEncryptionMode.H2se || H2seKeyring.IsValid(options.KeyringPath),
+                "H2SE requires a readable valid keyring with an active 256-bit KEK.")
+            .Validate(options => options.ChunkSizeBytes == 1024 * 1024,
+                "H2SE v1 requires 1-MiB chunks.")
+            .Validate(options => options.MaxConcurrentEncryptions is >= 1 and <= 8,
+                "At most eight concurrent H2SE encryptions are allowed.")
+            .Validate(options => options.MaxConcurrentDownloads is >= 1 and <= 4,
+                "At most four concurrent H2SE downloads are allowed.")
+            .Validate(options => !options.AllowLegacyPlaintextReads,
+                "Greenfield deployments must set AllowLegacyPlaintextReads=false.")
             .ValidateOnStart();
 
         services.AddOptions<OperationalPolicyOptions>()
@@ -137,15 +156,19 @@ public static class DependencyInjection
 
         services.AddSingleton<IAmazonS3>(serviceProvider =>
             S3ClientFactory.Create(
-                serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value,
-                usePublicServiceUrl: false));
-        services.AddKeyedSingleton<IAmazonS3>(
-            S3ClientFactory.PublicPresignerKey,
-            (serviceProvider, _) => S3ClientFactory.Create(
-                serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value,
-                usePublicServiceUrl: true));
+                serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value));
 
-        services.AddScoped<IObjectStorage, S3ObjectStorage>();
+        // Storage is stateless apart from the process-wide H2SE keyring and
+        // concurrency gates. Singleton lifetime makes the configured 8/4
+        // limits real process ceilings instead of per-request semaphores.
+        services.AddSingleton<IRawObjectStorage, S3ObjectStorage>();
+        services.AddSingleton<IH2seConcurrencyGate, PostgresH2seConcurrencyGate>();
+        services.AddSingleton<H2seEncryptedObjectStorage>();
+        services.AddSingleton<PlaintextObjectStorage>();
+        services.AddSingleton<IObjectStorage>(provider =>
+            provider.GetRequiredService<IOptions<StorageEncryptionOptions>>().Value.Mode == StorageEncryptionMode.H2se
+                ? provider.GetRequiredService<H2seEncryptedObjectStorage>()
+                : provider.GetRequiredService<PlaintextObjectStorage>());
         services.AddSingleton<IAiProviderInvocationWriter, AiProviderInvocationWriter>();
         services.AddScoped<IJobQueue, PostgresJobQueue>();
         services.AddSingleton<IProcessRunner, SafeProcessRunner>();

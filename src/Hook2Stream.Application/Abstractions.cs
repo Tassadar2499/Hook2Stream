@@ -61,6 +61,15 @@ public interface IObjectStorage
     Task DeleteAssetObjectsAsync(
         AssetStorageScope scope,
         CancellationToken cancellationToken);
+
+    /// <summary>Copies plaintext bytes from a logical encrypted object.</summary>
+    Task CopyToAsync(
+        string objectKey,
+        Stream destination,
+        long offset,
+        long? length,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("Streaming reads are not supported by this storage implementation.");
 }
 
 public sealed record LeasedJob(

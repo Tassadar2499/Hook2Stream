@@ -15,20 +15,16 @@ read_secret() {
     printf '%s' "$secret_value"
 }
 
-read_key_id() {
-    key_id=$(read_secret "$1")
-    case "$key_id" in
-        [A-Za-z0-9]*) ;;
-        *) fail "backup encryption key ID must start with an ASCII letter or digit" ;;
+read_age_recipient() {
+    age_recipient=$(read_secret "$1")
+    case "$age_recipient" in
+        age1[0-9a-z]*) ;;
+        *) fail "backup age recipient must be a public X25519 age1 recipient" ;;
     esac
-    case "$key_id" in
-        *[!A-Za-z0-9._-]*)
-            fail "backup encryption key ID may contain only ASCII letters, digits, '.', '_', and '-'"
-            ;;
+    case "$age_recipient" in
+        *[!0-9a-z]*) fail "backup age recipient contains invalid characters" ;;
     esac
-    [ "${#key_id}" -le 64 ] \
-        || fail "backup encryption key ID must not exceed 64 characters"
-    printf '%s' "$key_id"
+    printf '%s' "$age_recipient"
 }
 
 aws_command() {
@@ -109,7 +105,6 @@ cleanup() {
         "${encrypted_file:-}" \
         "${checksum_file:-}" \
         "${manifest_file:-}" \
-        "${passphrase_snapshot_file:-}" \
         "${pgpass_file:-}" \
         "${versions_file:-}" \
         "${expired_versions_file:-}" \
@@ -125,7 +120,9 @@ on_signal() {
 
 purge_expired_versions() {
     retention_seconds=$((BACKUP_RETENTION_DAYS * 86400))
-    purge_age_seconds=$((retention_seconds - BACKUP_RETENTION_SAFETY_SECONDS))
+    # Never purge before the advertised retention window. The extra safety
+    # interval absorbs clock skew and a delayed hourly run.
+    purge_age_seconds=$((retention_seconds + BACKUP_RETENTION_SAFETY_SECONDS))
     cutoff_epoch=$(($(date -u +%s) - purge_age_seconds))
     cutoff_timestamp=$(date -u -d "@${cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)
     versions_file=/tmp/backup-object-versions.json
@@ -168,12 +165,12 @@ perform_backup() {
         *) fail "could not generate a collision-resistant backup run ID" ;;
     esac
     date_path=$(printf '%s' "${created_at%%T*}" | tr '-' '/')
-    encryption_key_id=$(read_key_id "$BACKUP_ENCRYPTION_KEY_ID_FILE")
-    base_name="${POSTGRES_DB}-${timestamp}-${run_id}-key-${encryption_key_id}.dump.enc"
+    age_recipient=$(read_age_recipient "$BACKUP_AGE_RECIPIENT_FILE")
+    recipient_fingerprint=$(printf '%s' "$age_recipient" | sha256sum | cut -c1-16)
+    base_name="${POSTGRES_DB}-${timestamp}-${run_id}-age-${recipient_fingerprint}.dump.age"
     encrypted_file="/tmp/${base_name}"
     checksum_file="${encrypted_file}.sha256"
     manifest_file="${encrypted_file}.manifest.json"
-    passphrase_snapshot_file=/tmp/.backup-encryption-passphrase
     pgpass_file="/tmp/.pgpass"
     object_prefix=${BACKUP_S3_PREFIX%/}
     object_key="${object_prefix}/${date_path}/${base_name}"
@@ -181,15 +178,13 @@ perform_backup() {
     manifest_object_key="${object_key}.manifest.json"
 
     postgres_password=$(read_secret "$POSTGRES_PASSWORD_FILE")
-    backup_encryption_passphrase=$(read_secret "$BACKUP_ENCRYPTION_PASSPHRASE_FILE")
     escaped_postgres_password=$(printf '%s' "$postgres_password" \
         | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g')
     umask 077
-    printf '%s' "$backup_encryption_passphrase" > "$passphrase_snapshot_file"
     printf '%s:%s:%s:%s:%s\n' \
         "$POSTGRES_HOST" "$POSTGRES_PORT" "$POSTGRES_DB" "$POSTGRES_USER" "$escaped_postgres_password" \
         > "$pgpass_file"
-    unset postgres_password escaped_postgres_password backup_encryption_passphrase
+    unset postgres_password escaped_postgres_password
     export PGPASSFILE=$pgpass_file
 
     printf '%s\n' "postgres backup: creating encrypted logical backup at ${timestamp}"
@@ -202,11 +197,7 @@ perform_backup() {
         --compress 9 \
         --no-owner \
         --no-privileges \
-        | openssl enc -aes-256-cbc -salt -pbkdf2 \
-            -md sha256 \
-            -iter "$BACKUP_KDF_ITERATIONS" \
-            -pass "file:${passphrase_snapshot_file}" \
-            -out "$encrypted_file"
+        | age --recipient "$age_recipient" --output "$encrypted_file"
 
     [ -s "$encrypted_file" ] || fail "pg_dump produced an empty backup"
     (
@@ -219,21 +210,19 @@ perform_backup() {
         --arg kind "hook2stream-postgresql-logical-backup" \
         --arg createdAt "$created_at" \
         --arg database "$POSTGRES_DB" \
-        --arg keyId "$encryption_key_id" \
+        --arg recipientFingerprint "$recipient_fingerprint" \
         --arg dumpObjectKey "$object_key" \
         --arg checksumObjectKey "$checksum_object_key" \
         --arg ciphertextSha256 "$ciphertext_sha256" \
-        --argjson kdfIterations "$BACKUP_KDF_ITERATIONS" \
         '{
-            schemaVersion: 1,
+            schemaVersion: 2,
             kind: $kind,
             createdAt: $createdAt,
             database: $database,
             encryption: {
-                keyId: $keyId,
-                cipher: "aes-256-cbc",
-                kdf: "pbkdf2-hmac-sha256",
-                kdfIterations: $kdfIterations
+                format: "age",
+                recipientType: "X25519",
+                recipientFingerprint: $recipientFingerprint
             },
             encryptedDump: {
                 objectKey: $dumpObjectKey,
@@ -256,7 +245,7 @@ perform_backup() {
     success_marker_tmp="${BACKUP_SUCCESS_MARKER}.tmp"
     {
         date -u +%s
-        printf '%s\n' "$encryption_key_id"
+        printf '%s\n' "$recipient_fingerprint"
     } > "$success_marker_tmp"
     mv -f "$success_marker_tmp" "$BACKUP_SUCCESS_MARKER"
     printf '%s\n' \
@@ -276,22 +265,19 @@ perform_backup() {
 : "${BACKUP_S3_PREFIX:=hook2stream/production/postgres}"
 : "${BACKUP_S3_ACCESS_KEY_FILE:?BACKUP_S3_ACCESS_KEY_FILE is required}"
 : "${BACKUP_S3_SECRET_KEY_FILE:?BACKUP_S3_SECRET_KEY_FILE is required}"
-: "${BACKUP_ENCRYPTION_PASSPHRASE_FILE:?BACKUP_ENCRYPTION_PASSPHRASE_FILE is required}"
-: "${BACKUP_ENCRYPTION_KEY_ID_FILE:?BACKUP_ENCRYPTION_KEY_ID_FILE is required}"
+: "${BACKUP_AGE_RECIPIENT_FILE:?BACKUP_AGE_RECIPIENT_FILE is required}"
 : "${BACKUP_INTERVAL_SECONDS:=3600}"
 : "${BACKUP_RETENTION_DAYS:=35}"
 : "${BACKUP_RETENTION_SAFETY_SECONDS:=7200}"
-: "${BACKUP_KDF_ITERATIONS:=200000}"
 : "${BACKUP_SUCCESS_MARKER:=/tmp/last-successful-backup}"
 : "${BACKUP_HEARTBEAT_URL_FILE:=}"
 
 for integer_value in \
     "$BACKUP_INTERVAL_SECONDS" \
     "$BACKUP_RETENTION_DAYS" \
-    "$BACKUP_RETENTION_SAFETY_SECONDS" \
-    "$BACKUP_KDF_ITERATIONS"; do
+    "$BACKUP_RETENTION_SAFETY_SECONDS"; do
     case "$integer_value" in
-        *[!0-9]*|'') fail "backup interval, retention, safety, and KDF values must be integers" ;;
+        *[!0-9]*|'') fail "backup interval, retention, and safety values must be integers" ;;
     esac
 done
 [ "$BACKUP_INTERVAL_SECONDS" -ge 300 ] || fail "BACKUP_INTERVAL_SECONDS must be at least 300"
@@ -299,10 +285,8 @@ done
 retention_seconds=$((BACKUP_RETENTION_DAYS * 86400))
 [ "$BACKUP_RETENTION_SAFETY_SECONDS" -ge "$BACKUP_INTERVAL_SECONDS" ] \
     || fail "BACKUP_RETENTION_SAFETY_SECONDS must cover at least one backup interval"
-[ "$BACKUP_RETENTION_SAFETY_SECONDS" -lt "$retention_seconds" ] \
-    || fail "BACKUP_RETENTION_SAFETY_SECONDS must be shorter than retention"
-[ "$BACKUP_KDF_ITERATIONS" -ge 100000 ] \
-    || fail "BACKUP_KDF_ITERATIONS must be at least 100000"
+[ "$BACKUP_RETENTION_SAFETY_SECONDS" -le 86400 ] \
+    || fail "BACKUP_RETENTION_SAFETY_SECONDS must be at most one day"
 
 export AWS_ACCESS_KEY_ID
 AWS_ACCESS_KEY_ID=$(read_secret "$BACKUP_S3_ACCESS_KEY_FILE")

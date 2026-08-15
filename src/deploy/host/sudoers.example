@@ -1,0 +1,2 @@
+Defaults:hook2stream-deploy env_keep += "SSH_ORIGINAL_COMMAND"
+hook2stream-deploy ALL=(root) NOPASSWD: /usr/local/sbin/hook2stream-deploy-launcher

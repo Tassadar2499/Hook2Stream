@@ -138,7 +138,8 @@ public sealed record UploadSessionResponse(
     long PartSizeBytes,
     int PartCount,
     DateTimeOffset UrlExpiresAt,
-    DateTimeOffset SessionExpiresAt)
+    DateTimeOffset SessionExpiresAt,
+    IReadOnlyList<UploadPartReceiptResponse>? CompletedParts = null)
 {
     public Guid Id => SessionId;
 
@@ -151,15 +152,19 @@ public sealed record UploadPartRequest(int PartNumber);
 
 public sealed record UploadPartResponse(
     int PartNumber,
-    string UploadUrl,
-    DateTimeOffset UrlExpiresAt)
-{
-    public DateTimeOffset ExpiresAt => UrlExpiresAt;
-}
+    long PlaintextLength,
+    string Sha256,
+    string ETag);
+
+public sealed record UploadPartReceiptResponse(
+    int PartNumber,
+    long PlaintextLength,
+    string Sha256,
+    string ETag);
 
 public sealed record CompletedPartRequest(int PartNumber, string ETag);
 
-public sealed record CompleteUploadRequest(IReadOnlyList<CompletedPartRequest> Parts);
+public sealed record CompleteUploadRequest(IReadOnlyList<CompletedPartRequest>? Parts = null);
 
 public sealed record CompleteUploadResponse(Guid AssetId, Guid JobId);
 

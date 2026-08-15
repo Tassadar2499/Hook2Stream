@@ -27,6 +27,19 @@ public enum StorageCredentialMode
     DefaultChain
 }
 
+public sealed class StorageEncryptionOptions
+{
+    public const string SectionName = "StorageEncryption";
+    public string KeyringPath { get; set; } = "";
+    public StorageEncryptionMode Mode { get; set; } = StorageEncryptionMode.Plaintext;
+    public bool AllowLegacyPlaintextReads { get; set; }
+    public int ChunkSizeBytes { get; set; } = 1024 * 1024;
+    public int MaxConcurrentEncryptions { get; set; } = 8;
+    public int MaxConcurrentDownloads { get; set; } = 4;
+}
+
+public enum StorageEncryptionMode { Plaintext, H2se }
+
 internal sealed class DatabaseConnectionOptions
 {
     public string ConnectionString { get; set; } = "";

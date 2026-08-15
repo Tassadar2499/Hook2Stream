@@ -7,11 +7,12 @@ import {
   AssetKind,
   CompleteUpload,
   Job,
-  UploadPart,
   UploadSession,
   apiFetch,
+  apiUploadPart,
   streamJobEvents,
 } from "@/lib/api";
+import { validateResumedUploadParts } from "@/lib/direct-upload";
 
 type UploadManagerProps = {
   projectId: string;
@@ -78,7 +79,22 @@ export function UploadManager({
 
   async function uploadOne(file: File, signal: AbortSignal) {
     const token = await requireToken();
-    const storageKey = `hook2stream-upload:${projectId}:${kind}:${file.name}:${file.size}`;
+    const storageKey = `hook2stream-upload:${projectId}:${kind}:${file.name}:${file.size}:${file.lastModified}`;
+    const createSession = async () => (
+      await apiFetch<UploadSession>(
+        `/api/v1/releases/${projectId}/uploads`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            kind,
+            fileName: file.name,
+            contentType: file.type || inferContentType(file.name),
+            sizeBytes: file.size,
+          }),
+        },
+      )
+    ).data;
     let session: UploadSession | undefined;
     const storedSessionId = window.localStorage.getItem(storageKey);
 
@@ -97,21 +113,7 @@ export function UploadManager({
     }
 
     if (!session) {
-      session = (
-        await apiFetch<UploadSession>(
-          `/api/v1/releases/${projectId}/uploads`,
-          token,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              kind,
-              fileName: file.name,
-              contentType: file.type || inferContentType(file.name),
-              sizeBytes: file.size,
-            }),
-          },
-        )
-      ).data;
+      session = await createSession();
       window.localStorage.setItem(storageKey, session.sessionId);
     }
 
@@ -119,9 +121,27 @@ export function UploadManager({
     setProgress(0);
     setStage(session.multipart ? "Uploading multipart media" : "Uploading media");
 
-    const completedParts = session.multipart
-      ? await uploadMultipart(session, file, token, signal)
-      : await uploadSingle(session, file, signal);
+    let completedParts;
+    try {
+      completedParts = await uploadMultipart(session, file, token, signal);
+    } catch (caught) {
+      if (!(caught instanceof ApiRequestError) ||
+          !["upload.resume_hash_conflict", "upload.part_hash_conflict"].includes(caught.code)) {
+        throw caught;
+      }
+      try {
+        await apiFetch<void>(`/api/v1/uploads/${session.sessionId}/abort`, token, { method: "POST" });
+      } catch {
+        // The bounded retention cleanup remains the safety net for the stale session.
+      }
+      window.localStorage.removeItem(storageKey);
+      session = await createSession();
+      window.localStorage.setItem(storageKey, session.sessionId);
+      setSessionId(session.sessionId);
+      setProgress(0);
+      setStage(`Starting a new secure upload for ${file.name}`);
+      completedParts = await uploadMultipart(session, file, token, signal);
+    }
 
     setStage("Verifying upload");
     const accepted = (
@@ -140,32 +160,21 @@ export function UploadManager({
     window.localStorage.removeItem(storageKey);
   }
 
-  async function uploadSingle(
-    session: UploadSession,
-    file: File,
-    signal: AbortSignal,
-  ) {
-    if (!session.uploadUrl) {
-      throw new Error("The single-part upload URL is missing.");
-    }
-    await putBlob(
-      session.uploadUrl,
-      file,
-      file.type || inferContentType(file.name),
-      (uploaded) => setProgress(Math.round((uploaded / file.size) * 70)),
-      signal,
-    );
-    return [] as Array<{ partNumber: number; eTag: string }>;
-  }
-
   async function uploadMultipart(
     session: UploadSession,
     file: File,
     token: string,
     signal: AbortSignal,
   ) {
-    const completed: Array<{ partNumber: number; eTag: string }> = [];
+    await validateResumedUploadParts(session, file, signal);
+    const resumed = new Map(
+      (session.completedParts ?? []).map((part) => [Number(part.partNumber), part]),
+    );
+    const completed: Array<{ partNumber: number; eTag: string }> = Array.from(resumed.values()).map(
+      (part) => ({ partNumber: Number(part.partNumber), eTag: part.eTag }),
+    );
     const uploadedByPart = new Map<number, number>();
+    resumed.forEach((part, number) => uploadedByPart.set(number, Number(part.plaintextLength)));
     const partCount = Number(session.partCount);
     const partSizeBytes = Number(session.partSizeBytes);
     let nextPart = 1;
@@ -173,6 +182,7 @@ export function UploadManager({
     async function worker() {
       while (nextPart <= partCount) {
         const partNumber = nextPart++;
+        if (resumed.has(partNumber)) continue;
         const start = (partNumber - 1) * partSizeBytes;
         const end = Math.min(file.size, start + partSizeBytes);
         const blob = file.slice(start, end);
@@ -180,20 +190,11 @@ export function UploadManager({
         let lastError: unknown;
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
-            const signed = (
-              await apiFetch<UploadPart>(
-                `/api/v1/uploads/${session.sessionId}/parts`,
-                token,
-                {
-                  method: "POST",
-                  body: JSON.stringify({ partNumber }),
-                },
-              )
-            ).data;
-            const eTag = await putBlob(
-              signed.uploadUrl,
+            const receipt = await apiUploadPart(
+              session.sessionId,
+              partNumber,
               blob,
-              file.type || inferContentType(file.name),
+              token,
               (uploaded) => {
                 uploadedByPart.set(partNumber, uploaded);
                 const total = Array.from(uploadedByPart.values()).reduce(
@@ -204,11 +205,12 @@ export function UploadManager({
               },
               signal,
             );
-            completed.push({ partNumber, eTag });
+            completed.push({ partNumber, eTag: receipt.eTag });
             lastError = undefined;
             break;
           } catch (caught) {
             lastError = caught;
+            if (caught instanceof ApiRequestError && caught.status === 409) throw caught;
             if (attempt < 3) {
               await wait(500 * attempt, signal);
             }
@@ -346,32 +348,6 @@ export function UploadManager({
       ) : null}
     </section>
   );
-}
-
-function putBlob(
-  url: string,
-  body: Blob,
-  contentType: string,
-  onProgress: (uploadedBytes: number) => void,
-  signal: AbortSignal,
-) {
-  return new Promise<string>((resolve, reject) => {
-    const request = new XMLHttpRequest();
-    request.open("PUT", url);
-    request.setRequestHeader("Content-Type", contentType);
-    request.upload.onprogress = (event) => onProgress(event.loaded);
-    request.onload = () => {
-      if (request.status >= 200 && request.status < 300) {
-        resolve(request.getResponseHeader("ETag") ?? "");
-      } else {
-        reject(new Error(`Object storage returned ${request.status}.`));
-      }
-    };
-    request.onerror = () => reject(new Error("Object storage upload failed."));
-    request.onabort = () => reject(new DOMException("Upload aborted.", "AbortError"));
-    signal.addEventListener("abort", () => request.abort(), { once: true });
-    request.send(body);
-  });
 }
 
 function wait(milliseconds: number, signal: AbortSignal) {

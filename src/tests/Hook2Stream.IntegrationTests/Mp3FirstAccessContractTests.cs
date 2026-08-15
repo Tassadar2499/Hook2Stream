@@ -254,7 +254,7 @@ public sealed class Mp3FirstAccessContractTests
         owned.EnsureSuccessStatusCode();
         var readUrl = await owned.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(assetId, readUrl.GetProperty("assetId").GetGuid());
-        Assert.Contains("read=true", readUrl.GetProperty("url").GetString(), StringComparison.Ordinal);
+        Assert.Equal($"/api/v1/releases/{projectId}/assets/{assetId}/content", readUrl.GetProperty("url").GetString());
 
         client.DefaultRequestHeaders.Remove("X-Test-Subject");
         client.DefaultRequestHeaders.Add("X-Test-Subject", "asset-stranger");

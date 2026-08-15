@@ -136,6 +136,7 @@ else
         .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
 }
 bootstrapper
+    .WithEnvironment("StorageEncryption__Mode", "Plaintext")
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
@@ -163,6 +164,7 @@ else
         .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
 }
 api
+    .WithEnvironment("StorageEncryption__Mode", "Plaintext")
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
@@ -196,6 +198,7 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
         .WithReference(database)
         .WithHttpEndpoint(name: "http")
         .WithEnvironment("DOTNET_ENVIRONMENT", childEnvironment);
+    worker.WithEnvironment("StorageEncryption__Mode", "Plaintext");
     if (isE2e)
     {
         worker

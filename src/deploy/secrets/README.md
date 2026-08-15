@@ -14,10 +14,11 @@ equivalent root-owned directory outside the checkout:
 | `stripe_secret_key` | API Stripe client |
 | `stripe_webhook_secret` | API webhook verification |
 | `openrouter_api_key` | control worker only |
+| `media_keyring` | API and workers; H2SE v1 KEK keyring, JSON, fail-closed |
+| `invited_emails` | API invite allowlist; newline-delimited emails, `#` comments allowed |
 | `backup_s3_access_key` | PostgreSQL backup access-key ID |
 | `backup_s3_secret_key` | PostgreSQL backup bucket only |
-| `backup_encryption_key_id` | stable identifier recorded with new backups |
-| `backup_encryption_passphrase` | client-side backup encryption |
+| `backup_age_recipient` | public `age1...` recipient whose private recovery key is off-host |
 | `backup_heartbeat_url` | PostgreSQL backup success monitor; may be empty to disable |
 | `minio_root_user` | MinIO server and one-shot initializer only; required when `STORAGE_MODE=minio` |
 | `minio_root_password` | MinIO server and one-shot initializer only; required when `STORAGE_MODE=minio` |
@@ -40,7 +41,9 @@ sudo install -o root -g 2000 -m 0640 /dev/null \
 Create the other files with the same ownership and mode, then write their values
 through a root shell without echoing them to terminal history. Generate local
 values with a cryptographic RNG: use at least 32 random bytes for the PostgreSQL
-password and at least 48 random bytes for the backup encryption passphrase.
+password. Generate the age identity on the operator recovery
+device, copy only its public recipient to the host, and keep the private identity
+outside the VPS and Object Storage.
 Supply externally issued provider secrets unchanged. Never commit or copy these
 files into an image.
 

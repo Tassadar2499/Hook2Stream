@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+# Install an environment-specific implementation as root mode 0500 at the path
+# configured by HOOK2STREAM_AUTHENTICATED_E2E_HOOK. It must use root-managed
+# test credentials without printing them and must cover:
+# - invite-only Google OAuth;
+# - MP3 upload plus H2SE decrypt and HTTP Range seek;
+# - every worker and OpenRouter analysis/artwork;
+# - preview, 18 renders and ZIP export;
+# - Stripe test/live controlled checkout and duplicate webhook handling.
+# - allowed provider egress succeeds and an unrelated HTTPS origin is denied.
+#
+# This repository template deliberately fails closed. Only after every check
+# succeeds may the installed implementation print the exact single line below.
+printf '%s\n' "authenticated E2E: replace this fail-closed template" >&2
+exit 1
+
+# HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-idempotency,egress-deny

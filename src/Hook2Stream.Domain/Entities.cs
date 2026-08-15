@@ -178,6 +178,19 @@ public sealed class UploadSession : Entity
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public DateTimeOffset? AbortedAt { get; set; }
+    public List<UploadPart> Parts { get; set; } = [];
+}
+
+public sealed class UploadPart : Entity
+{
+    public Guid UploadSessionId { get; set; }
+    public UploadSession UploadSession { get; set; } = null!;
+    public int PartNumber { get; set; }
+    public long PlaintextLength { get; set; }
+    public required string PlaintextSha256 { get; set; }
+    public required string StorageETag { get; set; }
+    public required string ObjectKey { get; set; }
+    public UploadPartState State { get; set; } = UploadPartState.Stored;
 }
 
 public sealed class Job : Entity

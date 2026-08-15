@@ -1,4 +1,11 @@
-# Hook2Stream single-node closed-alpha bundle
+# Hook2Stream single-node deployment bundle
+
+The current staging/production operating contract is
+`docs/operations/hook2stream-mvp-runbook.md` from the repository root. It
+supersedes older provider sizing, plaintext-MinIO staging, browser CORS, and
+AES/passphrase backup guidance retained later in this historical README. MinIO
+remains a local/CI overlay only; both deployed environments use private Hetzner
+Object Storage, H2SE v1 media encryption, and age-encrypted PostgreSQL backups.
 
 This directory is the budget deployment for one Linux host (for example a
 Hetzner Cloud VM) plus external S3-compatible object storage. Caddy is the only
@@ -203,8 +210,9 @@ sudo env \
 ```
 
 Use the same command for upgrades. The script records the previous environment
-under the configured release-state directory and prints the rollback command;
-rollback changes image digests only and never runs a down-migration.
+under the configured release-state directory. CI-managed staging/production
+rollback must use the forced command described below: it changes only API,
+worker and web digests and never runs the bootstrapper or a migration.
 
 ## One-time setup for the external-S3 alpha
 
@@ -500,19 +508,24 @@ Never test `--clean` against the production database.
 
 After each success, the release script stores `last-successful.env` under
 `HOOK2STREAM_RELEASE_STATE_DIR` (or under local `.release-state` when that
-setting is omitted). Before the next release it snapshots that file and prints
-the exact snapshot path.
-For an application rollback, first verify the migration was expand/contract
-compatible, then run the printed command, for example:
+setting is omitted). Before the next release it snapshots that file.
+For a staging/production application rollback, first verify the migrated schema
+is expand/contract compatible, then dispatch `.github/workflows/rollback.yml`
+with the target SHA previously recorded as successful on that host. The SSH
+forced command is:
 
 ```bash
-sudo env \
-  HOOK2STREAM_ENV_FILE=/srv/hook2stream/release-state/20260727T120000Z.env \
-  ./src/deploy/scripts/deploy-release.sh
+rollback <40-character-successful-release-sha> H2SEv1
 ```
 
-This restores old image digests through the same ordered and health-checked flow.
-Do not run an automatic down-migration. If a migration itself is defective, stop
+The host synthesizes an active environment from the current successful
+environment: only `API_IMAGE`, `WORKER_IMAGE`, `WEB_IMAGE`, and
+`RELEASE_VERSION` come from the target. Current bootstrapper, Caddy, PostgreSQL,
+PgBouncer, backup and egress digests remain unchanged. The rollback pulls and
+recreates only API, every worker and web with `--no-deps`; it never invokes the
+bootstrapper, migrations, or an infrastructure-service mutation. It requires
+health, public smoke, authenticated E2E and exact running-digest verification
+before updating `last-successful.env`. If a migration itself is defective, stop
 writes and follow the documented database recovery decision: forward-fix first,
 or restore the verified pre-deploy recovery point with explicit data-loss
 approval.

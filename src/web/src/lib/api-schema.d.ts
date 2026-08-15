@@ -1671,6 +1671,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/releases/{projectId}/assets/{assetId}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/releases/{projectId}/downloads/{assetId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    projectId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/uploads/{sessionId}": {
         parameters: {
             query?: never;
@@ -1708,7 +1820,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/uploads/{sessionId}/parts": {
+    "/api/v1/uploads/{sessionId}/parts/{partNumber}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1716,21 +1828,17 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put?: never;
-        post: {
+        put: {
             parameters: {
                 query?: never;
                 header?: never;
                 path: {
                     sessionId: string;
+                    partNumber: number;
                 };
                 cookie?: never;
             };
-            requestBody: {
-                content: {
-                    "application/json": components["schemas"]["UploadPartRequest"];
-                };
-            };
+            requestBody?: never;
             responses: {
                 /** @description OK */
                 200: {
@@ -1743,6 +1851,7 @@ export interface paths {
                 };
             };
         };
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2061,7 +2170,7 @@ export interface components {
             displayName: null | string;
         };
         CompleteUploadRequest: {
-            parts: components["schemas"]["CompletedPartRequest"][];
+            parts?: null | components["schemas"]["CompletedPartRequest"][];
         };
         CompleteUploadResponse: {
             /** Format: uuid */
@@ -2429,18 +2538,21 @@ export interface components {
             /** Format: date */
             campaignStartDate: null | string;
         };
-        UploadPartRequest: {
+        UploadPartReceiptResponse: {
             /** Format: int32 */
             partNumber: number | string;
+            /** Format: int64 */
+            plaintextLength: number | string;
+            sha256: string;
+            eTag: string;
         };
         UploadPartResponse: {
             /** Format: int32 */
             partNumber: number | string;
-            uploadUrl: string;
-            /** Format: date-time */
-            urlExpiresAt: string;
-            /** Format: date-time */
-            expiresAt?: string;
+            /** Format: int64 */
+            plaintextLength: number | string;
+            sha256: string;
+            eTag: string;
         };
         UploadSessionResponse: {
             /** Format: uuid */
@@ -2458,6 +2570,7 @@ export interface components {
             urlExpiresAt: string;
             /** Format: date-time */
             sessionExpiresAt: string;
+            completedParts?: null | components["schemas"]["UploadPartReceiptResponse"][];
             /** Format: uuid */
             id?: string;
             /** Format: date-time */

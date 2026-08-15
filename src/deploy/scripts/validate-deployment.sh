@@ -39,17 +39,18 @@ for secret_name in \
     stripe_secret_key \
     stripe_webhook_secret \
     openrouter_api_key \
+    media_keyring \
+    invited_emails \
     backup_s3_access_key \
     backup_s3_secret_key \
-    backup_encryption_passphrase \
-    backup_encryption_key_id \
+    backup_age_recipient \
     backup_heartbeat_url \
     minio_root_user \
     minio_root_password; do
     printf '%s\n' "ci-placeholder-not-a-production-secret" \
         > "${secret_dir}/${secret_name}"
 done
-printf '%s\n' "ci-backup-key-001" > "${secret_dir}/backup_encryption_key_id"
+printf '%s\n' "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" > "${secret_dir}/backup_age_recipient"
 : > "${secret_dir}/backup_heartbeat_url"
 
 for script_path in "$deployment_dir"/scripts/*.sh; do
@@ -93,6 +94,7 @@ validate_caddyfile() {
 }
 
 validate_caddyfile Caddyfile
+validate_caddyfile Caddyfile.production
 validate_caddyfile Caddyfile.minio \
     --env S3_PUBLIC_DOMAIN=s3-staging.example.invalid \
     --env S3_MEDIA_BUCKET=hook2stream-staging-media
@@ -106,6 +108,7 @@ POSTGRES_BACKUP_IMAGE=registry.example/hook2stream-postgres-backup@sha256:$valid
 CADDY_IMAGE=registry.example/caddy@sha256:$validation_digest
 POSTGRES_IMAGE=registry.example/postgres@sha256:$validation_digest
 PGBOUNCER_IMAGE=registry.example/pgbouncer@sha256:$validation_digest
+EGRESS_PROXY_IMAGE=registry.example/squid@sha256:$validation_digest
 VAULT_AGENT_IMAGE=registry.example/vault@sha256:$validation_digest
 export \
     API_IMAGE \
@@ -116,6 +119,7 @@ export \
     CADDY_IMAGE \
     POSTGRES_IMAGE \
     PGBOUNCER_IMAGE \
+    EGRESS_PROXY_IMAGE \
     VAULT_AGENT_IMAGE
 
 SECRET_PROVIDER=file SECRETS_DIR=$secret_dir docker compose \
