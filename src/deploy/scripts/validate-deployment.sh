@@ -44,14 +44,12 @@ for secret_name in \
     backup_s3_access_key \
     backup_s3_secret_key \
     backup_age_recipient \
-    backup_heartbeat_url \
     minio_root_user \
     minio_root_password; do
     printf '%s\n' "ci-placeholder-not-a-production-secret" \
         > "${secret_dir}/${secret_name}"
 done
 printf '%s\n' "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" > "${secret_dir}/backup_age_recipient"
-: > "${secret_dir}/backup_heartbeat_url"
 
 for script_path in "$deployment_dir"/scripts/*.sh; do
     sh -n "$script_path"
@@ -59,6 +57,7 @@ done
 for test_path in "$deployment_dir"/tests/*.test.sh; do
     sh "$test_path"
 done
+sh "$deployment_dir/storage/tests/validate-storage-deployment.sh"
 node -e \
     'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' \
     "$deployment_dir/backup/lifecycle-policy.json"

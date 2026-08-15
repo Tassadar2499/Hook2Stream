@@ -1,0 +1,421 @@
+name: Storage CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/deploy/storage/**
+      - src/deploy/minio/**
+      - src/ci/storage-*
+      - src/ci/tests/storage-*
+      - .github/workflows/storage-ci.yml
+      - .github/workflows/promote-storage-production.yml
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Validate storage candidate and workflow contracts
+        run: |
+          bash src/deploy/storage/tests/validate-storage-deployment.sh
+          bash src/ci/tests/storage-candidate.test.sh
+          node src/ci/tests/storage-minio-security-gate.test.mjs
+          node src/ci/tests/storage-workflow-contract.test.mjs
+
+      - name: Enforce current fail-closed MinIO source security policy
+        run: |
+          node src/ci/storage-minio-security-gate.mjs \
+            --release-manifest src/deploy/storage/storage-release.json \
+            --dockerfile src/deploy/minio/Dockerfile \
+            --policy src/deploy/storage/minio-security-policy.json
+
+  publish-minio:
+    needs: contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve immutable MinIO image name
+        id: image
+        shell: bash
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hook2stream-minio"
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "tag=${repository}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Publish source-pinned MinIO with SBOM and provenance
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: src/deploy/minio/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=storage-minio
+          cache-to: type=gha,mode=max,scope=storage-minio
+
+      - name: Verify exact published MinIO source identity labels
+        shell: bash
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker pull --platform linux/amd64 "$IMAGE_REFERENCE"
+          expected_release="$(jq -er .minioRelease src/deploy/storage/storage-release.json)"
+          expected_commit="$(jq -er .minioSourceCommit src/deploy/storage/storage-release.json)"
+          actual_release="$(docker image inspect --format '{{index .Config.Labels "com.hook2stream.minio.source-release"}}' "$IMAGE_REFERENCE")"
+          actual_commit="$(docker image inspect --format '{{index .Config.Labels "com.hook2stream.minio.source-commit"}}' "$IMAGE_REFERENCE")"
+          test "$actual_release" = "$expected_release"
+          test "$actual_commit" = "$expected_commit"
+
+      - name: Scan exact published MinIO digest
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Record digest-only MinIO reference
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          case "$IMAGE_DIGEST" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "Buildx returned an invalid MinIO digest" >&2; exit 1 ;;
+          esac
+          mkdir -p storage-digests
+          printf 'MINIO_IMAGE=%s@%s\n' "$IMAGE_REPOSITORY" "$IMAGE_DIGEST" > storage-digests/minio.env
+
+      - name: Upload MinIO digest fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: storage-digest-minio-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: storage-digests/minio.env
+          if-no-files-found: error
+          retention-days: 90
+
+  runtime-images:
+    needs: contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: caddy
+            source: caddy:2.11.4-alpine
+            deploy_var: CADDY_IMAGE
+          - name: minio-mc
+            source: minio/mc:RELEASE.2025-07-21T05-28-08Z
+            deploy_var: MINIO_MC_IMAGE
+    steps:
+      - name: Pull reviewed storage runtime image
+        run: docker pull --platform linux/amd64 "${{ matrix.source }}"
+
+      - name: Resolve exact runtime digest
+        id: image
+        shell: bash
+        env:
+          SOURCE_IMAGE: ${{ matrix.source }}
+        run: |
+          reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$SOURCE_IMAGE")"
+          case "$reference" in
+            *@sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "storage runtime image did not resolve to a sha256 digest" >&2; exit 1 ;;
+          esac
+          echo "reference=$reference" >> "$GITHUB_OUTPUT"
+
+      - name: Scan exact storage runtime digest
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.image.outputs.reference }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Record digest-only runtime reference
+        shell: bash
+        env:
+          DEPLOY_VARIABLE: ${{ matrix.deploy_var }}
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          mkdir -p storage-digests
+          printf '%s=%s\n' "$DEPLOY_VARIABLE" "$IMAGE_REFERENCE" > "storage-digests/${{ matrix.name }}.env"
+
+      - name: Upload runtime digest fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: storage-digest-${{ matrix.name }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: storage-digests/${{ matrix.name }}.env
+          if-no-files-found: error
+          retention-days: 90
+
+  storage-acceptance:
+    needs: [publish-minio, runtime-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install pinned .NET SDK for H2SE acceptance
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Download scanned MinIO digest references
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: storage-digest-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: storage-acceptance-digests
+          merge-multiple: true
+
+      - name: Log in to GitHub Container Registry for live acceptance
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run live MinIO storage acceptance against exact scanned digests
+        shell: bash
+        run: |
+          read_digest_fragment() {
+            local key="$1"
+            local file="$2"
+            local line
+            test "$(wc -l < "$file")" -eq 1
+            IFS= read -r line < "$file"
+            case "$line" in
+              "$key="*@sha256:????????????????????????????????????????????????????????????????) ;;
+              *) echo "$file does not contain one digest-only $key assignment" >&2; exit 1 ;;
+            esac
+            case "${line##*@sha256:}" in
+              *[!0-9a-f]*) echo "$file contains a non-hexadecimal image digest" >&2; exit 1 ;;
+            esac
+            printf '%s' "${line#*=}"
+          }
+          MINIO_IMAGE="$(read_digest_fragment MINIO_IMAGE storage-acceptance-digests/minio.env)"
+          MINIO_MC_IMAGE="$(read_digest_fragment MINIO_MC_IMAGE storage-acceptance-digests/minio-mc.env)"
+          CADDY_IMAGE="$(read_digest_fragment CADDY_IMAGE storage-acceptance-digests/caddy.env)"
+          export MINIO_IMAGE MINIO_MC_IMAGE CADDY_IMAGE
+          bash src/deploy/storage/tests/run-minio-acceptance.sh
+
+  storage-candidate:
+    needs: storage-acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    outputs:
+      artifact-name: ${{ steps.identity.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download exact storage image digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: storage-digest-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: storage-digests
+          merge-multiple: true
+
+      - name: Set immutable storage candidate identity
+        id: identity
+        shell: bash
+        run: |
+          artifact_name="storage-candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Recheck MinIO source security policy before candidate publication
+        run: |
+          node src/ci/storage-minio-security-gate.mjs \
+            --release-manifest src/deploy/storage/storage-release.json \
+            --dockerfile src/deploy/minio/Dockerfile \
+            --policy src/deploy/storage/minio-security-policy.json
+
+      - name: Assemble and validate storage candidate
+        run: |
+          node src/ci/storage-candidate.mjs create \
+            --output storage-candidate \
+            --fragments storage-digests \
+            --storage-dir src/deploy/storage \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Attest storage candidate provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: storage-candidate/SHA256SUMS
+
+      - name: Upload immutable storage candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: storage-candidate
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy-storage-staging:
+    needs: storage-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: storage-staging
+    concurrency:
+      group: hook2stream-storage-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      CANDIDATE_NAME: ${{ needs.storage-candidate.outputs.artifact-name }}
+      DEPLOY_HOST: ${{ secrets.STORAGE_DEPLOY_HOST }}
+      DEPLOY_USER: hook2stream-storage-deploy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download storage candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ env.CANDIDATE_NAME }}
+          path: storage-candidate
+
+      - name: Revalidate storage candidate before deployment
+        run: |
+          node src/ci/storage-candidate.mjs validate \
+            --candidate storage-candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Connect ephemeral storage-staging runner to Tailscale
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.STORAGE_TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.STORAGE_TS_AUDIENCE }}
+          tags: tag:hook2stream-storage-ci-staging
+          ping: ${{ secrets.STORAGE_DEPLOY_HOST }}
+
+      - name: Configure strict storage SSH identity
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STORAGE_DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.STORAGE_DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/hook2stream-storage-ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts"
+          case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519")" in
+            "ssh-ed25519 "*) ;;
+            *) echo "storage deploy identity must be ED25519" >&2; exit 1 ;;
+          esac
+          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts" \
+            | awk '!/^#/ { found=1; if ($2 != "ssh-ed25519") bad=1 } END { exit (!found || bad) ? 1 : 0 }'
+
+      - name: Deploy storage candidate and verify remote controls
+        shell: bash
+        run: |
+          mkdir -p transfer/candidate
+          cp storage-candidate/* transfer/candidate/
+          tar -C transfer -cf - . | ssh \
+            -i "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "deploy-storage $CANDIDATE_NAME" | tee "$RUNNER_TEMP/storage-deploy-output.log"
+          test "$(wc -l < "$RUNNER_TEMP/storage-deploy-output.log")" -eq 1
+          test "$(grep -c '^HOOK2STREAM_STORAGE_REMOTE_RECEIPT=' "$RUNNER_TEMP/storage-deploy-output.log")" -eq 1
+          encoded_result="$(sed -n 's/^HOOK2STREAM_STORAGE_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/storage-deploy-output.log")"
+          printf '%s' "$encoded_result" | base64 --decode > storage-remote-result.json
+          node src/ci/storage-receipt.mjs validate-remote \
+            --candidate storage-candidate \
+            --result storage-remote-result.json \
+            --environment storage-staging
+
+      - name: Create successful storage staging receipt
+        run: |
+          node src/ci/storage-receipt.mjs create \
+            --candidate storage-candidate \
+            --remote-result storage-remote-result.json \
+            --output storage-staging-receipt.json
+
+      - name: Sign storage staging receipt
+        shell: bash
+        env:
+          STORAGE_STAGING_RECEIPT_SIGNING_KEY: ${{ secrets.STORAGE_STAGING_RECEIPT_SIGNING_KEY }}
+        run: |
+          printf '%s\n' "$STORAGE_STAGING_RECEIPT_SIGNING_KEY" > "$RUNNER_TEMP/storage-staging-receipt-signing-key"
+          chmod 0600 "$RUNNER_TEMP/storage-staging-receipt-signing-key"
+          ssh-keygen -Y sign \
+            -f "$RUNNER_TEMP/storage-staging-receipt-signing-key" \
+            -n hook2stream-storage-staging-receipt \
+            storage-staging-receipt.json
+          mv storage-staging-receipt.json.sig storage-staging-receipt.sig
+
+      - name: Attest signed storage staging receipt
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: |
+            storage-staging-receipt.json
+            storage-staging-receipt.sig
+
+      - name: Upload signed storage staging receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: storage-staging-receipt-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            storage-staging-receipt.json
+            storage-staging-receipt.sig
+          if-no-files-found: error
+          retention-days: 90

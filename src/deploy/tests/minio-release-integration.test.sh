@@ -46,7 +46,6 @@ for secret_name in \
     minio_root_password; do
     printf '%s\n' "test-${secret_name}" > "${secret_dir}/${secret_name}"
 done
-: > "${secret_dir}/backup_heartbeat_url"
 
 cat > "$environment_file" <<EOF
 COMPOSE_PROJECT_NAME=hook2stream-test
@@ -82,6 +81,8 @@ BACKUP_S3_ENDPOINT=http://minio:9000
 BACKUP_S3_REGION=us-east-1
 BACKUP_S3_BUCKET=hook2stream-staging-pg-backups
 BACKUP_S3_PREFIX=hook2stream/staging/postgres
+BACKUP_INTERVAL_SECONDS=3600
+BACKUP_MAX_AGE_SECONDS=7200
 BACKUP_RETENTION_DAYS=7
 GOOGLE_CLIENT_ID=ci-test.apps.googleusercontent.com
 STRIPE_PRICE_ART_CREDITS_5=price_art_credits_5
@@ -304,12 +305,24 @@ sed \
     -e '/^STORAGE_MODE=/d' \
     -e '/^MINIO_/d' \
     -e '/^S3_PUBLIC_DOMAIN=/d' \
+    -e '/^S3_ENDPOINT_HOST=/d' \
+    -e '/^S3_CONFIGURE_BUCKET_LIFECYCLE=/d' \
+    -e '/^STORAGE_PROTOCOL_VERSION=/d' \
+    -e '/^EGRESS_CONFIG_DIR=/d' \
+    -e 's/^COMPOSE_PROJECT_NAME=.*/COMPOSE_PROJECT_NAME=hook2stream-staging/' \
     -e 's/^APP_DOMAIN=.*/APP_DOMAIN=staging.hook2stream.com/' \
     -e 's#^PUBLIC_ORIGIN=.*#PUBLIC_ORIGIN=https://staging.hook2stream.com#' \
-    -e 's#^S3_SERVICE_URL=.*#S3_SERVICE_URL=https://s3.test.invalid#' \
-    -e 's#^S3_PUBLIC_SERVICE_URL=.*#S3_PUBLIC_SERVICE_URL=https://s3.test.invalid#' \
-    -e 's#^BACKUP_S3_ENDPOINT=.*#BACKUP_S3_ENDPOINT=#' \
+    -e 's#^S3_SERVICE_URL=.*#S3_SERVICE_URL=https://h2s-storage-staging.tail1234.ts.net#' \
+    -e 's#^S3_PUBLIC_SERVICE_URL=.*#S3_PUBLIC_SERVICE_URL=https://h2s-storage-staging.tail1234.ts.net#' \
+    -e 's#^BACKUP_S3_ENDPOINT=.*#BACKUP_S3_ENDPOINT=https://h2s-storage-staging.tail1234.ts.net#' \
     "$environment_file" > "$external_environment"
+cat >> "$external_environment" <<'EOF'
+S3_ENDPOINT_HOST=h2s-storage-staging.tail1234.ts.net
+S3_CONFIGURE_BUCKET_LIFECYCLE=false
+STORAGE_PROTOCOL_VERSION=1
+EGRESS_CONFIG_DIR=./egress/rendered/staging
+BACKUP_RETENTION_SAFETY_SECONDS=7200
+EOF
 external_command_log=${temporary_dir}/external-commands.log
 external_curl_log=${temporary_dir}/external-curl.log
 TEST_COMMAND_LOG=$external_command_log
@@ -327,6 +340,49 @@ fi
 if grep -F '/minio/health/ready' "$external_curl_log" >/dev/null; then
     fail_test "the default external-storage release ran the MinIO public smoke"
 fi
+
+duplicate_external_environment=${temporary_dir}/duplicate-external.env
+cp "$external_environment" "$duplicate_external_environment"
+printf '%s\n' 'S3_ENDPOINT_HOST=h2s-storage-staging.tail9999.ts.net' \
+    >> "$duplicate_external_environment"
+assert_rejected_environment \
+    "$duplicate_external_environment" \
+    'environment file contains duplicate assignments: S3_ENDPOINT_HOST'
+
+bad_external_prefix_environment=${temporary_dir}/bad-external-prefix.env
+sed 's#^BACKUP_S3_PREFIX=.*#BACKUP_S3_PREFIX=hook2stream/production/postgres#' \
+    "$external_environment" > "$bad_external_prefix_environment"
+assert_rejected_environment \
+    "$bad_external_prefix_environment" \
+    'BACKUP_S3_PREFIX must match the selected environment'
+
+bad_external_retention_environment=${temporary_dir}/bad-external-retention.env
+sed 's/^BACKUP_RETENTION_DAYS=.*/BACKUP_RETENTION_DAYS=2/' \
+    "$external_environment" > "$bad_external_retention_environment"
+assert_rejected_environment \
+    "$bad_external_retention_environment" \
+    'BACKUP_RETENTION_DAYS must be 7 for staging'
+
+bad_external_interval_environment=${temporary_dir}/bad-external-interval.env
+sed 's/^BACKUP_INTERVAL_SECONDS=.*/BACKUP_INTERVAL_SECONDS=86400/' \
+    "$external_environment" > "$bad_external_interval_environment"
+assert_rejected_environment \
+    "$bad_external_interval_environment" \
+    'BACKUP_INTERVAL_SECONDS must be 3600 for remote MinIO'
+
+bad_external_max_age_environment=${temporary_dir}/bad-external-max-age.env
+sed 's/^BACKUP_MAX_AGE_SECONDS=.*/BACKUP_MAX_AGE_SECONDS=172800/' \
+    "$external_environment" > "$bad_external_max_age_environment"
+assert_rejected_environment \
+    "$bad_external_max_age_environment" \
+    'BACKUP_MAX_AGE_SECONDS must be 7200 for remote MinIO'
+
+bad_external_safety_environment=${temporary_dir}/bad-external-safety.env
+sed 's/^BACKUP_RETENTION_SAFETY_SECONDS=.*/BACKUP_RETENTION_SAFETY_SECONDS=0/' \
+    "$external_environment" > "$bad_external_safety_environment"
+assert_rejected_environment \
+    "$bad_external_safety_environment" \
+    'BACKUP_RETENTION_SAFETY_SECONDS must be 7200 for remote MinIO'
 
 TEST_COMMAND_LOG=${temporary_dir}/compose-selection.log
 export TEST_COMMAND_LOG

@@ -61,6 +61,8 @@ media_worker=$(service_block worker-media)
 analysis_worker=$(service_block worker-analysis)
 render_worker=$(service_block worker-render)
 minio_service=$(service_block minio)
+backup_service=$(service_block postgres-backup)
+storage_probe_service=$(service_block storage-probe)
 
 assert_contains "$caddy_service" \
     'S3_MEDIA_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}' \
@@ -117,6 +119,19 @@ assert_contains "$render_worker" 'memory: 3G' \
 if grep -Eq '^[[:space:]]+replicas:' "$overlay"; then
     fail "the 16 GiB staging profile must not scale worker replicas"
 fi
+
+for minio_consumer in api worker-media worker-analysis worker-control worker-render worker-export bootstrapper; do
+    consumer_block=$(service_block "$minio_consumer")
+    assert_contains "$consumer_block" \
+        'NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio' \
+        "$minio_consumer sends local MinIO HTTP through the deny-by-default S3 proxy"
+done
+assert_contains "$backup_service" \
+    'NO_PROXY: 127.0.0.1,localhost,postgres,minio' \
+    "postgres-backup sends local MinIO HTTP through the deny-by-default S3 proxy"
+assert_contains "$storage_probe_service" \
+    'NO_PROXY: 127.0.0.1,localhost,minio' \
+    "storage-probe sends local MinIO HTTP through the deny-by-default S3 proxy"
 
 node - "$minio_dir/backup-lifecycle.json" "$minio_dir/policies" <<'NODE'
 const fs = require("node:fs");

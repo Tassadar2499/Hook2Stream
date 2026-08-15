@@ -1,9 +1,11 @@
-ARG GO_IMAGE=golang:1.25.12-alpine3.23
-ARG ALPINE_IMAGE=alpine:3.22.5
-FROM ${GO_IMAGE} AS build
-
+ARG GO_IMAGE=docker.io/library/golang:1.25.12-alpine3.23@sha256:f128118f1f3a7f38949c57f03d29d13e4afdb06b86f840f8f43e8031e6c1a73a
+ARG ALPINE_IMAGE=docker.io/library/alpine:3.22.5@sha256:7c8cb692ae09657cbc4a3f3cbd0e8d5a2690ba38386aaaf252dbb060bf5eb2e6
 ARG MINIO_RELEASE=RELEASE.2025-10-15T17-29-55Z
 ARG MINIO_COMMIT=9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
+FROM ${GO_IMAGE} AS build
+
+ARG MINIO_RELEASE
+ARG MINIO_COMMIT
 
 RUN apk add --no-cache git
 RUN git init /source \
@@ -27,11 +29,14 @@ RUN mkdir -p /out \
 
 FROM ${ALPINE_IMAGE} AS runtime
 
-LABEL org.opencontainers.image.title="Hook2Stream staging MinIO" \
-      org.opencontainers.image.description="Source build of the final CVE-fixed MinIO community release" \
+ARG MINIO_RELEASE
+ARG MINIO_COMMIT
+
+LABEL org.opencontainers.image.title="Hook2Stream remote MinIO" \
+      org.opencontainers.image.description="Source build of the final MinIO community release; deployment security gate enforced separately" \
       org.opencontainers.image.source="https://github.com/minio/minio" \
-      org.opencontainers.image.revision="9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a" \
-      org.opencontainers.image.version="RELEASE.2025-10-15T17-29-55Z" \
+      com.hook2stream.minio.source-release="${MINIO_RELEASE}" \
+      com.hook2stream.minio.source-commit="${MINIO_COMMIT}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
 RUN addgroup -S -g 10001 minio \

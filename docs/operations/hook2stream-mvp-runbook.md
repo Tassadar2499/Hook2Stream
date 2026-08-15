@@ -1,198 +1,362 @@
 # Hook2Stream MVP operations runbook
 
-This runbook is the operator contract for the invite-only staging and production
-single-node environments. It does not claim high availability. The accepted risk
-expires 90 days after the first paid user.
+This is the operator contract for the invite-only paid MVP. It uses four
+independent IT-Garage VPS instances: one application host and one remote MinIO
+host for each environment. It does not claim high availability, PITR, or media
+durability. The risk acceptance expires 90 days after the first paid user.
 
-## Environment matrix
+## Environment matrix and order gate
 
-| Setting | Staging | Production |
+| Role | Staging | Production |
 |---|---|---|
-| Domain | `staging.hook2stream.com` | `hook2stream.com` |
-| Hetzner project/location | isolated project, NBG1 | isolated project, HEL1 |
-| Server | CX43, Ubuntu 24.04 amd64 | CX43, Ubuntu 24.04 amd64 |
-| LUKS volume | at least 64 GB | at least 128 GB |
-| Backup retention | 7 days | 35 days |
-| Integrations | Google test, Stripe test, dedicated OpenRouter key | Google production, Stripe live, dedicated OpenRouter key |
+| Public application URL | `https://staging.hook2stream.com` | `https://hook2stream.com` |
+| App VPS | RZ-W-4, Germany, 4 vCPU / 8 GB / 160 GB NVMe | FI-MX-5, Finland, 8 vCPU / 16 GB / 240 GB NVMe |
+| App encrypted container | 112 GiB at `/srv/hook2stream` | 176 GiB at `/srv/hook2stream` |
+| Private storage URL | `https://h2s-storage-staging.<tailnet>.ts.net` | `https://h2s-storage-production.<tailnet>.ts.net` |
+| Storage VPS | FI-MX-4, Finland, 4 vCPU / 8 GB / 90 GB NVMe | RZ-W-8, Germany, 8 vCPU / 16 GB / 320 GB NVMe |
+| Storage encrypted container | 64 GiB at `/srv/hook2stream-storage` | 256 GiB at `/srv/hook2stream-storage` |
+| Media quota | 35 GiB, unversioned | 160 GiB, unversioned |
+| PostgreSQL backup quota/retention | 10 GiB / 7 days, versioned | 30 GiB / 35 days, versioned |
+| Integrations | Google and Stripe test, dedicated OpenRouter key | Google and Stripe live, dedicated OpenRouter key |
 
-Use `src/deploy/environments/{staging,production}.env.example` as the profile
-overlay. `S3_PUBLIC_SERVICE_URL` remains populated only because older application
-configuration validates it; browser presigned URLs and S3 CORS are forbidden.
+The published VPS total was EUR 95.56 for the displayed billing period when
+this contract was written. Before every order, verify SKU, stock, period, VAT,
+IPv4 charges, and the current values in the official
+[`tariffs.json`](https://it-garage.pro/js/tariffs.json). Stop and review the
+architecture when the total exceeds EUR 110 before VAT or any one VPS price
+changes by more than 10 percent. Domain, Stripe, OpenRouter, and excess traffic
+are not included.
 
-## Domain and DNS gate
+Provisioning is deliberately manual. The repository does not assume an
+IT-Garage API, Terraform provider, provider firewall, snapshot product, private
+network, or detachable volume because none is part of the public contract.
+Before ordering, obtain a written answer to every item in
+[`it-garage-support-checklist.md`](./it-garage-support-checklist.md). Production
+is blocked unless Ubuntu 24.04 amd64, TUN/Tailscale, a stable public IPv4 for
+both app hosts, recovery console access, the FFmpeg workload, and network Fair
+Use thresholds are confirmed.
+
+### Current mandatory storage security block
+
+As reviewed on 2026-08-15, no MinIO source release is approved for staging or
+production. The final community source pin in this repository is affected by
+four applicable High advisories with no patched OSS release:
+
+- [CVE-2026-34204](https://github.com/advisories/GHSA-3rh2-v3gr-35p9);
+- [CVE-2026-39414](https://github.com/advisories/GHSA-h749-fxx7-pwpg);
+- [CVE-2026-40344](https://github.com/advisories/GHSA-9c4q-hq6p-c237);
+- [CVE-2026-41145](https://github.com/advisories/GHSA-hv4r-mvr4-25vw).
+
+The reviewed source allowlist is therefore empty. Storage CI stops before it
+publishes or runs that image, no storage candidate can be created, and the
+root-owned host gate independently rejects every unapproved release/commit.
+Do not treat reverse-proxy workarounds or a scanner miss as approval. Removing
+this block requires a separately reviewed choice: supported managed S3,
+licensed current AIStor, or an auditable fork carrying regression-tested fixes
+for every applicable advisory. The fork option is not recommended for this
+MVP. Provisioning may be rehearsed without user data, but staging storage,
+production storage, paid traffic, and recovery claims remain blocked.
+
+## Domain and public edge
 
 Immediately before purchase, look up `hook2stream.com` in ICANN Lookup. If it is
-registered, stop and ask for a replacement; do not choose one automatically.
-Register through Cloudflare Registrar and enable account 2FA, auto-renew,
-registrar lock, and DNSSEC. Create DNS-only records:
+registered, stop and ask for a replacement; never choose one automatically.
+Register through Cloudflare Registrar and enable 2FA, auto-renew, registrar
+lock, DNSSEC, and the registrar's own billing/domain-expiry notifications. Create
+DNS-only records:
 
-- `A @` to production IPv4;
-- `A staging` to staging IPv4;
+- `A @` to the production app IPv4;
+- `A staging` to the staging app IPv4;
 - `CNAME www` to `@`.
 
-Do not create AAAA records until the provider firewall and UFW contain equivalent
-IPv6 rules. Caddy owns TLS. Production redirects `www` with status 308; staging
-emits `X-Robots-Tag: noindex, nofollow, noarchive`. Check Hetzner's current order
-total before purchase; domain, provider, Stripe, OpenRouter, and traffic charges
-are external operations and are not created by this repository.
+Do not create application AAAA records until equivalent IPv6 UFW rules have
+been tested. Caddy owns public TLS. Production redirects `www` with status 308;
+staging emits `X-Robots-Tag: noindex, nofollow, noarchive`. Google callbacks are
+`/api/v1/auth/callback`; Stripe webhooks are
+`/api/v1/billing/stripe/webhook`. Unknown Google accounts must fail closed and
+production accepts only pre-issued invites.
 
-## Host bootstrap and LUKS recovery
+The MinIO endpoints are not public DNS records. Their `*.ts.net` names and TLS
+certificates are supplied by Tailscale. Do not proxy them through Cloudflare.
 
-Attach the volume, create LUKS2 with an operator-held recovery key, open it as
-`hook2stream-data`, create a filesystem, and mount it at `/srv/hook2stream`.
-Create Docker data, PostgreSQL-backed Docker volumes, release state, root-only
-configuration, secrets, logs, and scratch below that mount. Create the 4 GB swap
-file below `/srv/hook2stream`; never use an unencrypted root-disk swapfile.
+## File-backed LUKS2 layout
 
-Docker must have `"data-root": "/srv/hook2stream/docker"`. Add systemd drop-ins
-for `docker.service` and the Hook2Stream deployment unit with:
+There are no assumed provider volumes. Each host uses one fully allocated,
+root-owned mode `0600` backing file on the local NVMe:
 
-```ini
-[Unit]
-RequiresMountsFor=/srv/hook2stream
-After=srv-hook2stream.mount
-ConditionPathIsMountPoint=/srv/hook2stream
+| Host role | Backing file | Mapper | Mount |
+|---|---|---|---|
+| app | `/var/lib/hook2stream-data.luks` | `hook2stream-data` | `/srv/hook2stream` |
+| storage | `/var/lib/hook2stream-storage.luks` | `hook2stream-storage` | `/srv/hook2stream-storage` |
+
+Choose the size from the environment matrix. Use `fallocate`, verify allocated
+blocks equal the logical size, then use `cryptsetup luksFormat --type luks2` on
+a loop device attached to that exact file. The operator owns all unlock keys;
+no key or recovery material is stored on an app host, storage host, MinIO, or in
+GitHub. Create the filesystem on the mapper, not on the loop device.
+
+App Docker data, named volumes including PostgreSQL, release state, secrets,
+logs, worker scratch, and swap live below `/srv/hook2stream`. Storage Docker
+data, MinIO data/configuration, release state, secrets, certificates, logs, and
+swap live below `/srv/hook2stream-storage`. A swap file must be mode `0600` and
+must resolve to the encrypted mount. Never enable a root-filesystem swapfile.
+
+Configure Docker data roots as follows before pulling an image:
+
+- app: `/srv/hook2stream/docker`;
+- storage: `/srv/hook2stream-storage/docker`.
+
+Docker and Hook2Stream systemd units must use `RequiresMountsFor`, `After`, and
+`ConditionPathIsMountPoint` for their role mount. Automatic loop attachment and
+LUKS unlock are forbidden. After every reboot, use the provider console to
+attach the backing file to a loop device, unlock the mapper interactively,
+mount it, enable encrypted swap, verify the mount, then start Docker through its
+mount-guarded systemd unit and run the full host validator immediately. The
+validator needs the daemon in order to prove its data-root and volumes.
+Downtime until this manual recovery finishes is an accepted MVP limitation.
+
+Validate before first deploy and after every reboot:
+
+```bash
+sudo src/deploy/scripts/validate-host.sh app staging
+sudo src/deploy/scripts/validate-host.sh app production
+sudo src/deploy/scripts/validate-host.sh storage staging
+sudo src/deploy/scripts/validate-host.sh storage production
 ```
 
-Automatic volume unlock is deliberately not configured. After reboot, unlock
-from the console, mount `/srv/hook2stream`, activate its swap, start Docker, then
-run `sudo src/deploy/scripts/validate-host.sh staging|production` before starting
-services. Downtime until manual unlock is an accepted MVP limitation.
+The validator must prove the complete mount -> dm-crypt -> loop -> backing-file
+chain, LUKS2, exact role minimum size, fully allocated root-owned `0600` backing
+file, at least 20 percent free space, encrypted swap, Docker root, Tailscale,
+UFW, secret modes, and the role-specific listener policy.
 
-Create a named sudo operator using key-only SSH and do not add it to `docker` or
-the secrets group. Disable root/password/keyboard-interactive SSH. Public SSH is
-allowed only from the operator CIDR. Add a distinct UFW rule for port 22 on
-`tailscale0`; expose only 80/TCP, 443/TCP, and 443/UDP publicly. Mirror this in
-the Hetzner firewall. CI Tailscale ACLs must permit
-`tag:hook2stream-ci-staging` only to the staging host's port 22 and
-`tag:hook2stream-ci-production` only to production port 22.
+## Network policy
 
-## Secrets and encrypted storage
+Use key-only SSH and named operator accounts that are not members of `docker`
+or any secrets group. Disable root, password, and keyboard-interactive SSH.
+Operator and CI SSH use `tailscale0`; do not publish TCP 22 to the Internet.
+Storage hosts reserve three distinct non-login identities:
+`hook2stream-minio` (`10001:10001`), `hook2stream-storage-caddy`
+(`10002:10002`), and `hook2stream-storage-init` (`10003:10003`). The operator
+and forced-command deploy users must have different UIDs and may not join any
+of those groups, the secrets group, or `docker`.
+Mount `/proc` with `hidepid=2` (or the equivalent `hidepid=invisible`) and make
+the option persistent before installing the runtime. The host validator rejects
+the default world-readable process view so short-lived client commands cannot
+expose credentials through `/proc/<pid>/cmdline`.
 
-Each environment has a separate `/srv/hook2stream/secrets/current`, root-owned
-`0750`, containing root:`2000` `0640` files listed in
-`src/deploy/secrets/README.md`. Never copy staging OAuth, Stripe, OpenRouter, S3,
-database, invite, media keyring, or age values to production. `invited_emails` is
-newline-delimited, accepts `#` comments, contains no example or default account,
-and fails closed when absent. Unknown Google accounts are not provisioned.
+App hosts publish only 80/TCP, 443/TCP, and 443/UDP. PostgreSQL, PgBouncer, API,
+workers, storage, and Docker are never host-published. Storage hosts accept only
+SSH and HTTPS TCP 443 on `tailscale0`; MinIO 9000 and console 9001 are internal
+and must not listen on a public or wildcard host address. Default-deny inbound,
+routed, and IPv6 traffic unless an explicit equivalent rule is installed.
 
-`media_keyring` is a separately escrowed environment-specific H2SE v1 keyring.
-Only API/workers mount it. The active 256-bit KEK wraps new DEKs; retired KEKs
-remain readable until inventory reaches zero. Rotate every 90 days. Store an
-encrypted escrow copy outside the VPS and Object Storage. `AllowLegacyPlaintextReads`
-is always false. After the first H2SE v1 object, never roll back to a release that
-cannot read H2SE v1.
+Issue storage certificates on their owning hosts with `tailscale cert`. Mount
+certificate and private-key files read-only into storage Caddy. Tailscale ACLs
+are environment-specific:
 
-The API, every worker, and the backup sidecar have encrypted Docker named
-volumes mounted at `/tmp`; `TMPDIR=/tmp` keeps H2SE scratch and encrypted backup
-staging on LUKS without a fixed 512 MiB tmpfs ceiling. Eight upload-part
-encryptions and four downloads are contour-wide ceilings enforced across API
-and worker containers with PostgreSQL advisory-lock slots.
+- `tag:hook2stream-app-staging` -> `h2s-storage-staging`:443;
+- `tag:hook2stream-app-production` -> `h2s-storage-production`:443;
+- `tag:hook2stream-ci-staging` -> staging app:22;
+- `tag:hook2stream-ci-production` -> production app:22;
+- `tag:hook2stream-storage-ci-staging` -> staging storage:22;
+- `tag:hook2stream-storage-ci-production` -> production storage:22.
 
-## Hetzner Object Storage
+No staging identity may reach a production host. No storage host may reach the
+application databases. The app role-specific Squid proxies remain the only
+application egress path. Their generated S3 allowlist contains exactly the one
+environment storage hostname; wildcard `*.ts.net` access is forbidden. API may
+also reach Google and Stripe, and control workers OpenRouter. Backup traffic may
+reach only the exact storage hostname for its environment. A deployment test
+must prove both the permitted paths and denial of an unrelated HTTPS origin.
 
-Use one FSN1 location with four private, environment-distinct buckets and three
-credential classes per environment: runtime media, bootstrap media, and backup.
-Hetzner endpoint configuration uses region `fsn1`, endpoint
-`https://fsn1.your-objectstorage.com`, and `S3_FORCE_PATH_STYLE=false`. Disable
-public access and media CORS. Enable versioning only on backup buckets. Apply 7-
-and 35-day retention respectively and verify expired versions/delete markers are
-actually purged. Object keys must be server-generated and contain no filenames.
+## Remote MinIO contract
 
-The role-specific Squid proxies are the only application egress route. Their
-allowlists permit S3 for API/workers/backups, Google and Stripe for API, and
-OpenRouter for the control worker. The Compose backend/edge/role networks are
-internal. Before go-live, run a deployment test from each role that succeeds to
-its allowed providers and fails to an unrelated HTTPS origin; alert on proxy
-denials. Changing a provider hostname requires an audited allowlist change.
+Deploy `src/deploy/storage` on the two storage VPS instances. The existing
+`compose.minio.yaml` is for local development and CI only; it is never copied to
+or invoked on staging or production hosts.
 
-## CI deploy user
+Application profiles keep `STORAGE_MODE=external`, use the private Tailscale
+HTTPS endpoint, `S3_FORCE_PATH_STYLE=true`, no browser S3 URL or CORS, and
+`S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE=false`. Public Hook2Stream HTTP APIs do
+not change. Before an application backup or migration, the release wrapper must
+authenticate through the S3 egress proxy, require storage protocol version 1,
+and prove PUT, HEAD, one single-range GET, and DELETE against a disposable key.
 
-Create `hook2stream-deploy` without Docker/secrets access. Its public key line
-uses `restrict` and a forced command that invokes only a root-owned wrapper via
-an exact passwordless sudoers entry. Install audited copies of
-`deploy-forced-command.sh` and `validate-candidate.sh` under
-`/usr/local/libexec/hook2stream`,
-set the host environment variables in that wrapper's root-owned service file,
-and pin ED25519 host keys in GitHub Environment secrets. Set
-`HOOK2STREAM_E2E_HOOK` to the installed root-owned, non-symlink copy of
-`post-deploy-e2e.sh` with mode `0500`. Also install an environment-specific
-root-owned `0500` scenario at `HOOK2STREAM_AUTHENTICATED_E2E_HOOK`; start from
-the fail-closed `src/deploy/host/authenticated-e2e.example` contract. The public
-hook checks exact HTTP 200 for root/readiness/API readiness, the anonymous
-session JSON shape, and staging noindex without printing response bodies. It
-then invokes the authenticated scenario, which owns its OAuth/billing test
-credentials and must verify H2SE upload/range, every worker, OpenRouter,
-preview/18 renders/ZIP, and Stripe duplicate delivery. A successful receipt and
-provider allowlist success plus unrelated-origin denial. A successful receipt
-and H2SE rollback capability are impossible until that scenario emits the exact
-capability line documented in the template; a health-only hook is not accepted.
+Each storage environment has four independent credential pairs:
 
-Use the exact templates in `src/deploy/host`. Install the launcher at
-`/usr/local/sbin/hook2stream-deploy-launcher`, the wrapper/validator/hook at
-`/usr/local/libexec/hook2stream/`, and the per-host config at
-`/etc/hook2stream/deploy.conf` as root mode `0600`. Sudo's default `env_reset`
-drops `SSH_ORIGINAL_COMMAND`; the sudoers template preserves only that variable
-for `hook2stream-deploy`. All other wrapper settings are loaded by the root-owned
-launcher, never accepted from the SSH account environment. Validate sudoers with
-`visudo -cf` before ending the bootstrap session.
+- root: MinIO server boot, idempotent topology initialization, and break-glass
+  administration only;
+- bootstrap: application deployment checks of the pre-created media bucket and
+  protocol marker only;
+- runtime: media ciphertext access only;
+- backup: age-encrypted PostgreSQL backup access only.
 
-The wrapper accepts only `deploy release-candidate-...` with a maximum 256 MiB
-POSIX tar on stdin, or `rollback <40-hex-sha> H2SEv1`. It rejects checksum/schema/repo/
-digest mismatch, duplicate or unknown image variables, path traversal, links,
-special files, unapproved production receipts, and candidates not built from
-`main`. Production receipt verification uses a root-owned SSH allowed-signers
-file. Host `flock` remains the final concurrency lock. Rollback copies only the
-target `API_IMAGE`, `WORKER_IMAGE`, `WEB_IMAGE`, and `RELEASE_VERSION` into the
-current environment, preserving current bootstrapper and infrastructure
-digests. It pulls/recreates API, all workers and web with `--no-deps`; it never
-runs bootstrap/migrations or pulls/recreates Caddy, PostgreSQL, PgBouncer,
-backup, or egress services. Exact running infrastructure digests are checked
-before and after the application change. Incompatible schemas require a forward
-fix or a separately approved write-stop/restore procedure. Every verified success records
-an H2SE capability marker. `MIN_ROLLBACK_RELEASE_SHA` is only the operator's
-identity marker for the first H2SE release; SHA text is never treated as an
-ordering relation, and every rollback target must independently record H2SEv1.
-Set it to the first candidate's exact 40-hex commit before the first deployment;
-the forced wrapper rejects both deploy and rollback before mutation when it is
-missing or malformed, and every rollback receipt repeats the exact host value.
+Credentials never cross environments or roles. MinIO stores H2SE v1 ciphertext;
+media keyrings stay exclusively on the corresponding app host and in encrypted
+operator escrow. Backup objects are age ciphertext; the recovery private key is
+operator-held off-host. Buckets are private, media is unversioned, backup is
+versioned, object lock/public anonymous policies are absent, and lifecycle
+removes expired current/non-current versions and delete markers according to
+the matrix.
 
-## Backups and recovery
+There is intentionally no replica of either MinIO data disk. Loss or corruption
+of a storage VPS can permanently destroy media, and the production backup
+bucket shares that storage failure domain. This is a recorded 90-day closed
+pilot risk, not a durability claim.
 
-The backup sidecar runs hourly, pipes a custom-format `pg_dump` directly to
-`age` using only the off-host public recipient, uploads dump and checksum, then
-publishes the authenticated manifest last. The private age identity is never on
-either server or Object Storage. Better Stack heartbeat failure never makes a
-completed backup fail; alert if the newest successful marker exceeds two hours.
+The release-independent approval policy is
+`src/deploy/storage/minio-security-policy.json`. Before invoking the storage
+forced command, review it from current protected `main` and install that exact
+file as `/etc/hook2stream-storage/minio-security-policy.json`, root-owned mode
+`0600`; record its commit and SHA-256 outside the host. Never install or trust a
+candidate-bundled policy. An empty `approvedSourceReleases` array intentionally
+blocks deployment. A reviewed forward release needs an exact release, source
+commit, source URL, review date, and monotonically increasing security sequence;
+install the new current policy before attempting its candidate. Revoking an
+approval blocks future promotion but does not patch an already running server,
+which must be stopped or replaced through the incident procedure.
 
-Before enabling live Stripe, perform this drill in an empty temporary network:
+## Secrets and H2SE
 
-1. Download one manifest, checksum, and `.dump.age`; verify SHA-256.
-2. Decrypt using the operator-held age identity and restore into empty PostgreSQL.
-3. Restore the matching media keyring escrow and fetch a real H2SE object.
-4. Prove decrypt/range playback and record measured RPO/RTO and object IDs.
-5. Destroy the temporary plaintext and credentials.
+Every environment has a separate root-owned secrets directory on its encrypted
+mount. Secret files are non-symlinks and mode `0640` for their service group.
+OAuth, Stripe, OpenRouter, S3, database, session, invite, age, MinIO, and media
+keyring values never enter Git, candidate artifacts, Compose environment output,
+or CI logs.
 
-Repeat monthly and before risky migrations. A restore may not overwrite the live
-database without explicit approval and stopped writes.
+The media keyring is environment-specific H2SE v1. Rotate the active KEK every
+90 days; retain old KEKs for reads until inventory is zero. Store encrypted
+escrow outside all four VPS instances. `AllowLegacyPlaintextReads=false` from
+the first deployment. Once any H2SE v1 object exists, application rollback to a
+release without the H2SE v1 reader is forbidden.
 
-## Go-live and monitoring gates
+## Release promotion
 
-Staging must pass OAuth, licensed MP3 upload, every worker, OpenRouter analysis
-and artwork, preview seeking, 18 renders, ZIP, Stripe test checkout plus duplicate
-webhook, reboot/LUKS recovery, concurrent deploy lock, idempotent same-SHA deploy,
-compatible old-new-old application-only rollback, including proof that no
-migration/bootstrap/infra service was invoked, egress-denial tests, and 30 minutes without OOM
-or disk below 20%.
+App and storage releases are independent immutable pipelines.
 
-Production requires a second GitHub Environment reviewer, protected Environment,
-the successful signed staging receipt, recovery drill, TLS/security headers,
-308 `www`, OAuth, controlled live payment/refund, encrypted upload/download/range,
-actual digest verification, and 30-minute observation. Without the second
-reviewer/protection, live payments remain blocked.
+The app `CI` workflow builds `release-candidate-<sha>-<run_id>-<attempt>` once,
+deploys staging automatically, and records a signed staging receipt. The
+production promotion workflow takes `source_ci_run_id`, requires the protected
+`production` Environment and two reviewers, and deploys the exact staged image
+digests without rebuild. Application rollback changes application images only,
+never runs a down migration, and requires a previously successful compatible
+receipt.
 
-Configure Better Stack web/API monitors for both environments and backup
-heartbeats. Alert on backup age over two hours, disk/OOM, queue age, gateway 5xx,
-GCM failures, TLS/domain expiry, and sustained CPU/network saturation. At 80%
-volume use, resize. Cost above the accepted monthly threshold or persistent
-saturation triggers architecture review.
+The storage workflow first applies the exact source allowlist and therefore
+currently stops before publishing the unapproved MinIO pin. Once an exact
+source release/commit is approved, it builds that pin, resolves all runtime
+images by digest, generates SBOM/provenance, and blocks High/Critical CVEs on
+those exact digests. It creates
+`storage-candidate-<sha>-<run_id>-<attempt>`, automatically deploys the protected
+`storage-staging` Environment, and verifies policies, quotas, versioning,
+lifecycle, protocol marker, health, and actual running digests. Production uses
+`workflow_dispatch(source_ci_run_id)`, protected `storage-production` approval,
+the signed staging receipt, and the exact same digests without rebuild.
+Before the production approval boundary and again after approval, promotion
+loads the policy from current protected `main` and rescans all three candidate
+digests against the current vulnerability database. A 90-day-old staging
+receipt cannot override a new advisory or revoked source approval.
+
+All four CI connections are ephemeral Tailscale nodes using GitHub OIDC workload
+federation, distinct tags and SSH keys, pinned ED25519 host keys, OpenSSH
+`StrictHostKeyChecking=yes`, forced commands, and host `flock`. Deploy users do
+not have Docker or secrets access. Candidate validators reject tags, unknown or
+duplicate image variables, repository/run mismatch, malformed checksums,
+symlinks, special files, and archive traversal.
+
+Before either host validator can pass, the encrypted mount root is root:root
+`0755`; its release/config/state directories are root-private; deploy configs,
+environment files, signer files, and release markers are root:root `0600`.
+Each sudo-target launcher is root:root `0555` and revalidates the complete
+installed wrapper/validator/library set plus non-writable parent directories
+before executing it. Permission drift is a deployment stop, never an automatic
+repair.
+
+Storage downgrade after an on-disk format or protocol change is forbidden.
+Record the current format/protocol marker on the encrypted storage mount and use
+a forward fix. App schema rollback similarly uses a forward fix or a separately
+approved restore with writes stopped; it never executes a down migration.
+
+## Backup, restore, and loss drills
+
+The app backup sidecar runs hourly, streams a custom-format `pg_dump` to `age`,
+uploads dump and checksum, then publishes an authenticated manifest last. The
+age identity is never installed on a VPS. Alert when the newest successful
+backup marker is older than two hours.
+
+Before enabling live Stripe, prove this exact recovery path:
+
+1. Treat the app host as lost and provision an empty temporary app contour.
+2. Download a production backup manifest, checksum, and ciphertext from the
+   production MinIO host; verify the checksum and decrypt off-host.
+3. Restore into an empty PostgreSQL instance with writes isolated.
+4. Restore the matching escrowed H2SE keyring, fetch a real media object, and
+   prove authenticated decrypt plus HTTP Range playback.
+5. Record measured RPO/RTO and destroy temporary plaintext and credentials.
+
+Repeat monthly and before risky migrations. Also reboot all four VPS instances
+and perform the manual loop/LUKS/mount/swap/Docker sequence. A restore never
+overwrites the live database without explicit approval and stopped writes.
+
+## Go-live gates
+
+The current empty MinIO approval set is the first gate and blocks both storage
+environments. None of the remaining acceptance results overrides it.
+
+Storage acceptance must prove idempotent initialization, credential isolation,
+private policies, quotas, versioning, retention, restart, multipart abort,
+protocol v1, H2SE upload/range/download, and absence of public 9000/9001.
+
+Staging app acceptance must prove invite-only OAuth, licensed MP3 upload, every
+worker, OpenRouter analysis/artwork, preview seeking, 18 renders, ZIP, Stripe
+test checkout and duplicate webhook, concurrent deployment exclusion,
+idempotent same-SHA deployment, compatible old-new-old application-only
+rollback, egress denial, and at least 20 percent free space.
+
+Run a 60-minute render/network soak. IT-Garage's
+[`AUP`](https://it-garage.pro/aup) guarantees a standard vCPU only 25 percent of
+a physical core, prohibits sustained 100 percent use, and permits Fair Use
+throttling. Any throttling, AUP conflict, OOM, sustained queue growth, or
+unacceptable render time blocks production.
+
+Production additionally requires the signed staging receipts, both recovery
+drills, TLS/security headers, 308 `www`, controlled live payment/refund,
+encrypted upload/download/range, actual image digest verification, and at least
+30 minutes of observation after release. Lack of two GitHub reviewers blocks
+live payments but not staging.
+
+External uptime monitoring, backup/storage heartbeats, and automated operational
+alerts are deferred for the MVP. Operators must inspect local Docker health,
+backup age, disk usage, OOM events, queue age, gateway 5xx/GCM failures, MinIO
+health, denied egress, and TLS certificate state during release observation and the
+scheduled recovery/reboot drills. This accepted lack of automated notification
+does not relax any health, backup, soak, or recovery gate, and private MinIO must
+never be exposed for inbound monitoring. The
+[`public offer`](https://it-garage.pro/public-offer) states 97 percent SLA and
+permits deletion three days after payment suspension; enable account 2FA,
+automatic payment, and an independent billing alert before storing data.
+
+Before updating a test host that used the removed external-heartbeat bundle,
+stop and remove its old storage timer before deploying the new storage candidate:
+
+```bash
+sudo systemctl disable --now hook2stream-storage-heartbeat.timer || true
+sudo systemctl stop hook2stream-storage-heartbeat.service || true
+sudo rm -f \
+  /etc/systemd/system/hook2stream-storage-heartbeat.timer \
+  /etc/systemd/system/hook2stream-storage-heartbeat.service \
+  /usr/local/libexec/hook2stream-storage/storage-heartbeat.sh
+sudo systemctl daemon-reload
+```
+
+After the new app and storage host validators pass and `systemctl` confirms no
+consumer remains, remove the obsolete `backup_heartbeat_url` and
+`storage_heartbeat_url` files from their respective encrypted secret directories.
+If Vault was rehearsed, remove `heartbeat_url` from `backup-s3` before its next
+strict render; only `access_key_id` and `secret_access_key` are accepted.
+
+At 80 percent encrypted-container usage, the local-file design cannot be grown
+like an attached cloud volume: schedule a tariff migration or rebuild and prove
+restore first. Before public signup, replace self-managed PostgreSQL with a
+managed service offering 35-day PITR and replace standalone MinIO with managed
+S3 or replicated MinIO plus an independent media copy.

@@ -1,0 +1,18 @@
+{
+  "Rules": [
+    {
+      "ID": "hook2stream-staging-backup-retention-7d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hook2stream/staging/postgres/" },
+      "Expiration": { "Days": 7 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    },
+    {
+      "ID": "hook2stream-staging-backup-delete-markers",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "hook2stream/staging/postgres/" },
+      "Expiration": { "ExpiredObjectDeleteMarker": true }
+    }
+  ]
+}

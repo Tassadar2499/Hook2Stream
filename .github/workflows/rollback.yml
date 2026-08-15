@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   rollback:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: ${{ inputs.environment }}
@@ -96,8 +97,12 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
           chmod 0600 "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
-          ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" >/dev/null
-          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" >/dev/null
+          case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in
+            "ssh-ed25519 "*) ;;
+            *) echo "deploy identity must be ED25519" >&2; exit 1 ;;
+          esac
+          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            | awk '!/^#/ { found=1; if ($2 != "ssh-ed25519") bad=1 } END { exit (!found || bad) ? 1 : 0 }'
 
       - name: Roll back to a recorded H2SE-compatible release
         shell: bash

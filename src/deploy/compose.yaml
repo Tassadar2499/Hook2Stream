@@ -186,10 +186,10 @@ services:
       resources:
         limits:
           cpus: "0.50"
-          memory: 256M
+          memory: ${CADDY_MEMORY_LIMIT:-256M}
           pids: 128
         reservations:
-          memory: 64M
+          memory: ${CADDY_MEMORY_RESERVATION:-64M}
 
   web:
     image: ${WEB_IMAGE:?Set WEB_IMAGE to an immutable image reference}
@@ -224,10 +224,10 @@ services:
       resources:
         limits:
           cpus: "0.75"
-          memory: 512M
+          memory: ${WEB_MEMORY_LIMIT:-512M}
           pids: 256
         reservations:
-          memory: 128M
+          memory: ${WEB_MEMORY_RESERVATION:-128M}
 
   api:
     <<: *dotnet-runtime
@@ -304,10 +304,10 @@ services:
       resources:
         limits:
           cpus: "1.00"
-          memory: 1G
+          memory: ${API_MEMORY_LIMIT:-1G}
           pids: 512
         reservations:
-          memory: 256M
+          memory: ${API_MEMORY_RESERVATION:-256M}
 
   worker-media:
     <<: *worker-runtime
@@ -322,10 +322,10 @@ services:
       resources:
         limits:
           cpus: "1.50"
-          memory: 1536M
+          memory: ${WORKER_MEDIA_MEMORY_LIMIT:-1536M}
           pids: 512
         reservations:
-          memory: 256M
+          memory: ${WORKER_MEDIA_MEMORY_RESERVATION:-256M}
 
   worker-analysis:
     <<: *worker-runtime
@@ -340,10 +340,10 @@ services:
       resources:
         limits:
           cpus: "1.50"
-          memory: 1536M
+          memory: ${WORKER_ANALYSIS_MEMORY_LIMIT:-1536M}
           pids: 512
         reservations:
-          memory: 256M
+          memory: ${WORKER_ANALYSIS_MEMORY_RESERVATION:-256M}
 
   worker-control:
     <<: *worker-runtime
@@ -386,10 +386,10 @@ services:
       resources:
         limits:
           cpus: "1.00"
-          memory: 1G
+          memory: ${WORKER_CONTROL_MEMORY_LIMIT:-1G}
           pids: 512
         reservations:
-          memory: 256M
+          memory: ${WORKER_CONTROL_MEMORY_RESERVATION:-256M}
 
   worker-render:
     <<: *worker-runtime
@@ -404,10 +404,10 @@ services:
       resources:
         limits:
           cpus: "3.00"
-          memory: 3G
+          memory: ${WORKER_RENDER_MEMORY_LIMIT:-3G}
           pids: 512
         reservations:
-          memory: 512M
+          memory: ${WORKER_RENDER_MEMORY_RESERVATION:-512M}
 
   worker-export:
     <<: *worker-runtime
@@ -422,10 +422,10 @@ services:
       resources:
         limits:
           cpus: "1.00"
-          memory: 1G
+          memory: ${WORKER_EXPORT_MEMORY_LIMIT:-1G}
           pids: 512
         reservations:
-          memory: 256M
+          memory: ${WORKER_EXPORT_MEMORY_RESERVATION:-256M}
 
   bootstrapper:
     <<: *dotnet-runtime
@@ -449,7 +449,7 @@ services:
       Storage__ConfigureBucketCors: "false"
       StorageEncryption__KeyringPath: /run/secrets/media_keyring
       StorageEncryption__AllowLegacyPlaintextReads: "false"
-      Storage__ConfigureBucketLifecycle: "true"
+      Storage__ConfigureBucketLifecycle: ${S3_CONFIGURE_BUCKET_LIFECYCLE:-true}
       Storage__ConfigureMultipartAbortLifecycle: ${S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE:-false}
       Storage__BrowserUploadOrigins__0: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
       OperationalPolicy__RetentionSweepEnabled: "false"
@@ -467,7 +467,7 @@ services:
       resources:
         limits:
           cpus: "1.00"
-          memory: 768M
+          memory: ${BOOTSTRAPPER_MEMORY_LIMIT:-768M}
           pids: 512
 
   pgbouncer:
@@ -522,10 +522,10 @@ services:
       resources:
         limits:
           cpus: "0.50"
-          memory: 256M
+          memory: ${PGBOUNCER_MEMORY_LIMIT:-256M}
           pids: 128
         reservations:
-          memory: 64M
+          memory: ${PGBOUNCER_MEMORY_RESERVATION:-64M}
 
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:17.10-alpine3.24}
@@ -601,10 +601,10 @@ services:
       resources:
         limits:
           cpus: "2.00"
-          memory: 3G
+          memory: ${POSTGRES_MEMORY_LIMIT:-3G}
           pids: 256
         reservations:
-          memory: 1G
+          memory: ${POSTGRES_MEMORY_RESERVATION:-1G}
 
   postgres-backup:
     image: ${POSTGRES_BACKUP_IMAGE:?Set POSTGRES_BACKUP_IMAGE to an immutable image reference}
@@ -632,10 +632,10 @@ services:
       BACKUP_S3_REGION: ${BACKUP_S3_REGION:?Set BACKUP_S3_REGION}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?Set BACKUP_S3_BUCKET}
       BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-hook2stream/production/postgres}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
       BACKUP_S3_ACCESS_KEY_FILE: /run/secrets/backup_s3_access_key
       BACKUP_S3_SECRET_KEY_FILE: /run/secrets/backup_s3_secret_key
       BACKUP_AGE_RECIPIENT_FILE: /run/secrets/backup_age_recipient
-      BACKUP_HEARTBEAT_URL_FILE: /run/secrets/backup_heartbeat_url
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-3600}
       BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-7200}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-35}
@@ -648,7 +648,6 @@ services:
       - backup_s3_access_key
       - backup_s3_secret_key
       - backup_age_recipient
-      - backup_heartbeat_url
     configs:
       - source: dotnet_load_secrets
         target: /opt/hook2stream/load-secrets.sh
@@ -677,10 +676,64 @@ services:
       resources:
         limits:
           cpus: "0.75"
-          memory: 512M
+          memory: ${POSTGRES_BACKUP_MEMORY_LIMIT:-512M}
           pids: 128
         reservations:
+          memory: ${POSTGRES_BACKUP_MEMORY_RESERVATION:-128M}
+
+  storage-probe:
+    profiles:
+      - tools
+    image: ${POSTGRES_BACKUP_IMAGE:?Set POSTGRES_BACKUP_IMAGE to an immutable image reference}
+    init: true
+    restart: "no"
+    read_only: true
+    user: postgres
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    environment:
+      HOME: /tmp
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:?Set DEPLOYMENT_ENVIRONMENT}
+      S3_ENDPOINT: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}
+      S3_REGION: ${S3_REGION:?Set S3_REGION}
+      S3_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
+      STORAGE_PROTOCOL_URL: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}/.well-known/hook2stream-storage-protocol
+      STORAGE_PROTOCOL_VERSION: ${STORAGE_PROTOCOL_VERSION:-1}
+      S3_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
+      S3_SECRET_KEY_FILE: /run/secrets/s3_runtime_secret_key
+      HTTP_PROXY: http://egress-s3:3128
+      HTTPS_PROXY: http://egress-s3:3128
+      NO_PROXY: 127.0.0.1,localhost
+    entrypoint:
+      - /bin/sh
+      - /opt/hook2stream/storage-probe.sh
+    command: []
+    configs:
+      - source: storage_probe
+        target: /opt/hook2stream/storage-probe.sh
+        mode: 0555
+    secrets:
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=4m,mode=1777
+    depends_on:
+      egress-s3:
+        condition: service_healthy
+    networks:
+      - backend
+    logging: *json-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
           memory: 128M
+          pids: 64
 
   egress-api:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
@@ -708,10 +761,10 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: 128M
+          memory: ${EGRESS_PROXY_MEMORY_LIMIT:-128M}
           pids: 128
         reservations:
-          memory: 32M
+          memory: ${EGRESS_PROXY_MEMORY_RESERVATION:-32M}
 
   egress-s3:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
@@ -739,10 +792,10 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: 128M
+          memory: ${EGRESS_PROXY_MEMORY_LIMIT:-128M}
           pids: 128
         reservations:
-          memory: 32M
+          memory: ${EGRESS_PROXY_MEMORY_RESERVATION:-32M}
 
   egress-control:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
@@ -770,20 +823,22 @@ services:
       resources:
         limits:
           cpus: "0.25"
-          memory: 128M
+          memory: ${EGRESS_PROXY_MEMORY_LIMIT:-128M}
           pids: 128
         reservations:
-          memory: 32M
+          memory: ${EGRESS_PROXY_MEMORY_RESERVATION:-32M}
 
 configs:
   caddyfile:
     file: ${CADDYFILE_PATH:-./Caddyfile}
   egress_api_config:
-    file: ./egress/api.conf
+    file: ${EGRESS_CONFIG_DIR:-./egress}/api.conf
   egress_s3_config:
-    file: ./egress/s3.conf
+    file: ${EGRESS_CONFIG_DIR:-./egress}/s3.conf
   egress_control_config:
-    file: ./egress/control.conf
+    file: ${EGRESS_CONFIG_DIR:-./egress}/control.conf
+  storage_probe:
+    file: ./scripts/storage-probe.sh
   dotnet_load_secrets:
     file: ./scripts/load-secrets.sh
   dotnet_http_healthcheck:
@@ -824,8 +879,6 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/media_keyring
   invited_emails:
     file: ${SECRETS_DIR:-./secrets}/invited_emails
-  backup_heartbeat_url:
-    file: ${SECRETS_DIR:-./secrets}/backup_heartbeat_url
 
 volumes:
   caddy_data:

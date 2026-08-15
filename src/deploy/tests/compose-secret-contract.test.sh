@@ -38,8 +38,7 @@ for secret_name in \
     invited_emails \
     backup_s3_access_key \
     backup_s3_secret_key \
-    backup_age_recipient \
-    backup_heartbeat_url; do
+    backup_age_recipient; do
     printf '%s\n' "test-secret" > "$temporary_dir/$secret_name"
 done
 
@@ -147,10 +146,13 @@ const expectedSecrets = {
   postgres: ["postgres_password"],
   "postgres-backup": [
     "backup_age_recipient",
-    "backup_heartbeat_url",
     "backup_s3_access_key",
     "backup_s3_secret_key",
     "postgres_password",
+  ],
+  "storage-probe": [
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
   ],
 };
 

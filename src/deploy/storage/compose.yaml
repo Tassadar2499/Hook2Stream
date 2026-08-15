@@ -1,0 +1,253 @@
+services:
+  minio:
+    image: ${MINIO_IMAGE:?MINIO_IMAGE must be a reviewed image@sha256 digest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    group_add:
+      - "${SECRETS_GID:?SECRETS_GID is required}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    stop_grace_period: 90s
+    command:
+      - server
+      - --address
+      - :9000
+      - /data
+    environment:
+      HOME: /tmp
+      STORAGE_MODE: minio
+      MINIO_BROWSER: "off"
+      MINIO_API_CORS_ALLOW_ORIGIN: "off"
+      MINIO_REGION_NAME: ${MINIO_REGION:?MINIO_REGION is required}
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+    expose:
+      - "9000"
+    volumes:
+      - type: bind
+        source: ${STORAGE_DATA_DIR:?STORAGE_DATA_DIR is required}
+        target: /data
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,uid=10001,gid=10001,mode=0700
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:9000/minio/health/ready
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - storage
+    deploy:
+      resources:
+        limits:
+          cpus: "${MINIO_CPU_LIMIT:-2.0}"
+          memory: ${MINIO_MEMORY_LIMIT:-2G}
+          pids: 512
+        reservations:
+          memory: ${MINIO_MEMORY_RESERVATION:-512M}
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:?MINIO_MC_IMAGE must be a reviewed image@sha256 digest}
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    user: "10003:10003"
+    group_add:
+      - "${SECRETS_GID:?SECRETS_GID is required}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    environment:
+      HOME: /tmp
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:?DEPLOYMENT_ENVIRONMENT is required}
+      STORAGE_MODE: minio
+      STORAGE_PROTOCOL_VERSION: ${STORAGE_PROTOCOL_VERSION:?STORAGE_PROTOCOL_VERSION is required}
+      STORAGE_OBJECT_FORMAT: ${STORAGE_OBJECT_FORMAT:?STORAGE_OBJECT_FORMAT is required}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_REGION: ${MINIO_REGION:?MINIO_REGION is required}
+      MINIO_MEDIA_BUCKET: ${MINIO_MEDIA_BUCKET:?MINIO_MEDIA_BUCKET is required}
+      MINIO_BACKUP_BUCKET: ${MINIO_BACKUP_BUCKET:?MINIO_BACKUP_BUCKET is required}
+      MINIO_BACKUP_PREFIX: ${MINIO_BACKUP_PREFIX:?MINIO_BACKUP_PREFIX is required}
+      MINIO_MEDIA_QUOTA_GIB: ${MINIO_MEDIA_QUOTA_GIB:?MINIO_MEDIA_QUOTA_GIB is required}
+      MINIO_BACKUP_QUOTA_GIB: ${MINIO_BACKUP_QUOTA_GIB:?MINIO_BACKUP_QUOTA_GIB is required}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:?BACKUP_RETENTION_DAYS is required}
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      S3_BOOTSTRAP_ACCESS_KEY_FILE: /run/secrets/s3_bootstrap_access_key
+      S3_BOOTSTRAP_SECRET_KEY_FILE: /run/secrets/s3_bootstrap_secret_key
+      S3_RUNTIME_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
+      S3_RUNTIME_SECRET_KEY_FILE: /run/secrets/s3_runtime_secret_key
+      BACKUP_S3_ACCESS_KEY_FILE: /run/secrets/backup_s3_access_key
+      BACKUP_S3_SECRET_KEY_FILE: /run/secrets/backup_s3_secret_key
+      MANAGED_IDENTITY_INVENTORY_SOURCE: stdin
+      MC_CONFIG_DIR: /tmp/mc
+    entrypoint:
+      - /bin/sh
+      - /opt/hook2stream/minio-init.sh
+    configs:
+      - source: minio_init
+        target: /opt/hook2stream/minio-init.sh
+        mode: 0555
+      - source: minio_auth_healthcheck
+        target: /opt/hook2stream/minio-auth-healthcheck.sh
+        mode: 0555
+      - source: minio_policy_probe
+        target: /opt/hook2stream/minio-policy-isolation-probe.sh
+        mode: 0555
+    volumes:
+      - type: bind
+        source: ./policies
+        target: /etc/hook2stream/policies
+        read_only: true
+      - type: bind
+        source: ./lifecycle
+        target: /etc/hook2stream/lifecycle
+        read_only: true
+      - type: bind
+        source: ./markers
+        target: /etc/hook2stream/markers
+        read_only: true
+    secrets:
+      - minio_root_user
+      - minio_root_password
+      - s3_bootstrap_access_key
+      - s3_bootstrap_secret_key
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
+      - backup_s3_access_key
+      - backup_s3_secret_key
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,uid=10003,gid=10003,mode=0700
+    depends_on:
+      minio:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    networks:
+      - storage
+
+  caddy:
+    image: ${CADDY_IMAGE:?CADDY_IMAGE must be the official image pinned by digest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: "10002:10002"
+    group_add:
+      - "${SECRETS_GID:?SECRETS_GID is required}"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    environment:
+      HOME: /tmp
+      STORAGE_TLS_SERVER_NAME: ${STORAGE_TLS_SERVER_NAME:?STORAGE_TLS_SERVER_NAME is required}
+      STORAGE_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:?DEPLOYMENT_ENVIRONMENT is required}
+    extra_hosts:
+      - "${STORAGE_TLS_SERVER_NAME:?STORAGE_TLS_SERVER_NAME is required}=127.0.0.1"
+    ports:
+      - name: tailscale-https-tcp
+        target: 443
+        published: "443"
+        host_ip: ${TAILSCALE_IPV4:?TAILSCALE_IPV4 is required}
+        protocol: tcp
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+        mode: 0444
+    volumes:
+      - type: bind
+        source: ${TLS_CERT_FILE:?TLS_CERT_FILE is required}
+        target: /run/tls/tls.crt
+        read_only: true
+      - type: bind
+        source: ${TLS_KEY_FILE:?TLS_KEY_FILE is required}
+        target: /run/tls/tls.key
+        read_only: true
+    tmpfs:
+      - /config:rw,nosuid,nodev,noexec,size=16m,uid=10002,gid=10002,mode=0700
+      - /data:rw,nosuid,nodev,noexec,size=16m,uid=10002,gid=10002,mode=0700
+      - /tmp:rw,nosuid,nodev,noexec,size=16m,uid=10002,gid=10002,mode=0700
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --no-check-certificate --header "Host: $${STORAGE_TLS_SERVER_NAME}" -q -O /dev/null "https://$${STORAGE_TLS_SERVER_NAME}:443/healthz" || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - storage
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 128
+
+configs:
+  caddyfile:
+    file: ./Caddyfile
+  minio_init:
+    file: ./init/minio-init.sh
+  minio_auth_healthcheck:
+    file: ./scripts/minio-auth-healthcheck.sh
+  minio_policy_probe:
+    file: ./scripts/minio-policy-isolation-probe.sh
+
+secrets:
+  minio_root_user:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/minio_root_user
+  minio_root_password:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/minio_root_password
+  s3_bootstrap_access_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/s3_bootstrap_access_key
+  s3_bootstrap_secret_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/s3_bootstrap_secret_key
+  s3_runtime_access_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/s3_runtime_access_key
+  s3_runtime_secret_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/s3_runtime_secret_key
+  backup_s3_access_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/backup_s3_access_key
+  backup_s3_secret_key:
+    file: ${SECRETS_DIR:?SECRETS_DIR is required}/backup_s3_secret_key
+
+networks:
+  storage:
+    internal: true

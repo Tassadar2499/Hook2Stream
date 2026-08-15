@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "kind": "hook2stream-storage-runtime",
+  "protocolVersion": 1,
+  "storageFormatVersion": 1,
+  "objectFormat": "H2SEv1",
+  "minioRelease": "RELEASE.2025-10-15T17-29-55Z",
+  "minioSourceCommit": "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"
+}

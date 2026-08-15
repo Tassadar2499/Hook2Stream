@@ -67,7 +67,6 @@ case "$secret_provider" in
 esac
 
 current_stage=configuration-validation
-compose_tools config --quiet
 deployment_environment=$(read_env_value DEPLOYMENT_ENVIRONMENT)
 case "$deployment_environment" in staging|production) ;; *) fail "DEPLOYMENT_ENVIRONMENT must be staging or production" ;; esac
 public_origin=$(read_env_value PUBLIC_ORIGIN)
@@ -105,9 +104,54 @@ case "$acme_email" in
 esac
 case "$storage_mode" in
     external)
+        [ "$(read_env_value COMPOSE_PROJECT_NAME)" = "hook2stream-${deployment_environment}" ] \
+            || fail "COMPOSE_PROJECT_NAME must match the selected deployed environment"
         require_https_endpoint S3_SERVICE_URL
         require_https_endpoint S3_PUBLIC_SERVICE_URL
         require_https_endpoint_or_empty BACKUP_S3_ENDPOINT
+        s3_endpoint_host=$(read_env_value S3_ENDPOINT_HOST)
+        printf '%s\n' "$s3_endpoint_host" \
+            | grep -Eq "^h2s-storage-${deployment_environment}\.[a-z0-9]([a-z0-9-]*[a-z0-9])?\.ts\.net$" \
+            || fail "S3_ENDPOINT_HOST must be the environment-specific h2s-storage hostname in the tailnet"
+        s3_endpoint_url=https://$s3_endpoint_host
+        [ "$(read_env_value S3_SERVICE_URL)" = "$s3_endpoint_url" ] \
+            || fail "S3_SERVICE_URL must be exactly https://S3_ENDPOINT_HOST"
+        [ "$(read_env_value S3_PUBLIC_SERVICE_URL)" = "$s3_endpoint_url" ] \
+            || fail "S3_PUBLIC_SERVICE_URL must be exactly https://S3_ENDPOINT_HOST"
+        [ "$(read_env_value BACKUP_S3_ENDPOINT)" = "$s3_endpoint_url" ] \
+            || fail "BACKUP_S3_ENDPOINT must be exactly https://S3_ENDPOINT_HOST"
+        [ "$(read_env_value S3_REGION)" = us-east-1 ] \
+            || fail "remote MinIO requires S3_REGION=us-east-1"
+        [ "$(read_env_value BACKUP_S3_REGION)" = us-east-1 ] \
+            || fail "remote MinIO requires BACKUP_S3_REGION=us-east-1"
+        [ "$(read_env_value S3_FORCE_PATH_STYLE)" = true ] \
+            || fail "remote MinIO requires S3_FORCE_PATH_STYLE=true"
+        [ "$(read_env_value S3_CONFIGURE_BUCKET_LIFECYCLE)" = false ] \
+            || fail "remote MinIO storage owns bucket lifecycle; app bootstrap must disable it"
+        [ "$(read_env_value S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE)" = false ] \
+            || fail "remote MinIO does not accept multipart lifecycle bootstrap"
+        [ "$(read_env_value STORAGE_PROTOCOL_VERSION)" = 1 ] \
+            || fail "STORAGE_PROTOCOL_VERSION must be exactly 1"
+        [ "$(read_env_value EGRESS_CONFIG_DIR)" = "./egress/rendered/$deployment_environment" ] \
+            || fail "EGRESS_CONFIG_DIR must select the rendered $deployment_environment allowlist"
+        [ "$(read_env_value S3_MEDIA_BUCKET)" = "hook2stream-${deployment_environment}-media" ] \
+            || fail "S3_MEDIA_BUCKET must match the selected environment"
+        [ "$(read_env_value BACKUP_S3_BUCKET)" = "hook2stream-${deployment_environment}-pg-backups" ] \
+            || fail "BACKUP_S3_BUCKET must match the selected environment"
+        [ "$(read_env_value BACKUP_S3_PREFIX)" = "hook2stream/${deployment_environment}/postgres" ] \
+            || fail "BACKUP_S3_PREFIX must match the selected environment"
+        [ "$(read_env_value BACKUP_INTERVAL_SECONDS)" = 3600 ] \
+            || fail "BACKUP_INTERVAL_SECONDS must be 3600 for remote MinIO"
+        [ "$(read_env_value BACKUP_MAX_AGE_SECONDS)" = 7200 ] \
+            || fail "BACKUP_MAX_AGE_SECONDS must be 7200 for remote MinIO"
+        case "$deployment_environment" in
+            staging) expected_backup_retention_days=7 ;;
+            production) expected_backup_retention_days=35 ;;
+        esac
+        [ "$(read_env_value BACKUP_RETENTION_DAYS)" = "$expected_backup_retention_days" ] \
+            || fail "BACKUP_RETENTION_DAYS must be $expected_backup_retention_days for $deployment_environment"
+        [ "$(read_env_value BACKUP_RETENTION_SAFETY_SECONDS)" = 7200 ] \
+            || fail "BACKUP_RETENTION_SAFETY_SECONDS must be 7200 for remote MinIO"
         ;;
     minio)
         s3_service_url=$(read_env_value S3_SERVICE_URL)
@@ -195,6 +239,12 @@ if [ "$storage_mode" = minio ]; then
     require_digest_image MINIO_MC_IMAGE
 fi
 
+if [ "$storage_mode" = external ]; then
+    HOOK2STREAM_ENV_FILE=$environment_file \
+        "$script_dir/render-egress-configs.sh" "$environment_file"
+fi
+compose_tools config --quiet
+
 last_successful_environment="${release_state_dir}/last-successful.env"
 if [ -r "$last_successful_environment" ]; then
     snapshot_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -218,6 +268,11 @@ compose up -d egress-api egress-s3 egress-control
 for service_name in egress-api egress-s3 egress-control; do
     wait_for_service "$service_name" || fail "$service_name did not become healthy"
 done
+
+if [ "$storage_mode" = external ]; then
+    current_stage=remote-storage-probe
+    compose_tools run --rm --no-deps storage-probe
+fi
 
 if [ "$storage_mode" = minio ]; then
     current_stage=object-storage-start

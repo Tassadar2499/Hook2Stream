@@ -40,6 +40,37 @@ chmod 0600 "$candidate"/*
 HOOK2STREAM_REPOSITORY=example/hook2stream "$validator" "$candidate" >/dev/null \
     || fail "valid candidate was rejected"
 
+cp "$candidate/deploy-bundle.tar.gz" "$temporary_dir/good-bundle.tar.gz"
+cp "$candidate/release-metadata.json" "$temporary_dir/good-metadata.json"
+refresh_bundle_identity() {
+    refreshed_sha=$(sha256sum "$candidate/deploy-bundle.tar.gz" | awk '{print $1}')
+    jq --arg sha "$refreshed_sha" '.deployBundle.sha256 = $sha' \
+        "$candidate/release-metadata.json" > "$candidate/release-metadata.json.tmp"
+    mv "$candidate/release-metadata.json.tmp" "$candidate/release-metadata.json"
+    (cd "$candidate" && sha256sum release-metadata.json release-images.env deploy-bundle.tar.gz > SHA256SUMS)
+    chmod 0600 "$candidate"/*
+}
+
+truncate -s 67108865 "$candidate/deploy-bundle.tar.gz"
+refresh_bundle_identity
+if HOOK2STREAM_REPOSITORY=example/hook2stream "$validator" "$candidate" >/dev/null 2>&1; then
+    fail "compressed deploy bundle larger than 64 MiB was accepted"
+fi
+
+cp "$temporary_dir/good-bundle.tar.gz" "$candidate/deploy-bundle.tar.gz"
+cp "$temporary_dir/good-metadata.json" "$candidate/release-metadata.json"
+truncate -s 268435457 "$bundle_root/deploy/expanded-bomb"
+tar -czf "$candidate/deploy-bundle.tar.gz" -C "$bundle_root" deploy
+refresh_bundle_identity
+if HOOK2STREAM_REPOSITORY=example/hook2stream "$validator" "$candidate" >/dev/null 2>&1; then
+    fail "deploy bundle expanding beyond 256 MiB was accepted"
+fi
+
+cp "$temporary_dir/good-bundle.tar.gz" "$candidate/deploy-bundle.tar.gz"
+cp "$temporary_dir/good-metadata.json" "$candidate/release-metadata.json"
+(cd "$candidate" && sha256sum release-metadata.json release-images.env deploy-bundle.tar.gz > SHA256SUMS)
+chmod 0600 "$candidate"/*
+
 cp "$candidate/release-images.env" "$temporary_dir/good.env"
 printf '%s\n' 'UNEXPECTED_IMAGE=registry.invalid/image@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' >> "$candidate/release-images.env"
 (cd "$candidate" && sha256sum release-metadata.json release-images.env deploy-bundle.tar.gz > SHA256SUMS)

@@ -17,15 +17,14 @@ The KV v2 engine must be mounted at `hook2stream-kv`. Create these records:
 | `hook2stream-kv/data/production/bootstrap-s3` | `access_key_id`, `secret_access_key` | `bootstrap-s3.json` |
 | `hook2stream-kv/data/production/api` | `google_client_secret`, `stripe_secret_key`, `stripe_webhook_secret` | `api.json` |
 | `hook2stream-kv/data/production/control` | `openrouter_api_key` | `control.json` |
-| `hook2stream-kv/data/production/backup-s3` | `access_key_id`, `secret_access_key`, `heartbeat_url` | `backup-s3.json` |
+| `hook2stream-kv/data/production/backup-s3` | `access_key_id`, `secret_access_key` | `backup-s3.json` |
 | `hook2stream-kv/data/production/backup-encryption/current` | `key_id`, `passphrase` | `backup-encryption.json` |
 
 Every candidate has exactly `kv_version` and `secrets` at its root. Candidate
 field names are the Vault schema; the reconciler maps them to the scalar names
 documented in `../secrets/README.md`.
-Keep `heartbeat_url` present as a string; use an empty string when the optional
-backup success heartbeat is disabled.
-
+The schema is strict: remove the legacy `heartbeat_url` field from `backup-s3`
+before the next render because candidates containing any extra field are rejected.
 Apply `policies/host-renderer.hcl` to one production host-renderer AppRole. Set
 its token use count to unlimited (`token_num_uses=0`) so Vault Agent auto-auth
 can complete all template reads. Store only `role_id` and `secret_id` in

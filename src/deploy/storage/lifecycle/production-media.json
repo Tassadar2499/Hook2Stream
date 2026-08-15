@@ -1,0 +1,16 @@
+{
+  "Rules": [
+    {
+      "ID": "hook2stream-production-media-abort-multipart-1d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+    },
+    {
+      "ID": "hook2stream-production-staging-object-expiry-1d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "staging/" },
+      "Expiration": { "Days": 1 }
+    }
+  ]
+}

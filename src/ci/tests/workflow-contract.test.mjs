@@ -21,6 +21,10 @@ for (const [name, workflow] of [["ci", ci], ["promotion", promotion], ["rollback
   for (const match of workflow.matchAll(/^\s*uses:\s*[^\s@]+@([^\s#]+)/gm)) {
     assert(/^[0-9a-f]{40}$/.test(match[1]), `${name} workflow contains a non-immutable action reference: ${match[0].trim()}`);
   }
+  assert(workflow.includes('case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in') &&
+    workflow.includes('"ssh-ed25519 "*') &&
+    workflow.includes('if ($2 != "ssh-ed25519") bad=1'),
+  `${name} workflow must reject non-ED25519 deploy identities and host keys`);
 }
 
 const attemptSpecificDigestName = "release-digest-${{ matrix.name }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}";
@@ -29,6 +33,10 @@ assert(ci.includes("pattern: release-digest-*-${{ github.sha }}-${{ github.run_i
   "digest-fragment download must be scoped to the current run attempt");
 assert(promotion.includes("remote-deploy-result.mjs validate \\") && !promotion.includes("remote-deploy-result.mjs --candidate"),
   "production must invoke the explicit remote deploy-result validate subcommand");
+assert((promotion.match(/if: github\.ref == 'refs\/heads\/main'/g) ?? []).length === 2,
+  "both application production promotion jobs must reject non-main workflow dispatches");
+assert(rollback.includes("if: github.ref == 'refs/heads/main'"),
+  "rollback must reject non-main workflow dispatches before environment secrets");
 assert(rollback.includes("required_storage_format:") && rollback.includes("MIN_ROLLBACK_RELEASE_SHA: ${{ vars.MIN_ROLLBACK_RELEASE_SHA }}"),
   "rollback must require the H2SE capability and an environment rollback-floor identity");
 assert(rollback.includes('"rollback $RELEASE_SHA $REQUIRED_STORAGE_FORMAT"'),

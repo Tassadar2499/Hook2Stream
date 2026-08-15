@@ -1,8 +1,11 @@
 #!/bin/sh
 set -eu
 set -f
+umask 077
 
 fail() { printf '%s\n' "forced deploy: $*" >&2; exit 1; }
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/lib/forced-command-trust.sh"
 read_deployment_environment() {
   env_file=$1
   env_count=$(awk -F= '$1 == "DEPLOYMENT_ENVIRONMENT" {count++} END {print count + 0}' "$env_file")
@@ -16,13 +19,40 @@ read_deployment_environment() {
 : "${HOOK2STREAM_RELEASE_STATE_DIR:=/srv/hook2stream/release-state}"
 : "${HOOK2STREAM_E2E_HOOK:?HOOK2STREAM_E2E_HOOK must name the root-owned post-deploy E2E hook}"
 : "${MIN_ROLLBACK_RELEASE_SHA:?MIN_ROLLBACK_RELEASE_SHA must identify the first approved H2SE release}"
+[ "$HOOK2STREAM_RELEASES_DIR" = /srv/hook2stream/releases ] \
+  || fail "release directory is not canonical"
+[ "$HOOK2STREAM_RELEASE_STATE_DIR" = /srv/hook2stream/release-state ] \
+  || fail "release-state directory is not canonical"
+case "$HOOK2STREAM_ENV_FILE" in
+  /srv/hook2stream/config/staging.env|/srv/hook2stream/config/production.env) ;;
+  *) fail "environment file path is not canonical" ;;
+esac
+hook2stream_trusted_directory /srv/hook2stream 0:0 755 \
+  || fail "/srv/hook2stream must be root:root mode 0755"
+hook2stream_trusted_directory /srv/hook2stream/config 0:0 700 \
+  || fail "configuration directory must be root:root mode 0700"
+hook2stream_trusted_directory "$HOOK2STREAM_RELEASES_DIR" 0:0 700 \
+  || fail "releases directory must be root:root mode 0700"
+hook2stream_trusted_directory "$HOOK2STREAM_RELEASE_STATE_DIR" 0:0 700 \
+  || fail "release-state directory must be root:root mode 0700"
+hook2stream_trusted_file "$HOOK2STREAM_ENV_FILE" 0:0 600 \
+  || fail "environment file must be root:root mode 0600"
+configured_environment=$(read_deployment_environment "$HOOK2STREAM_ENV_FILE")
+case "$HOOK2STREAM_ENV_FILE:$configured_environment" in
+  /srv/hook2stream/config/staging.env:staging|/srv/hook2stream/config/production.env:production) ;;
+  *) fail "environment file name and DEPLOYMENT_ENVIRONMENT differ" ;;
+esac
+if [ "$configured_environment" = production ]; then
+  : "${HOOK2STREAM_STAGING_SIGNERS:?HOOK2STREAM_STAGING_SIGNERS is required for production}"
+  [ "$HOOK2STREAM_STAGING_SIGNERS" = /etc/hook2stream/staging-receipt-allowed-signers ] \
+    || fail "staging signer path is not canonical"
+  hook2stream_trusted_file "$HOOK2STREAM_STAGING_SIGNERS" 0:0 600 \
+    || fail "staging signers must be root:root mode 0600"
+fi
 case "$MIN_ROLLBACK_RELEASE_SHA" in *[!0-9a-f]*|'') fail "MIN_ROLLBACK_RELEASE_SHA is invalid" ;; esac
 [ "${#MIN_ROLLBACK_RELEASE_SHA}" -eq 40 ] || fail "MIN_ROLLBACK_RELEASE_SHA is invalid"
-[ -x "$HOOK2STREAM_E2E_HOOK" ] && [ ! -L "$HOOK2STREAM_E2E_HOOK" ] || fail "E2E hook must be an executable non-symlink file"
-[ "$(stat -c '%u:%a' "$HOOK2STREAM_E2E_HOOK")" = "0:500" ] || fail "E2E hook must be root-owned mode 0500"
-[ -d "$HOOK2STREAM_RELEASE_STATE_DIR" ] && [ ! -L "$HOOK2STREAM_RELEASE_STATE_DIR" ] \
-  && [ "$(stat -c '%u:%a' "$HOOK2STREAM_RELEASE_STATE_DIR")" = "0:700" ] \
-  || fail "release state must be a root-owned non-symlink directory mode 0700"
+hook2stream_trusted_file "$HOOK2STREAM_E2E_HOOK" 0:0 500 \
+  || fail "E2E hook must be root:root mode 0500"
 forced_lock=$HOOK2STREAM_RELEASE_STATE_DIR/forced-command.lock
 if [ ! -e "$forced_lock" ]; then (umask 077 && : > "$forced_lock"); fi
 [ -f "$forced_lock" ] && [ ! -L "$forced_lock" ] && [ "$(stat -c '%u:%a' "$forced_lock")" = "0:600" ] \
@@ -41,7 +71,7 @@ case "$operation" in
     incoming=$(mktemp -d "$HOOK2STREAM_RELEASE_STATE_DIR/incoming.XXXXXX")
     trap 'rm -rf "$incoming"' EXIT HUP INT TERM
     envelope=$incoming/envelope.tar
-    dd bs=1048576 count=257 of="$envelope" 2>/dev/null
+    dd iflag=fullblock bs=1048576 count=257 of="$envelope" 2>/dev/null
     [ "$(wc -c < "$envelope")" -le 268435456 ] || fail "deployment envelope exceeds 256 MiB"
     tar -tf "$envelope" | while IFS= read -r member; do
       case "$member" in .|./|candidate|candidate/*|approval|approval/*|./candidate|./candidate/*|./approval|./approval/*) ;; *) fail "envelope path is not allowed" ;; esac
@@ -51,9 +81,8 @@ case "$operation" in
     tar -tvf "$envelope" | awk '{total += $3} END {exit total <= 536870912 ? 0 : 1}' || fail "expanded envelope exceeds 512 MiB"
     tar -xf "$envelope" --no-same-owner --no-same-permissions -C "$incoming"
     chmod -R go-w "$incoming/candidate" "${incoming}/approval" 2>/dev/null || true
-    environment=$(read_deployment_environment "$HOOK2STREAM_ENV_FILE")
+    environment=$configured_environment
     if [ "$environment" = production ]; then approval=$incoming/approval; else approval=; fi
-    script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
     "$script_dir/validate-candidate.sh" "$incoming/candidate" ${approval:+"$approval"}
     artifact_name=$(jq -r '.artifactName' "$incoming/candidate/release-metadata.json")
     [ "$artifact_name" = "$identifier" ] || fail "candidate ID differs from artifactName"
@@ -61,17 +90,20 @@ case "$operation" in
     release_dir=$HOOK2STREAM_RELEASES_DIR/$commit
     bundle_sha=$(sha256sum "$incoming/candidate/deploy-bundle.tar.gz" | awk '{print $1}')
     if [ -e "$release_dir" ]; then
-      [ -d "$release_dir" ] && [ ! -L "$release_dir" ] && [ -r "$release_dir/.deploy-bundle.sha256" ] || fail "existing release path is not validated"
+      hook2stream_trusted_directory "$release_dir" 0:0 700 \
+        && hook2stream_trusted_file "$release_dir/.deploy-bundle.sha256" 0:0 600 \
+        || fail "existing release path is not root-private"
       [ "$(cat "$release_dir/.deploy-bundle.sha256")" = "$bundle_sha" ] || fail "existing release has a conflicting bundle"
     else
       release_tmp=$(mktemp -d "$HOOK2STREAM_RELEASES_DIR/.${commit}.XXXXXX")
       tar -xzf "$incoming/candidate/deploy-bundle.tar.gz" --no-same-owner --no-same-permissions -C "$release_tmp"
+      chmod -R go-rwx "$release_tmp"
       printf '%s\n' "$bundle_sha" > "$release_tmp/.deploy-bundle.sha256"
       chmod 0600 "$release_tmp/.deploy-bundle.sha256"
       mv "$release_tmp" "$release_dir" || fail "could not atomically publish release directory"
     fi
-    [ -x "$release_dir/deploy/scripts/deploy-release.sh" ] \
-      && [ -x "$release_dir/deploy/scripts/rollback-application.sh" ] \
+    hook2stream_trusted_file "$release_dir/deploy/scripts/deploy-release.sh" 0:0 700 \
+      && hook2stream_trusted_file "$release_dir/deploy/scripts/rollback-application.sh" 0:0 700 \
       || fail "release lacks the forward deploy or application-only rollback implementation"
     release_env=$HOOK2STREAM_RELEASE_STATE_DIR/candidate-$commit.env
     image_names=' API_IMAGE WORKER_IMAGE BOOTSTRAPPER_IMAGE WEB_IMAGE POSTGRES_BACKUP_IMAGE CADDY_IMAGE POSTGRES_IMAGE PGBOUNCER_IMAGE EGRESS_PROXY_IMAGE RELEASE_VERSION '
@@ -111,17 +143,21 @@ case "$operation" in
     [ "${#identifier}" -eq 40 ] || fail "rollback requires a full 40-character commit SHA"
     rollback_env=$HOOK2STREAM_RELEASE_STATE_DIR/successful/$identifier.env; rollback_dir=$HOOK2STREAM_RELEASES_DIR/$identifier
     current_env=$HOOK2STREAM_RELEASE_STATE_DIR/last-successful.env
-    [ -f "$rollback_env" ] && [ ! -L "$rollback_env" ] && [ "$(stat -c '%u:%a' "$rollback_env")" = "0:600" ] \
-      && [ -x "$rollback_dir/deploy/scripts/rollback-application.sh" ] \
+    hook2stream_trusted_directory "$rollback_dir" 0:0 700 \
+      && hook2stream_trusted_file "$rollback_dir/.deploy-bundle.sha256" 0:0 600 \
+      && hook2stream_trusted_file "$rollback_env" 0:0 600 \
+      && hook2stream_trusted_file "$rollback_dir/deploy/scripts/rollback-application.sh" 0:0 700 \
       || fail "commit is not an application-rollback-capable locally successful release"
-    [ -f "$current_env" ] && [ ! -L "$current_env" ] && [ "$(stat -c '%u:%a' "$current_env")" = "0:600" ] \
+    hook2stream_trusted_file "$current_env" 0:0 600 \
       || fail "current successful environment is unavailable or unsafe"
     capabilities=$HOOK2STREAM_RELEASE_STATE_DIR/successful/$identifier.capabilities.json
-    [ -f "$capabilities" ] && [ ! -L "$capabilities" ] && [ "$(stat -c '%u:%a' "$capabilities")" = "0:600" ] \
+    hook2stream_trusted_file "$capabilities" 0:0 600 \
       || fail "rollback target has no safely recorded storage capability"
     jq -e --arg sha "$identifier" '.schemaVersion == 1 and .releaseSha == $sha and (.storageFormats | index("H2SEv1") != null)' "$capabilities" >/dev/null \
       || fail "rollback target cannot read H2SEv1"
     environment=$(read_deployment_environment "$rollback_env")
+    [ "$environment" = "$configured_environment" ] \
+      || fail "rollback target differs from the configured host environment"
     [ "$(read_deployment_environment "$current_env")" = "$environment" ] \
       || fail "rollback target belongs to a different environment"
     active_rollback_env=$HOOK2STREAM_RELEASE_STATE_DIR/active-rollback-$identifier.env

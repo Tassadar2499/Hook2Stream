@@ -4,7 +4,7 @@ The workflows are fail-closed until the GitHub and host controls below exist. No
 
 ## Repository controls
 
-Protect `main`: require the `CI` workflow checks, require pull requests and approval, dismiss stale approvals, require conversation resolution, block force pushes and deletion, and do not permit bypass. The production environment must require two reviewers and prevent self-review; lack of this protection blocks live payments.
+Protect `main`: require the `CI` workflow checks, require pull requests and approval, dismiss stale approvals, require conversation resolution, block force pushes and deletion, and do not permit bypass. Configure every deployment Environment (`staging`, `production`, `storage-staging`, and `storage-production`) to allow only the protected `main` branch and no tags. The production environments must require two reviewers and prevent self-review; lack of either the branch restriction or reviewer protection blocks live payments.
 
 Create GitHub Environments named `staging` and `production`. Each environment has its own values for:
 
@@ -26,6 +26,54 @@ The Tailscale identities need writable `auth_keys` federation and must be restri
 - `tag:hook2stream-ci-production` to the production host on TCP 22 only.
 
 Do not configure a Tailscale OAuth secret: these workflows deliberately use GitHub OIDC federation and ephemeral tagged nodes.
+
+## Storage workflow controls
+
+Create two additional protected GitHub Environments: `storage-staging` and
+`storage-production`. Keep their deploy keys, host keys, Tailscale workload
+identities, receipt keys, and variables distinct from the app environments.
+Each storage Environment supplies:
+
+- `STORAGE_DEPLOY_HOST`: the corresponding storage host's Tailscale DNS name;
+- `STORAGE_DEPLOY_SSH_PRIVATE_KEY`: an environment-specific ED25519 key;
+- `STORAGE_DEPLOY_SSH_KNOWN_HOSTS`: the exact pinned ED25519 record;
+- `STORAGE_TS_OAUTH_CLIENT_ID` and `STORAGE_TS_AUDIENCE`:
+  workload-identity federation values.
+
+`storage-staging` also has the dedicated
+`STORAGE_STAGING_RECEIPT_SIGNING_KEY` secret. Store its public counterpart as
+the repository variable `STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS`, in OpenSSH
+allowed-signers format with identity `hook2stream-storage-staging`.
+`storage-production` requires the same two-reviewer/no-self-review protection
+as app production. The minimum protocol, object format, and MinIO security
+sequence plus the last-applied release/source commit are persisted by the
+root-owned host wrapper on the encrypted storage mount; they are not mutable
+GitHub variables.
+
+The release-independent MinIO approval policy comes only from current protected
+`main`. Install the reviewed file at
+`/etc/hook2stream-storage/minio-security-policy.json` on each storage host as
+root:root mode `0600`, record its source commit and SHA-256, and configure the
+exact path in the root-owned deploy configuration. Never install the policy
+copy carried by an old candidate. The current policy intentionally has an
+empty `approvedSourceReleases` array because the final OSS MinIO release has
+four unresolved High advisories; consequently Storage CI and both host deploys
+remain fail-closed until a supported storage choice is reviewed.
+
+Tailscale ACLs allow `tag:hook2stream-storage-ci-staging` only to staging
+storage TCP 22 and `tag:hook2stream-storage-ci-production` only to production
+storage TCP 22. They do not grant CI direct access to MinIO, app hosts,
+databases, or the other environment. Storage deployment also uses OIDC and
+ephemeral nodes; no reusable Tailscale auth key is stored in GitHub.
+
+Storage candidates and receipts are independent of app candidates. Production
+promotion accepts a successful main-branch storage CI run ID, proves the exact
+candidate passed storage staging, and streams those same digest-only files to
+the storage forced command without rebuilding. Before and after production
+approval it reapplies the policy from current protected `main` and rescans all
+three exact image digests with the current vulnerability database. A
+format-floor or MinIO security-sequence downgrade fails before Docker mutation
+and requires a forward fix.
 
 ## Host command protocol
 

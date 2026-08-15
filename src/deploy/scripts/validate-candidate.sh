@@ -13,6 +13,8 @@ for file in release-metadata.json release-images.env deploy-bundle.tar.gz SHA256
     path=$candidate_dir/$file
     [ -f "$path" ] && [ ! -L "$path" ] || fail "$file must be a regular non-symlink file"
 done
+[ "$(wc -c < "$candidate_dir/deploy-bundle.tar.gz")" -le 67108864 ] \
+    || fail "deploy bundle exceeds 64 MiB"
 [ "$(find "$candidate_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 4 ] || fail "candidate must contain exactly four files"
 [ -z "$(find "$candidate_dir" -maxdepth 1 -type f -perm /022 -print -quit)" ] || fail "candidate files must not be group/world writable"
 (cd "$candidate_dir" && sha256sum --strict --check SHA256SUMS) >/dev/null || fail "SHA256SUMS verification failed"
@@ -73,6 +75,9 @@ tar -tzf "$candidate_dir/deploy-bundle.tar.gz" | while IFS= read -r member; do
     case "$member" in deploy|deploy/*) ;; *) fail "bundle member is outside deploy/" ;; esac
 done
 if tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" | awk '$1 !~ /^[d-]/ {bad=1} END {exit bad ? 0 : 1}'; then fail "bundle links and special files are forbidden"; fi
+tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" \
+    | awk '{total += $3} END {exit total <= 268435456 ? 0 : 1}' \
+    || fail "expanded deploy bundle exceeds 256 MiB"
 
 if [ -n "$approval_dir" ]; then
     receipt=$approval_dir/staging-receipt.json; signature=$approval_dir/staging-receipt.sig
@@ -91,6 +96,11 @@ if [ -n "$approval_dir" ]; then
       .checks == ["pre-migration-backup","migration","smoke","e2e","digest-verification"]
     ' "$receipt" >/dev/null || fail "staging receipt does not approve this candidate"
     signers=${HOOK2STREAM_STAGING_SIGNERS:?HOOK2STREAM_STAGING_SIGNERS is required}
+    [ "$signers" = /etc/hook2stream/staging-receipt-allowed-signers ] \
+        || fail "staging signer path is not canonical"
+    [ -f "$signers" ] && [ ! -L "$signers" ] \
+        && [ "$(stat -c '%u:%g:%a' "$signers")" = 0:0:600 ] \
+        || fail "staging signers must be root:root mode 0600"
     ssh-keygen -Y verify -f "$signers" -I hook2stream-staging -n hook2stream-staging-receipt -s "$signature" < "$receipt" >/dev/null \
         || fail "staging receipt signature is invalid"
 fi

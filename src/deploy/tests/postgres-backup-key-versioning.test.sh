@@ -59,6 +59,10 @@ EOF
 cat > "${stub_bin}/aws" <<'EOF'
 #!/bin/sh
 set -eu
+[ -f "$AWS_CONFIG_FILE" ] \
+    && grep -Fx '    addressing_style = path' "$AWS_CONFIG_FILE" >/dev/null \
+    || exit 45
+[ "$AWS_SHARED_CREDENTIALS_FILE" = /dev/null ] || exit 46
 printf '%s' "$AWS_ACCESS_KEY_ID" > "${TEST_STATE_DIR}/used-access-key-id"
 printf '%s' "$AWS_SECRET_ACCESS_KEY" > "${TEST_STATE_DIR}/used-secret-access-key"
 
@@ -88,9 +92,8 @@ EOF
 cat > "${stub_bin}/curl" <<'EOF'
 #!/bin/sh
 set -eu
-printf '%s\n' "$*" >> "${TEST_STATE_DIR}/heartbeat-invocations"
-[ "${TEST_FAIL_HEARTBEAT:-false}" != true ] || exit 44
-printf '%s' "${TEST_HEARTBEAT_STATUS:-204}"
+printf '%s\n' "$*" >> "${TEST_STATE_DIR}/unexpected-http-invocations"
+exit 47
 EOF
 
 cat > "${stub_bin}/jq" <<'EOF'
@@ -137,8 +140,6 @@ printf '%s\n' 'database-password' > "${secret_dir}/postgres_password"
 printf '%s\n' 'file-access-key-id' > "${secret_dir}/backup_s3_access_key"
 printf '%s\n' 'file-secret-access-key' > "${secret_dir}/backup_s3_secret_key"
 printf '%s\n' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' > "${secret_dir}/backup_age_recipient"
-printf '%s\n' 'https://heartbeat.example.test/super-secret-token' \
-    > "${secret_dir}/backup_heartbeat_url"
 
 run_backup() {
     env \
@@ -147,8 +148,6 @@ run_backup() {
         TEST_UPLOAD_DIR="$upload_dir" \
         TEST_FAIL_MANIFEST="${TEST_FAIL_MANIFEST:-false}" \
         TEST_FAIL_RETENTION="${TEST_FAIL_RETENTION:-false}" \
-        TEST_FAIL_HEARTBEAT="${TEST_FAIL_HEARTBEAT:-false}" \
-        TEST_HEARTBEAT_STATUS="${TEST_HEARTBEAT_STATUS:-204}" \
         POSTGRES_HOST=postgres \
         POSTGRES_PORT=5432 \
         POSTGRES_DB=testdb \
@@ -158,6 +157,7 @@ run_backup() {
         BACKUP_S3_REGION=test-region-1 \
         BACKUP_S3_BUCKET=test-backups \
         BACKUP_S3_PREFIX=rotation-test/postgres \
+        S3_FORCE_PATH_STYLE=true \
         BACKUP_S3_ACCESS_KEY_FILE="${secret_dir}/backup_s3_access_key" \
         BACKUP_S3_SECRET_KEY_FILE="${secret_dir}/backup_s3_secret_key" \
         BACKUP_AGE_RECIPIENT_FILE="${secret_dir}/backup_age_recipient" \
@@ -166,34 +166,19 @@ run_backup() {
         BACKUP_RETENTION_DAYS=35 \
         BACKUP_RETENTION_SAFETY_SECONDS=300 \
         BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
-        BACKUP_HEARTBEAT_URL_FILE="${TEST_HEARTBEAT_URL_FILE-${secret_dir}/backup_heartbeat_url}" \
         "$backup_script" backup-once
 }
 
 run_backup >"${state_dir}/first-backup-output" 2>&1
-
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 1 ] \
-    || fail "successful backup did not send exactly one heartbeat"
-grep -q -- "--proto =https" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not restrict requests to HTTPS"
-grep -q -- "--connect-timeout 3" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not use the expected short connection timeout"
-grep -q -- "--max-time 10" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not use the expected total timeout"
-grep -q -- "--retry 2" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not use the expected retry limit"
-grep -q -- "--retry-max-time 20" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not bound the retry window"
-grep -q -- "--write-out %{http_code}" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not inspect the HTTP response status"
-if grep -q 'super-secret-token' "${state_dir}/first-backup-output"; then
-    fail "backup logs exposed the heartbeat URL"
-fi
+[ ! -e "${state_dir}/unexpected-http-invocations" ] \
+    || fail "backup attempted an external HTTP notification"
 
 [ "$(cat "${state_dir}/used-access-key-id")" = 'file-access-key-id' ] \
     || fail "backup did not load the S3 access-key ID from its file"
 [ "$(cat "${state_dir}/used-secret-access-key")" = 'file-secret-access-key' ] \
     || fail "backup did not load the S3 secret access key from its file"
+grep -Fq 'addressing_style = path' "$backup_script" \
+    || fail "backup does not force path-style S3 addressing"
 [ "$(cat "${state_dir}/used-recipient")" = 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' ] \
     || fail "backup did not use the configured age recipient"
 
@@ -272,8 +257,6 @@ set -- "${upload_dir}"/*.manifest.json
     || fail "the first backup manifest disappeared after a retry"
 [ "$(wc -l < "${state_dir}/upload-order" | tr -d ' ')" -eq 6 ] \
     || fail "the second successful backup did not upload its own three objects"
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
-    || fail "the second successful backup did not send its own heartbeat"
 
 printf '%s\n' 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppp' > "${secret_dir}/backup_age_recipient"
 if env \
@@ -290,71 +273,12 @@ if TEST_FAIL_MANIFEST=true run_backup >"${state_dir}/manifest-failure-output" 2>
 fi
 [ "$(cat "${state_dir}/last-successful-backup")" = "$marker_before_failed_upload" ] \
     || fail "failed manifest upload replaced the last successful freshness marker"
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
-    || fail "failed backup sent a success heartbeat"
 
 if TEST_FAIL_RETENTION=true run_backup >"${state_dir}/retention-failure-output" 2>&1; then
     fail "backup succeeded when the retention cycle failed"
 fi
 [ "$(cat "${state_dir}/last-successful-backup")" = "$marker_before_failed_upload" ] \
     || fail "failed retention cycle replaced the last successful freshness marker"
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
-    || fail "failed retention cycle sent a success heartbeat"
-
-printf '%s\n' 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppp' > "${secret_dir}/backup_age_recipient"
-if ! TEST_FAIL_HEARTBEAT=true run_backup \
-    >"${state_dir}/heartbeat-failure-output" 2>&1; then
-    fail "heartbeat delivery failure turned a successful backup into a failure"
-fi
-grep -q 'warning: success heartbeat delivery failed' \
-    "${state_dir}/heartbeat-failure-output" \
-    || fail "heartbeat delivery failure did not produce a warning"
-if grep -q 'super-secret-token' "${state_dir}/heartbeat-failure-output"; then
-    fail "heartbeat delivery warning exposed the heartbeat URL"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 3 ] \
-    || fail "failing heartbeat client was not invoked exactly once"
-
-if ! TEST_HEARTBEAT_STATUS=302 run_backup \
-    >"${state_dir}/heartbeat-redirect-output" 2>&1; then
-    fail "heartbeat redirect turned a successful backup into a failure"
-fi
-grep -q 'warning: success heartbeat delivery failed' \
-    "${state_dir}/heartbeat-redirect-output" \
-    || fail "heartbeat redirect was incorrectly accepted as delivery"
-if grep -q 'super-secret-token' "${state_dir}/heartbeat-redirect-output"; then
-    fail "heartbeat redirect warning exposed the heartbeat URL"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "redirecting heartbeat client was not invoked exactly once"
-
-printf '%s\n' 'http://heartbeat.example.test/super-secret-token' \
-    > "${secret_dir}/backup_heartbeat_url"
-if ! run_backup >"${state_dir}/insecure-heartbeat-output" 2>&1; then
-    fail "insecure heartbeat URL turned a successful backup into a failure"
-fi
-grep -q 'warning: heartbeat URL must use HTTPS' \
-    "${state_dir}/insecure-heartbeat-output" \
-    || fail "insecure heartbeat URL did not produce a warning"
-if grep -q 'super-secret-token' "${state_dir}/insecure-heartbeat-output"; then
-    fail "insecure heartbeat warning exposed the heartbeat URL"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "backup contacted an insecure heartbeat URL"
-
-if ! TEST_HEARTBEAT_URL_FILE= run_backup \
-    >"${state_dir}/disabled-heartbeat-output" 2>&1; then
-    fail "backup failed when heartbeat monitoring was disabled"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "disabled heartbeat monitoring still invoked the HTTP client"
-
-: > "${secret_dir}/backup_heartbeat_url"
-if ! run_backup >"${state_dir}/empty-heartbeat-output" 2>&1; then
-    fail "empty optional heartbeat secret turned a successful backup into a failure"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "empty optional heartbeat secret invoked the HTTP client"
 
 printf '%s\n' '../invalid-recipient' > "${secret_dir}/backup_age_recipient"
 if run_backup >"${state_dir}/invalid-key-output" 2>&1; then

@@ -56,6 +56,9 @@ jobs:
         run: |
           bash src/ci/tests/release-candidate.test.sh
           node src/ci/tests/workflow-contract.test.mjs
+          bash src/ci/tests/storage-candidate.test.sh
+          node src/ci/tests/storage-workflow-contract.test.mjs
+          node src/ci/tests/storage-minio-security-gate.test.mjs
       - run: src/ci/verify.sh
 
       - run: npx --prefix src/web playwright install --with-deps chromium firefox webkit
@@ -472,8 +475,12 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
           chmod 0600 "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
-          ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" >/dev/null
-          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" >/dev/null
+          case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in
+            "ssh-ed25519 "*) ;;
+            *) echo "deploy identity must be ED25519" >&2; exit 1 ;;
+          esac
+          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            | awk '!/^#/ { found=1; if ($2 != "ssh-ed25519") bad=1 } END { exit (!found || bad) ? 1 : 0 }'
 
       - name: Deploy candidate and run host smoke/E2E
         shell: bash

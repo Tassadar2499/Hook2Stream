@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "kind": "hook2stream-minio-security-policy",
+  "reviewedAt": "2026-08-15",
+  "approvedSourceReleases": [],
+  "blockingAdvisories": [
+    {
+      "id": "CVE-2026-34204",
+      "severity": "high",
+      "url": "https://github.com/advisories/GHSA-3rh2-v3gr-35p9",
+      "patchedOssRelease": null
+    },
+    {
+      "id": "CVE-2026-39414",
+      "severity": "high",
+      "url": "https://github.com/advisories/GHSA-h749-fxx7-pwpg",
+      "patchedOssRelease": null
+    },
+    {
+      "id": "CVE-2026-40344",
+      "severity": "high",
+      "url": "https://github.com/advisories/GHSA-9c4q-hq6p-c237",
+      "patchedOssRelease": null
+    },
+    {
+      "id": "CVE-2026-41145",
+      "severity": "high",
+      "url": "https://github.com/advisories/GHSA-hv4r-mvr4-25vw",
+      "patchedOssRelease": null
+    }
+  ]
+}

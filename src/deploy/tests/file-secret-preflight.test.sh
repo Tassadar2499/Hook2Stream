@@ -45,7 +45,6 @@ export HOOK2STREAM_ENV_FILE
 for secret_name in $(deployment_required_secret_files); do
     printf '%s\n' test-secret > "$secret_dir/$secret_name"
 done
-: > "$secret_dir/backup_heartbeat_url"
 
 PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
 
@@ -100,19 +99,25 @@ fi
 if command -v jq >/dev/null 2>&1; then
     vault_backup_bundle=${temporary_dir}/backup-s3.json
     cat > "$vault_backup_bundle" <<'EOF'
-{"kv_version":1,"secrets":{"access_key_id":"id","heartbeat_url":"","secret_access_key":"secret"}}
+{"kv_version":1,"secrets":{"access_key_id":"id","secret_access_key":"secret"}}
 EOF
     vault_validate_bundle "$vault_backup_bundle" \
-        '["access_key_id","heartbeat_url","secret_access_key"]' \
-        '["heartbeat_url"]' \
-        || test_fail "Vault contract rejected an empty optional heartbeat URL"
+        '["access_key_id","secret_access_key"]' \
+        || test_fail "Vault contract rejected the exact backup S3 schema"
 
     cat > "$vault_backup_bundle" <<'EOF'
-{"kv_version":1,"secrets":{"access_key_id":"","heartbeat_url":"https://monitor.invalid/token","secret_access_key":"secret"}}
+{"kv_version":1,"secrets":{"access_key_id":"id","heartbeat_url":"https://monitor.invalid/token","secret_access_key":"secret"}}
 EOF
     if vault_validate_bundle "$vault_backup_bundle" \
-        '["access_key_id","heartbeat_url","secret_access_key"]' \
-        '["heartbeat_url"]'; then
+        '["access_key_id","secret_access_key"]'; then
+        test_fail "Vault contract accepted the removed legacy heartbeat_url field"
+    fi
+
+    cat > "$vault_backup_bundle" <<'EOF'
+{"kv_version":1,"secrets":{"access_key_id":"","secret_access_key":"secret"}}
+EOF
+    if vault_validate_bundle "$vault_backup_bundle" \
+        '["access_key_id","secret_access_key"]'; then
         test_fail "Vault contract accepted an empty required credential"
     fi
 fi

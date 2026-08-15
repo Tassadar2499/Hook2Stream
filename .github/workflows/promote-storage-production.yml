@@ -1,0 +1,369 @@
+name: Promote storage production
+run-name: Promote Storage CI run ${{ inputs.source_ci_run_id }} to storage production
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ci_run_id:
+        description: Successful main Storage CI run whose staging-tested candidate will be promoted
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-source:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    outputs:
+      source-sha: ${{ steps.source.outputs.sha }}
+      source-run-attempt: ${{ steps.source.outputs.attempt }}
+      candidate-name: ${{ steps.source.outputs.candidate_name }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+    steps:
+      - name: Verify successful main Storage CI source
+        id: source
+        shell: bash
+        run: |
+          case "$SOURCE_CI_RUN_ID" in
+            ''|*[!0-9]*) echo "source_ci_run_id must be numeric" >&2; exit 1 ;;
+          esac
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID")"
+          test "$(jq -r .name <<<"$run_json")" = "Storage CI"
+          test "$(jq -r .path <<<"$run_json")" = ".github/workflows/storage-ci.yml"
+          test "$(jq -r .event <<<"$run_json")" = push
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          sha="$(jq -r .head_sha <<<"$run_json")"
+          attempt="$(jq -r .run_attempt <<<"$run_json")"
+          case "$sha" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "source Storage CI returned an invalid head SHA" >&2; exit 1 ;;
+          esac
+          case "$attempt" in
+            ''|0|*[!0-9]*) echo "source Storage CI returned an invalid run attempt" >&2; exit 1 ;;
+          esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          echo "candidate_name=storage-candidate-${sha}-${SOURCE_CI_RUN_ID}-${attempt}" >> "$GITHUB_OUTPUT"
+          echo "receipt_name=storage-staging-receipt-${sha}-${SOURCE_CI_RUN_ID}-${attempt}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          persist-credentials: false
+
+      - name: Download storage candidate and signed staging receipt
+        shell: bash
+        env:
+          CANDIDATE_NAME: ${{ steps.source.outputs.candidate_name }}
+          RECEIPT_NAME: ${{ steps.source.outputs.receipt_name }}
+        run: |
+          mkdir -p promotion/candidate promotion/approval
+          gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_NAME" --dir promotion/candidate
+          gh run download "$SOURCE_CI_RUN_ID" --name "$RECEIPT_NAME" --dir promotion/approval
+
+      - name: Verify storage candidate contract and attestations
+        shell: bash
+        run: |
+          node src/ci/storage-candidate.mjs validate \
+            --candidate promotion/candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.source.outputs.sha }}" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ steps.source.outputs.attempt }}"
+          attestation_policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/storage-ci.yml"
+            --source-ref refs/heads/main
+            --source-digest "${{ steps.source.outputs.sha }}"
+            --deny-self-hosted-runners
+          )
+          while read -r _ file; do
+            gh attestation verify "promotion/candidate/$file" "${attestation_policy[@]}"
+          done < promotion/candidate/SHA256SUMS
+          gh attestation verify promotion/approval/storage-staging-receipt.json "${attestation_policy[@]}"
+          gh attestation verify promotion/approval/storage-staging-receipt.sig "${attestation_policy[@]}"
+
+      - name: Verify storage staging receipt contract and signature
+        shell: bash
+        env:
+          STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS }}
+        run: |
+          node src/ci/storage-receipt.mjs validate \
+            --candidate promotion/candidate \
+            --receipt promotion/approval/storage-staging-receipt.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.source.outputs.sha }}" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ steps.source.outputs.attempt }}"
+          test -n "$STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS"
+          printf '%s\n' "$STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS" > "$RUNNER_TEMP/storage-staging-receipt-allowed-signers"
+          ssh-keygen -Y verify \
+            -f "$RUNNER_TEMP/storage-staging-receipt-allowed-signers" \
+            -I hook2stream-storage-staging \
+            -n hook2stream-storage-staging-receipt \
+            -s promotion/approval/storage-staging-receipt.sig \
+            < promotion/approval/storage-staging-receipt.json
+
+      - name: Checkout current protected-main MinIO security policy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/heads/main
+          path: current-main-security
+          persist-credentials: false
+
+      - name: Apply current main security policy to the staged candidate
+        id: current_security
+        shell: bash
+        run: |
+          mkdir -p current-security-review
+          tar -xOzf promotion/candidate/storage-bundle.tar.gz \
+            storage/storage-release.json > current-security-review/storage-release.json
+          node current-main-security/src/ci/storage-minio-security-gate.mjs \
+            --release-manifest current-security-review/storage-release.json \
+            --dockerfile src/deploy/minio/Dockerfile \
+            --policy current-main-security/src/deploy/storage/minio-security-policy.json
+          read_candidate_image() {
+            local key="$1"
+            local value
+            value="$(awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }' \
+              promotion/candidate/storage-images.env)"
+            case "$value" in
+              *@sha256:????????????????????????????????????????????????????????????????) ;;
+              *) echo "$key is not a full digest reference" >&2; exit 1 ;;
+            esac
+            case "${value##*@sha256:}" in
+              *[!0-9a-f]*) echo "$key has a non-hexadecimal digest" >&2; exit 1 ;;
+            esac
+            printf '%s' "$value"
+          }
+          echo "minio_image=$(read_candidate_image MINIO_IMAGE)" >> "$GITHUB_OUTPUT"
+          echo "minio_mc_image=$(read_candidate_image MINIO_MC_IMAGE)" >> "$GITHUB_OUTPUT"
+          echo "caddy_image=$(read_candidate_image CADDY_IMAGE)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR for current pre-approval scans
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-scan exact MinIO digest before production approval
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.current_security.outputs.minio_image }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Re-scan exact minio/mc digest before production approval
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.current_security.outputs.minio_mc_image }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Re-scan exact Caddy digest before production approval
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.current_security.outputs.caddy_image }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Seal verified storage promotion payload
+        run: tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf storage-promotion-payload.tar.gz promotion
+
+      - name: Upload verified storage promotion payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-storage-production-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: storage-promotion-payload.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy-storage-production:
+    if: github.ref == 'refs/heads/main'
+    needs: verify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: storage-production
+    concurrency:
+      group: hook2stream-storage-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    env:
+      CANDIDATE_NAME: ${{ needs.verify-source.outputs.candidate-name }}
+      SOURCE_SHA: ${{ needs.verify-source.outputs.source-sha }}
+      SOURCE_RUN_ATTEMPT: ${{ needs.verify-source.outputs.source-run-attempt }}
+      SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+      DEPLOY_HOST: ${{ secrets.STORAGE_DEPLOY_HOST }}
+      DEPLOY_USER: hook2stream-storage-deploy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.verify-source.outputs.source-sha }}
+          persist-credentials: false
+
+      - name: Download verified storage promotion payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-storage-production-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Revalidate storage payload after approval boundary
+        shell: bash
+        env:
+          STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS }}
+        run: |
+          mkdir storage-promotion-payload
+          tar -xzf storage-promotion-payload.tar.gz --strip-components=1 -C storage-promotion-payload
+          node src/ci/storage-candidate.mjs validate \
+            --candidate storage-promotion-payload/candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$SOURCE_SHA" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "$SOURCE_RUN_ATTEMPT"
+          node src/ci/storage-receipt.mjs validate \
+            --candidate storage-promotion-payload/candidate \
+            --receipt storage-promotion-payload/approval/storage-staging-receipt.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$SOURCE_SHA" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "$SOURCE_RUN_ATTEMPT"
+          test -n "$STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS"
+          printf '%s\n' "$STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS" > "$RUNNER_TEMP/storage-staging-receipt-allowed-signers"
+          ssh-keygen -Y verify \
+            -f "$RUNNER_TEMP/storage-staging-receipt-allowed-signers" \
+            -I hook2stream-storage-staging \
+            -n hook2stream-storage-staging-receipt \
+            -s storage-promotion-payload/approval/storage-staging-receipt.sig \
+            < storage-promotion-payload/approval/storage-staging-receipt.json
+
+      - name: Checkout current protected-main MinIO security policy after approval
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/heads/main
+          path: current-main-security
+          persist-credentials: false
+
+      - name: Reapply current main security policy after approval
+        id: current_security
+        shell: bash
+        run: |
+          mkdir -p current-security-review
+          tar -xOzf storage-promotion-payload/candidate/storage-bundle.tar.gz \
+            storage/storage-release.json > current-security-review/storage-release.json
+          node current-main-security/src/ci/storage-minio-security-gate.mjs \
+            --release-manifest current-security-review/storage-release.json \
+            --dockerfile src/deploy/minio/Dockerfile \
+            --policy current-main-security/src/deploy/storage/minio-security-policy.json
+          read_candidate_image() {
+            local key="$1"
+            local value
+            value="$(awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }' \
+              storage-promotion-payload/candidate/storage-images.env)"
+            case "$value" in
+              *@sha256:????????????????????????????????????????????????????????????????) ;;
+              *) echo "$key is not a full digest reference" >&2; exit 1 ;;
+            esac
+            case "${value##*@sha256:}" in
+              *[!0-9a-f]*) echo "$key has a non-hexadecimal digest" >&2; exit 1 ;;
+            esac
+            printf '%s' "$value"
+          }
+          echo "minio_image=$(read_candidate_image MINIO_IMAGE)" >> "$GITHUB_OUTPUT"
+          echo "minio_mc_image=$(read_candidate_image MINIO_MC_IMAGE)" >> "$GITHUB_OUTPUT"
+          echo "caddy_image=$(read_candidate_image CADDY_IMAGE)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR for current post-approval scans
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-scan exact MinIO digest after production approval
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.current_security.outputs.minio_image }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Re-scan exact minio/mc digest after production approval
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.current_security.outputs.minio_mc_image }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Re-scan exact Caddy digest after production approval
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.current_security.outputs.caddy_image }}
+          fail-build: true
+          severity-cutoff: high
+          output-format: table
+
+      - name: Connect ephemeral storage-production runner to Tailscale
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.STORAGE_TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.STORAGE_TS_AUDIENCE }}
+          tags: tag:hook2stream-storage-ci-production
+          ping: ${{ secrets.STORAGE_DEPLOY_HOST }}
+
+      - name: Configure strict storage production SSH identity
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STORAGE_DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.STORAGE_DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 "$RUNNER_TEMP/hook2stream-storage-ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts"
+          case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519")" in
+            "ssh-ed25519 "*) ;;
+            *) echo "storage deploy identity must be ED25519" >&2; exit 1 ;;
+          esac
+          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts" \
+            | awk '!/^#/ { found=1; if ($2 != "ssh-ed25519") bad=1 } END { exit (!found || bad) ? 1 : 0 }'
+
+      - name: Promote exact staging-tested storage digests without rebuild
+        shell: bash
+        run: |
+          tar -C storage-promotion-payload -cf - . | ssh \
+            -i "$RUNNER_TEMP/hook2stream-storage-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-storage-ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "deploy-storage $CANDIDATE_NAME" | tee "$RUNNER_TEMP/storage-deploy-output.log"
+          test "$(wc -l < "$RUNNER_TEMP/storage-deploy-output.log")" -eq 1
+          test "$(grep -c '^HOOK2STREAM_STORAGE_REMOTE_RECEIPT=' "$RUNNER_TEMP/storage-deploy-output.log")" -eq 1
+          encoded_result="$(sed -n 's/^HOOK2STREAM_STORAGE_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/storage-deploy-output.log")"
+          printf '%s' "$encoded_result" | base64 --decode > storage-production-result.json
+          node src/ci/storage-receipt.mjs validate-remote \
+            --candidate storage-promotion-payload/candidate \
+            --result storage-production-result.json \
+            --environment storage-production

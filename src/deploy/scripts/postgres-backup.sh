@@ -35,71 +35,6 @@ aws_command() {
     fi
 }
 
-send_success_heartbeat() {
-    [ -n "$BACKUP_HEARTBEAT_URL_FILE" ] || return 0
-
-    if [ ! -r "$BACKUP_HEARTBEAT_URL_FILE" ]; then
-        printf '%s\n' \
-            "postgres backup: warning: heartbeat secret file is not readable; skipping notification" >&2
-        return 0
-    fi
-
-    if ! heartbeat_url=$(sed -e 's/[[:space:]]*$//' "$BACKUP_HEARTBEAT_URL_FILE"); then
-        printf '%s\n' \
-            "postgres backup: warning: heartbeat secret file could not be read; skipping notification" >&2
-        return 0
-    fi
-    if [ -z "$heartbeat_url" ]; then
-        unset heartbeat_url
-        return 0
-    fi
-    case "$heartbeat_url" in
-        https://?*) ;;
-        *)
-            printf '%s\n' \
-                "postgres backup: warning: heartbeat URL must use HTTPS; skipping notification" >&2
-            unset heartbeat_url
-            return 0
-            ;;
-    esac
-    case "$heartbeat_url" in
-        *[[:space:]]*)
-            printf '%s\n' \
-                "postgres backup: warning: heartbeat URL is invalid; skipping notification" >&2
-            unset heartbeat_url
-            return 0
-            ;;
-    esac
-
-    heartbeat_status=
-    if heartbeat_status=$(curl \
-        --fail \
-        --silent \
-        --show-error \
-        --proto '=https' \
-        --connect-timeout 3 \
-        --max-time 10 \
-        --retry 2 \
-        --retry-delay 1 \
-        --retry-max-time 20 \
-        --retry-connrefused \
-        --output /dev/null \
-        --write-out '%{http_code}' \
-        "$heartbeat_url" 2>/dev/null); then
-        case "$heartbeat_status" in
-            2[0-9][0-9])
-                printf '%s\n' "postgres backup: success heartbeat delivered"
-                unset heartbeat_status heartbeat_url
-                return 0
-                ;;
-        esac
-    fi
-    printf '%s\n' \
-        "postgres backup: warning: success heartbeat delivery failed" >&2
-    unset heartbeat_status heartbeat_url
-    return 0
-}
-
 cleanup() {
     rm -f \
         "${encrypted_file:-}" \
@@ -111,10 +46,15 @@ cleanup() {
         "${success_marker_tmp:-}"
 }
 
+cleanup_process() {
+    cleanup
+    rm -f "${aws_config_file:-}"
+}
+
 on_signal() {
     signal_status=$1
     trap - EXIT HUP INT TERM
-    cleanup
+    cleanup_process
     exit "$signal_status"
 }
 
@@ -250,7 +190,6 @@ perform_backup() {
     mv -f "$success_marker_tmp" "$BACKUP_SUCCESS_MARKER"
     printf '%s\n' \
         "postgres backup: uploaded s3://${BACKUP_S3_BUCKET}/${manifest_object_key}"
-    send_success_heartbeat
     cleanup
 }
 
@@ -263,6 +202,7 @@ perform_backup() {
 : "${BACKUP_S3_REGION:?BACKUP_S3_REGION is required}"
 : "${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}"
 : "${BACKUP_S3_PREFIX:=hook2stream/production/postgres}"
+: "${S3_FORCE_PATH_STYLE:?S3_FORCE_PATH_STYLE is required}"
 : "${BACKUP_S3_ACCESS_KEY_FILE:?BACKUP_S3_ACCESS_KEY_FILE is required}"
 : "${BACKUP_S3_SECRET_KEY_FILE:?BACKUP_S3_SECRET_KEY_FILE is required}"
 : "${BACKUP_AGE_RECIPIENT_FILE:?BACKUP_AGE_RECIPIENT_FILE is required}"
@@ -270,7 +210,6 @@ perform_backup() {
 : "${BACKUP_RETENTION_DAYS:=35}"
 : "${BACKUP_RETENTION_SAFETY_SECONDS:=7200}"
 : "${BACKUP_SUCCESS_MARKER:=/tmp/last-successful-backup}"
-: "${BACKUP_HEARTBEAT_URL_FILE:=}"
 
 for integer_value in \
     "$BACKUP_INTERVAL_SECONDS" \
@@ -287,6 +226,20 @@ retention_seconds=$((BACKUP_RETENTION_DAYS * 86400))
     || fail "BACKUP_RETENTION_SAFETY_SECONDS must cover at least one backup interval"
 [ "$BACKUP_RETENTION_SAFETY_SECONDS" -le 86400 ] \
     || fail "BACKUP_RETENTION_SAFETY_SECONDS must be at most one day"
+[ "$S3_FORCE_PATH_STYLE" = true ] \
+    || fail "S3_FORCE_PATH_STYLE must be true for backup object storage"
+
+umask 077
+aws_config_file=$(mktemp /tmp/hook2stream-backup-aws-config.XXXXXX)
+AWS_CONFIG_FILE=$aws_config_file
+export AWS_CONFIG_FILE
+printf '%s\n' \
+    '[default]' \
+    "region = $BACKUP_S3_REGION" \
+    's3 =' \
+    '    addressing_style = path' > "$AWS_CONFIG_FILE"
+AWS_SHARED_CREDENTIALS_FILE=/dev/null
+export AWS_SHARED_CREDENTIALS_FILE
 
 export AWS_ACCESS_KEY_ID
 AWS_ACCESS_KEY_ID=$(read_secret "$BACKUP_S3_ACCESS_KEY_FILE")
@@ -297,7 +250,7 @@ export AWS_REGION=$BACKUP_S3_REGION
 export AWS_EC2_METADATA_DISABLED=true
 export AWS_PAGER=
 
-trap cleanup EXIT
+trap cleanup_process EXIT
 trap 'on_signal 129' HUP
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM

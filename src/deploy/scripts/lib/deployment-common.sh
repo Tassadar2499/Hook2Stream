@@ -146,6 +146,12 @@ deployment_validate_timeouts() {
 deployment_require_base_tools() {
     [ -r "$environment_file" ] \
         || fail "environment file is not readable: $environment_file"
+    deployment_duplicate_environment_names=$(awk -F= '
+        /^[A-Za-z_][A-Za-z0-9_]*=/ { count[$1]++ }
+        END { for (name in count) if (count[name] > 1) print name }
+    ' "$environment_file" | sort)
+    [ -z "$deployment_duplicate_environment_names" ] \
+        || fail "environment file contains duplicate assignments: $(printf '%s' "$deployment_duplicate_environment_names" | tr '\n' ' ')"
     deployment_reject_compose_environment_overrides
     deployment_require_command docker
     docker compose version >/dev/null 2>&1 \
@@ -224,12 +230,6 @@ deployment_validate_file_secrets() {
             || fail "required secret file is empty: $deployment_secret_path"
     done
 
-    deployment_heartbeat_path=${deployment_file_secret_dir}/backup_heartbeat_url
-    [ -f "$deployment_heartbeat_path" ] && [ ! -L "$deployment_heartbeat_path" ] \
-        || fail "heartbeat secret must be a regular non-symlink file: $deployment_heartbeat_path"
-    deployment_heartbeat_metadata=$(stat -c '%u:%g:%a' "$deployment_heartbeat_path")
-    [ "$deployment_heartbeat_metadata" = "0:${deployment_file_secret_gid}:640" ] \
-        || fail "$deployment_heartbeat_path must be root:${deployment_file_secret_gid} with mode 0640"
 }
 
 deployment_reject_symlink_path_components() {
@@ -454,7 +454,7 @@ vault_bundle_scalar_files() {
         bootstrap-s3) printf '%s\n' s3_bootstrap_access_key s3_bootstrap_secret_key ;;
         api) printf '%s\n' google_client_secret stripe_secret_key stripe_webhook_secret ;;
         control) printf '%s\n' openrouter_api_key ;;
-        backup-s3) printf '%s\n' backup_s3_access_key backup_s3_secret_key backup_heartbeat_url ;;
+        backup-s3) printf '%s\n' backup_s3_access_key backup_s3_secret_key ;;
         backup-encryption) printf '%s\n' backup_encryption_key_id backup_encryption_passphrase ;;
         *) return 1 ;;
     esac
@@ -469,12 +469,10 @@ vault_required_scalar_files() {
 vault_validate_bundle() {
     vault_bundle_file=$1
     vault_expected_keys=$2
-    vault_optional_empty_keys=${3:-'[]'}
     [ -f "$vault_bundle_file" ] && [ ! -L "$vault_bundle_file" ] \
         || return 1
     jq -e \
-        --argjson expected "$vault_expected_keys" \
-        --argjson optional_empty "$vault_optional_empty_keys" '
+        --argjson expected "$vault_expected_keys" '
         type == "object"
         and ((keys | sort) == ["kv_version", "secrets"])
         and (.kv_version | (type == "number") and (. >= 1) and (floor == .))
@@ -483,10 +481,7 @@ vault_validate_bundle() {
         and ([.secrets | to_entries[] |
             .key as $key |
             (.value | type == "string")
-            and (
-                (.value | length > 0)
-                or (($optional_empty | index($key)) != null)
-            )
+            and (.value | length > 0)
             and (.value | contains("\u0000") | not)
             and (.value | contains("\n") | not)
             and (.value | contains("\r") | not)
@@ -515,8 +510,7 @@ vault_validate_candidate_bundles() {
     vault_validate_bundle "$vault_candidate_dir/control.json" \
         '["openrouter_api_key"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/backup-s3.json" \
-        '["access_key_id","heartbeat_url","secret_access_key"]' \
-        '["heartbeat_url"]' || return 1
+        '["access_key_id","secret_access_key"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/backup-encryption.json" \
         '["key_id","passphrase"]' || return 1
 }
@@ -525,13 +519,10 @@ vault_write_scalar() {
     vault_source_json=$1
     vault_source_key=$2
     vault_destination_file=$3
-    vault_allow_empty=${4:-false}
     vault_destination_tmp=${vault_destination_file}.tmp
     jq -erj --arg key "$vault_source_key" '.secrets[$key]' \
         "$vault_source_json" > "$vault_destination_tmp"
-    if [ "$vault_allow_empty" != true ]; then
-        [ -s "$vault_destination_tmp" ] || return 1
-    fi
+    [ -s "$vault_destination_tmp" ] || return 1
     chown "0:${vault_secrets_gid}" "$vault_destination_tmp"
     chmod 0640 "$vault_destination_tmp"
     mv -f "$vault_destination_tmp" "$vault_destination_file"
@@ -562,8 +553,6 @@ vault_split_candidate() {
         "$vault_candidate_dir/backup_s3_access_key"
     vault_write_scalar "$vault_candidate_dir/backup-s3.json" secret_access_key \
         "$vault_candidate_dir/backup_s3_secret_key"
-    vault_write_scalar "$vault_candidate_dir/backup-s3.json" heartbeat_url \
-        "$vault_candidate_dir/backup_heartbeat_url" true
     vault_write_scalar "$vault_candidate_dir/backup-encryption.json" key_id \
         "$vault_candidate_dir/backup_encryption_key_id"
     vault_write_scalar "$vault_candidate_dir/backup-encryption.json" passphrase \
@@ -612,9 +601,7 @@ vault_validate_generation() {
             && [ ! -L "$vault_generation_dir/$vault_scalar_file" ] \
             && [ -r "$vault_generation_dir/$vault_scalar_file" ] \
             || return 1
-        if [ "$vault_scalar_file" != backup_heartbeat_url ]; then
-            [ -s "$vault_generation_dir/$vault_scalar_file" ] || return 1
-        fi
+        [ -s "$vault_generation_dir/$vault_scalar_file" ] || return 1
         vault_scalar_metadata=$(stat -c '%u:%g:%a' \
             "$vault_generation_dir/$vault_scalar_file")
         [ "$vault_scalar_metadata" = "0:${vault_secrets_gid}:640" ] \

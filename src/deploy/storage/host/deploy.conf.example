@@ -1,0 +1,7 @@
+STORAGE_ENV_FILE=/etc/hook2stream-storage/staging.env
+STORAGE_RELEASES_DIR=/srv/hook2stream-storage/releases
+STORAGE_STATE_DIR=/srv/hook2stream-storage/release-state
+STORAGE_REPOSITORY=OWNER/Hook2Stream
+STORAGE_MINIO_SECURITY_POLICY=/etc/hook2stream-storage/minio-security-policy.json
+# Production only; remove for staging.
+STORAGE_STAGING_SIGNERS=/etc/hook2stream-storage/storage-staging-receipt-allowed-signers

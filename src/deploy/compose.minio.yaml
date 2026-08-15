@@ -15,6 +15,7 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
     depends_on:
       minio:
         condition: service_healthy
@@ -28,6 +29,7 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
     depends_on:
       minio:
         condition: service_healthy
@@ -44,6 +46,7 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
     depends_on:
       minio:
         condition: service_healthy
@@ -60,6 +63,7 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
     depends_on:
       minio:
         condition: service_healthy
@@ -72,6 +76,7 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
     depends_on:
       minio:
         condition: service_healthy
@@ -88,6 +93,7 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
     depends_on:
       minio:
         condition: service_healthy
@@ -100,10 +106,15 @@ services:
       Storage__ServiceUrl: http://minio:9000
       Storage__PublicServiceUrl: https://${S3_PUBLIC_DOMAIN:?Set S3_PUBLIC_DOMAIN}
       Storage__ForcePathStyle: "true"
+      NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio
       # MinIO CE does not implement per-bucket PutBucketCors. The server-level
       # CORS layer is disabled and Caddy handles only the media bucket path;
       # external S3 deployments retain the base bucket-CORS bootstrap.
       Storage__ConfigureBucketCors: "false"
+      # The disposable local/CI overlay still owns its staging lifecycle. Remote
+      # IT-Garage storage owns deployed bucket lifecycle and app profiles set
+      # this false.
+      Storage__ConfigureBucketLifecycle: "true"
       # This MinIO release rejects a standalone abort-incomplete-multipart
       # lifecycle rule. Application error paths still abort uploads directly;
       # native external S3 keeps the lifecycle safety net from compose.yaml.
@@ -120,12 +131,17 @@ services:
       BACKUP_S3_ENDPOINT: http://minio:9000
       BACKUP_S3_REGION: ${S3_REGION:?Set S3_REGION}
       BACKUP_RETENTION_DAYS: "7"
+      NO_PROXY: 127.0.0.1,localhost,postgres,minio
     depends_on:
       minio:
         condition: service_healthy
     networks:
       - backend
       - storage
+
+  storage-probe:
+    environment:
+      NO_PROXY: 127.0.0.1,localhost,minio
 
   postgres:
     command:

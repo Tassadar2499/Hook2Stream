@@ -395,11 +395,27 @@ for (const serviceName of [
     String(environmentValue(service, "Storage__ForcePathStyle")).toLowerCase() === "true",
     `${serviceName} must use path-style S3 addressing in MinIO mode`,
   );
+  assert(
+    environmentValue(service, "NO_PROXY") ===
+      "127.0.0.1,localhost,postgres,pgbouncer,api,web,minio",
+    `${serviceName} must bypass Squid only for the local Compose peers including MinIO`,
+  );
 }
 assert(
   environmentValue(services["postgres-backup"] ?? {}, "BACKUP_S3_ENDPOINT") ===
     internalEndpoint,
   `postgres-backup endpoint must be exactly ${internalEndpoint}`,
+);
+assert(
+  environmentValue(services["postgres-backup"] ?? {}, "NO_PROXY") ===
+    "127.0.0.1,localhost,postgres,minio",
+  "postgres-backup must bypass Squid for local PostgreSQL and MinIO",
+);
+assert(
+  environmentValue(services["storage-probe"] ?? {}, "S3_ENDPOINT") === internalEndpoint &&
+    environmentValue(services["storage-probe"] ?? {}, "NO_PROXY") ===
+      "127.0.0.1,localhost,minio",
+  "storage-probe must reach local MinIO directly instead of sending HTTP through Squid",
 );
 assert(
   String(environmentValue(services.bootstrapper, "Storage__ConfigureBucketCors")).toLowerCase() ===
