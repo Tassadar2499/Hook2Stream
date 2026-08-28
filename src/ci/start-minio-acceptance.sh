@@ -5,7 +5,7 @@ repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 environment_output=${1:?pass the GitHub environment output file as the first argument}
 minio_image=${MINIO_ACCEPTANCE_IMAGE:-hook2stream-minio:ci}
 mc_image=${MINIO_ACCEPTANCE_MC_IMAGE:-minio/mc:RELEASE.2025-07-21T05-28-08Z}
-caddy_image=${MINIO_ACCEPTANCE_CADDY_IMAGE:-caddy:2.11.4-alpine}
+caddy_image=${MINIO_ACCEPTANCE_CADDY_IMAGE:-hook2stream-caddy:ci}
 minio_host_port=${MINIO_ACCEPTANCE_MINIO_PORT:-9000}
 caddy_host_port=${MINIO_ACCEPTANCE_CADDY_PORT:-9443}
 install_ca=${MINIO_ACCEPTANCE_INSTALL_CA:-true}

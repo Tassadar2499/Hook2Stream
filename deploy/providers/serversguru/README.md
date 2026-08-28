@@ -6,6 +6,15 @@ Servers.Guru session, password, payment credential, API credential, or recovery
 console credential. There is no Terraform, create, reinstall, resize, renew, or
 delete automation in this contour.
 
+`configure-ghcr-pull-auth.sh` is the only operator helper here. It mutates no
+Servers.Guru resource: run it locally as root on an already accepted app host,
+after the encrypted mount and installed trust helper are active. Pass
+`staging|production`, the environment-specific GitHub username, and an
+independently generated 32-hex identity suffix. GitHub login proves usability,
+not PAT scope; the script records and pins the operator's `read:packages`-only,
+environment-exclusive attestation without placing the PAT in argv, logs,
+GitHub, or artifacts.
+
 ## Purchased inventory
 
 | Environment | Region | Plan | Resources | Monthly catalogue price |

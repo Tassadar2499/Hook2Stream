@@ -1,4 +1,5 @@
-FROM node:24-alpine AS build
+ARG NODE_IMAGE=docker.io/library/node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY src/web/package.json src/web/package-lock.json ./
 RUN npm ci
@@ -7,7 +8,7 @@ ARG NEXT_PUBLIC_AUTH_MODE=oauth
 ENV NEXT_PUBLIC_AUTH_MODE=${NEXT_PUBLIC_AUTH_MODE}
 RUN npm run build
 
-FROM node:24-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0

@@ -2,9 +2,9 @@
 set -eu
 
 fail() { printf '%s\n' "post-deploy E2E: $*" >&2; exit 1; }
-[ "$#" -eq 3 ] || { [ "$#" -eq 4 ] && [ "$4" = soak-60m ]; } \
-    || fail "usage: post-deploy-e2e.sh staging|production ENV_FILE COMMIT_SHA [soak-60m]"
-environment=$1; environment_file=$2; commit=$3; mode=${4:-release-gate}
+[ "$#" -eq 4 ] \
+    || fail "usage: post-deploy-e2e.sh staging|production ENV_FILE COMMIT_SHA OPERATION_ID|rollback-verify|soak-60m"
+environment=$1; environment_file=$2; commit=$3; mode=$4
 : "${HOOK2STREAM_AUTHENTICATED_E2E_HOOK:?HOOK2STREAM_AUTHENTICATED_E2E_HOOK is required}"
 case "$environment" in staging|production) ;; *) fail "invalid environment" ;; esac
 case "$commit" in *[!0-9a-f]*|'') fail "invalid commit" ;; esac
@@ -19,17 +19,31 @@ for tool in curl jq mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "$tool
 origin=$(awk -F= '$1 == "PUBLIC_ORIGIN" {print substr($0,index($0,"=")+1)}' "$environment_file")
 case "$environment:$origin" in staging:https://staging.hook2stream.com|production:https://hook2stream.com) ;; *) fail "public origin does not match environment" ;; esac
 temporary_dir=$(mktemp -d)
-trap 'rm -rf "$temporary_dir"' EXIT
-trap 'exit 130' HUP INT TERM
+child_pid=
+cleanup() { rm -rf "$temporary_dir"; }
+forward_signal() {
+    trap - HUP INT TERM
+    if [ -n "$child_pid" ]; then
+        kill -TERM "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+    fi
+    exit 130
+}
+trap cleanup EXIT
+trap forward_signal HUP INT TERM
 chmod 0700 "$temporary_dir"
 
 if [ "$mode" = soak-60m ]; then
     [ "$environment" = staging ] || fail "the sustained soak is staging-only"
-    if ! "$HOOK2STREAM_AUTHENTICATED_E2E_HOOK" \
+    "$HOOK2STREAM_AUTHENTICATED_E2E_HOOK" \
         "$environment" "$environment_file" "$commit" soak-60m \
-        >"$temporary_dir/soak.stdout" 2>"$temporary_dir/soak.stderr"; then
+        >"$temporary_dir/soak.stdout" 2>"$temporary_dir/soak.stderr" &
+    child_pid=$!
+    if ! wait "$child_pid"; then
+        child_pid=
         fail "authenticated render/network soak failed"
     fi
+    child_pid=
     [ "$(wc -c < "$temporary_dir/soak.stdout")" -le 8192 ] \
         && [ "$(wc -l < "$temporary_dir/soak.stdout")" -eq 1 ] \
         && [ "$(tail -c 1 "$temporary_dir/soak.stdout" | od -An -tu1 | tr -d ' ')" = 10 ] \
@@ -45,6 +59,15 @@ if [ "$mode" = soak-60m ]; then
     ' "$temporary_dir/soak.stdout" >/dev/null || fail "authenticated soak result is invalid"
     cat "$temporary_dir/soak.stdout"
     exit 0
+fi
+rollback_verification=false
+if [ "$mode" = rollback-verify ]; then
+    rollback_verification=true
+else
+case "$mode" in
+  *[!0-9a-f]*|'') fail "authenticated E2E operation ID is invalid" ;;
+esac
+[ "${#mode}" -eq 32 ] || fail "authenticated E2E operation ID is invalid"
 fi
 
 request() {
@@ -69,18 +92,45 @@ if [ "$environment" = staging ]; then
     [ "$robots" = "noindex, nofollow, noarchive" ] || fail "staging noindex header is missing"
 fi
 
-# Health checks are not evidence that encrypted media, workers, rendering and
-# billing still work. A separately installed root-owned scenario owns its
-# environment-specific OAuth/billing credentials and must emit exactly this
-# capability record after exercising the full release gate. Its output is
-# captured so credentials or browser traces cannot leak into deploy logs.
-expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-idempotency,egress-deny'
-if ! authenticated_gate=$("$HOOK2STREAM_AUTHENTICATED_E2E_HOOK" "$environment" "$environment_file" "$commit" \
-    2>"$temporary_dir/authenticated-e2e.stderr"); then
-    fail "authenticated encrypted-media/worker/billing scenario failed"
+# Health checks are not encrypted-media or worker evidence. A root-owned
+# scenario owns its environment-specific OAuth inputs and emits the exact
+# environment capability below. Only staging mutates test billing/final render;
+# production stops after upload/OpenRouter/preview. Output is captured so no
+# credential or browser trace reaches deploy logs.
+if [ "$rollback_verification" = true ]; then
+  expected_gate='HOOK2STREAM_ROLLBACK_GATE=oauth,h2se-range,workers-state,preview-export,egress-deny'
+else
+case "$environment" in
+  staging)
+    expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-test-idempotency,egress-deny'
+    ;;
+  production)
+    expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,egress-deny'
+    ;;
+esac
 fi
+"$HOOK2STREAM_AUTHENTICATED_E2E_HOOK" \
+    "$environment" "$environment_file" "$commit" "$mode" \
+    >"$temporary_dir/authenticated-e2e.stdout" \
+    2>"$temporary_dir/authenticated-e2e.stderr" &
+child_pid=$!
+if ! wait "$child_pid"; then
+    child_pid=
+    fail "authenticated environment release scenario failed"
+fi
+child_pid=
+[ "$(wc -c < "$temporary_dir/authenticated-e2e.stdout")" -le 4096 ] \
+    && [ "$(wc -l < "$temporary_dir/authenticated-e2e.stdout")" -eq 1 ] \
+    || fail "authenticated environment release scenario output is invalid"
+authenticated_gate=$(cat "$temporary_dir/authenticated-e2e.stdout")
 [ "$authenticated_gate" = "$expected_gate" ] \
     || fail "authenticated E2E hook did not attest the complete release gate"
 unset authenticated_gate
 
-printf '%s\n' "post-deploy E2E: public, authenticated H2SE, worker/render/export, and billing gates passed for $commit"
+if [ "$rollback_verification" = true ]; then
+  printf '%s\n' "post-deploy E2E: bounded rollback evidence reverified for $commit"
+elif [ "$environment" = staging ]; then
+  printf '%s\n' "post-deploy E2E: staging H2SE, workers, render/export, and Stripe-test gates passed for $commit"
+else
+  printf '%s\n' "post-deploy E2E: production H2SE upload, workers, OpenRouter, and preview gates passed for $commit"
+fi

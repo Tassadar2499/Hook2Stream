@@ -11,6 +11,7 @@ const staging = read(".github/workflows/stage-candidate.yml");
 const promotion = read(".github/workflows/promote-production.yml");
 const rollback = read(".github/workflows/rollback.yml");
 const candidateBuilder = read("src/ci/release-candidate.mjs");
+const stagingReceiptContract = read("src/ci/staging-receipt.mjs");
 const stagingSecretJob = staging.slice(staging.indexOf("  deploy-staging:"));
 const productionSecretJob = promotion.slice(promotion.indexOf("  deploy-production:"));
 
@@ -20,6 +21,11 @@ function assert(condition, message) {
     process.exit(1);
   }
 }
+
+assert(stagingSecretJob.includes("    timeout-minutes: 360"),
+  "staging job timeout must cover authenticated E2E plus the separately bounded soak");
+assert(productionSecretJob.includes("    timeout-minutes: 300"),
+  "production job timeout must cover the sequential worker E2E worst-case deadlines and compensation");
 
 function yamlNamedListItem(text, indentation, name) {
   const marker = `${" ".repeat(indentation)}- name: ${name}\n`;
@@ -54,6 +60,12 @@ for (const [name, workflow] of [["ci", ci], ["staging", staging], ["promotion", 
   }
 }
 
+const ciCheckoutsWithoutCredentials = ci.match(
+  /- uses: actions\/checkout@[0-9a-f]{40}[^\n]*\n\s+with:\n\s+persist-credentials: false/g,
+) ?? [];
+assert(ciCheckoutsWithoutCredentials.length === 6,
+  "all six CI checkouts must disable persisted Git credentials");
+
 for (const [name, workflow] of [["promotion", promotion]]) {
   assert(workflow.includes('case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in') &&
     workflow.includes('"ssh-ed25519 "*') &&
@@ -68,6 +80,9 @@ assert(ci.includes("pattern: release-digest-*-${{ github.sha }}-${{ github.run_i
   "digest-fragment download must be scoped to the current run attempt");
 assert(ci.includes("Build pinned quarantined MinIO acceptance dependency") && ci.includes("src/ci/start-minio-acceptance.sh"),
   "MinIO must remain an isolated local/CI acceptance dependency");
+assert(ci.includes("Build hardened Caddy acceptance dependency") &&
+  ci.includes("docker build --file src/deploy/caddy/Dockerfile --tag hook2stream-caddy:ci ."),
+  "MinIO acceptance must use the hardened source-built Caddy image");
 assert(!ci.includes("deploy-staging:") && !ci.includes("environment: staging") && !ci.includes("STAGING_RECEIPT_SIGNING_KEY"),
   "main CI must stop after publishing the immutable candidate and must not deploy staging");
 const publishSection = ci.slice(ci.indexOf("  publish:"), ci.indexOf("  runtime-images:"));
@@ -87,6 +102,9 @@ const expectedContainerDeployability = new Map([
   ["web", true],
   ["postgres-backup", true],
   ["postgres", true],
+  ["caddy", true],
+  ["pgbouncer", true],
+  ["egress-proxy", true],
   ["minio", false],
 ]);
 const containerMatrixStart = containerSection.indexOf("      matrix:\n        include:\n");
@@ -97,7 +115,7 @@ const containerMatrixSection = containerSection.slice(containerMatrixStart, cont
 const containerMatrixRows = containerMatrixSection.split("\n").filter((line) =>
   line.match(/^ */)[0].length === 10 && line.trimStart().startsWith("-"));
 assert(containerMatrixRows.length === expectedContainerDeployability.size,
-  "container matrix must contain exactly seven list items");
+  "container matrix must contain exactly ten list items");
 const containerMatrixNames = containerMatrixRows.map((line) => {
   const match = line.match(/^ {10}- name: ([a-z0-9-]+)$/);
   assert(match !== null, `container matrix contains a non-canonical row: ${line.trim()}`);
@@ -105,7 +123,7 @@ const containerMatrixNames = containerMatrixRows.map((line) => {
 }).sort();
 assert(JSON.stringify(containerMatrixNames) ===
   JSON.stringify([...expectedContainerDeployability.keys()].sort()),
-  "container matrix must contain exactly the seven reviewed entries");
+  "container matrix must contain exactly the ten reviewed entries");
 for (const [name, deployable] of expectedContainerDeployability) {
   const entry = yamlNamedListItem(containerSection, 10, name);
   assert((entry.match(/^\s{12}deployable: (?:true|false)$/gm) ?? []).length === 1 &&
@@ -113,7 +131,7 @@ for (const [name, deployable] of expectedContainerDeployability) {
   `${name} must declare deployable: ${deployable} exactly once`);
 }
 assert((containerSection.match(/^\s{12}deployable: false$/gm) ?? []).length === 1 &&
-  (containerSection.match(/^\s{12}deployable: true$/gm) ?? []).length === 6,
+  (containerSection.match(/^\s{12}deployable: true$/gm) ?? []).length === 9,
   "only MinIO may be non-deployable in the container matrix");
 
 const deployableScan = yamlNamedListItem(containerSection, 6,
@@ -154,8 +172,60 @@ for (const [name, block] of [["deployable", deployableScan], ["MinIO inventory",
     `${name} scan must use exactly the reviewed Anchore inputs`);
 }
 const runtimeSection = ci.slice(ci.indexOf("  runtime-images:"), ci.indexOf("  release-candidate:"));
+assert(runtimeSection.includes("    needs: containers\n"),
+  "runtime publication must wait for the mandatory container gate");
 assert(!/^\s*-\s+name:\s*postgres\s*$/m.test(runtimeSection) && !runtimeSection.includes("POSTGRES_IMAGE"),
   "official PostgreSQL must not be recorded as a reviewed runtime image");
+const expectedRuntimeImages = new Map([
+  ["caddy", ["src/deploy/caddy/Dockerfile", "CADDY_IMAGE"]],
+  ["pgbouncer", ["src/deploy/pgbouncer/Dockerfile", "PGBOUNCER_IMAGE"]],
+  ["egress-proxy", ["src/deploy/egress-proxy/Dockerfile", "EGRESS_PROXY_IMAGE"]],
+]);
+const runtimeMatrixStart = runtimeSection.indexOf("      matrix:\n        include:\n");
+const runtimeMatrixEnd = runtimeSection.indexOf("    steps:\n", runtimeMatrixStart);
+assert(runtimeMatrixStart >= 0 && runtimeMatrixEnd > runtimeMatrixStart,
+  "hardened runtime matrix boundaries are missing or malformed");
+const runtimeMatrixSection = runtimeSection.slice(runtimeMatrixStart, runtimeMatrixEnd);
+const runtimeRows = runtimeMatrixSection.split("\n").filter((line) =>
+  line.match(/^ */)[0].length === 10 && line.trimStart().startsWith("-"));
+assert(runtimeRows.length === expectedRuntimeImages.size,
+  "runtime publish matrix must contain exactly three reviewed source builds");
+for (const [name, [dockerfile, deployVar]] of expectedRuntimeImages) {
+  const entry = yamlNamedListItem(runtimeSection, 10, name);
+  assert(entry.includes(`            dockerfile: ${dockerfile}`) &&
+    entry.includes(`            deploy_var: ${deployVar}`) &&
+    !entry.includes("source:"),
+  `${name} runtime must use its repository-owned source/hardened Dockerfile`);
+}
+assert(!runtimeSection.includes("docker pull") &&
+  !runtimeSection.includes("caddy:2.11.4-alpine") &&
+  !runtimeSection.includes("edoburu/pgbouncer") &&
+  !runtimeSection.includes("ubuntu/squid"),
+  "runtime publication must not reuse the vulnerable external images");
+const runtimeBuild = yamlNamedListItem(runtimeSection, 6,
+  "Publish hardened runtime image with SBOM and provenance");
+assert(runtimeBuild.includes("        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a") &&
+  runtimeBuild.includes("          file: ${{ matrix.dockerfile }}") &&
+  runtimeBuild.includes("          push: true") &&
+  runtimeBuild.includes("          platforms: linux/amd64") &&
+  runtimeBuild.includes("          sbom: true") &&
+  runtimeBuild.includes("          provenance: mode=max"),
+  "hardened runtimes must be published for amd64 with SBOM and max provenance");
+const runtimeScan = yamlNamedListItem(runtimeSection, 6, "Scan exact published runtime digest");
+assert(runtimeScan.includes("        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2") &&
+  runtimeScan.includes("          image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}") &&
+  runtimeScan.includes("          fail-build: true") &&
+  runtimeScan.includes("          severity-cutoff: high") &&
+  runtimeScan.includes("          only-fixed: false") &&
+  runtimeScan.includes("          output-format: table") &&
+  !runtimeScan.includes("continue-on-error"),
+  "every published runtime must retain the exact blocking High/Critical gate");
+assert(JSON.stringify(canonicalYamlChildKeys(runtimeScan, 10, "runtime scan")) ===
+  JSON.stringify(expectedScanInputs),
+  "runtime scan must use exactly the reviewed Anchore inputs");
+for (const repository of ["hook2stream-caddy", "hook2stream-pgbouncer", "hook2stream-egress-proxy"]) {
+  assert(candidateBuilder.includes(repository), `${repository} must be enforced by the candidate repository allowlist`);
+}
 assert(!ci.includes("postgres:17.10"), "CI must not retain PostgreSQL 17.10");
 for (const removedPath of [
   ".github/workflows/storage-ci.yml",
@@ -198,8 +268,13 @@ assert(staging.includes('gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_
   "staging must download and attest the exact candidate from the selected CI run");
 assert(staging.includes("environment: staging") && staging.includes("group: hook2stream-staging") &&
   staging.includes("cancel-in-progress: false") && staging.includes("tags: tag:hook2stream-ci-staging") &&
-  staging.includes('"deploy $CANDIDATE_NAME"'),
+  staging.includes('"$host_operation $CANDIDATE_NAME"'),
   "staging must serialize forced-command deploys through the staging Environment and Tailscale ACL tag");
+for (const workflow of [staging, promotion]) {
+  assert(workflow.includes("deployment_phase:") && workflow.includes("          - prepare-pending") &&
+    workflow.includes("          - deploy-and-finalize") && workflow.includes("          - finalize-pending"),
+  "two-phase workflows must expose exactly the explicit cold prepare, deploy, and finalize choices");
+}
 assert(staging.includes('DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}') && staging.includes('ping: ${{ secrets.DEPLOY_HOST }}') &&
   staging.includes("^h2s-app-staging\\.[a-z0-9-]+\\.ts\\.net$") &&
   staging.includes('$1 != host || $2 != "ssh-ed25519" || NF != 3') &&
@@ -228,26 +303,37 @@ assert(staging.includes("Validate staging receipt authority before deployment") 
   "staging must fail early on signer mismatch, bind the private signer to its exact public authority, and self-verify the receipt");
 assert(stagingSecretJob.includes('MIN_ROLLBACK_RELEASE_SHA: ${{ vars.MIN_ROLLBACK_RELEASE_SHA }}') &&
   !staging.slice(0, staging.indexOf("  deploy-staging:")).includes("MIN_ROLLBACK_RELEASE_SHA:") &&
-  (staging.match(/--minimum-release-sha "\$MIN_ROLLBACK_RELEASE_SHA"/g) ?? []).length === 3 &&
+  (staging.match(/--minimum-release-sha "\$MIN_ROLLBACK_RELEASE_SHA"/g) ?? []).length === 4 &&
   staging.includes('compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}'),
   "staging must bind the Environment rollback floor to a floor-capable candidate, host result, soak, and signed receipt");
 assert(staging.includes("Run trusted 60-minute render and network soak") &&
   staging.includes('"soak $CANDIDATE_NAME"') && staging.includes("HOOK2STREAM_REMOTE_SOAK_RECEIPT=") &&
   staging.includes("staging-receipt.mjs validate-soak") && staging.includes("--soak-result remote-soak-result.json") &&
-  staging.indexOf('"deploy $CANDIDATE_NAME"') < staging.indexOf('"soak $CANDIDATE_NAME"') &&
+  staging.indexOf('"$host_operation $CANDIDATE_NAME"') < staging.indexOf('"soak $CANDIDATE_NAME"') &&
   staging.indexOf('"soak $CANDIDATE_NAME"') < staging.indexOf("Create successful staging receipt") &&
   !staging.includes("for minute in $(seq 1 60)"),
   "the signed staging receipt must require the separate trusted sustained render/network soak");
-const stagingDeployMutation = staging.slice(
-  staging.indexOf("Deploy candidate through forced SSH and run host smoke/E2E"),
-  staging.indexOf("Run trusted 60-minute render and network soak"),
-);
+const stagingDeployMutation = yamlNamedListItem(staging, 6, "Deploy candidate to a pending runtime through forced SSH");
+const stagingFinalizeMutation = yamlNamedListItem(staging, 6, "Finalize pending candidate with authenticated E2E");
 assert(stagingDeployMutation.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
   stagingDeployMutation.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
-    stagingDeployMutation.indexOf('"deploy $CANDIDATE_NAME"') &&
+    stagingDeployMutation.indexOf('"$host_operation $CANDIDATE_NAME"') &&
+  stagingDeployMutation.includes("host_operation=prepare") && stagingDeployMutation.includes("host_operation=deploy") &&
+  stagingDeployMutation.includes("HOOK2STREAM_PENDING_RECEIPT=") &&
+  stagingDeployMutation.includes("remote-deploy-result.mjs validate-pending") &&
   stagingDeployMutation.includes("remote-deploy-result.mjs validate \\") &&
   staging.indexOf("remote-deploy-result.mjs validate \\") < staging.indexOf('"soak $CANDIDATE_NAME"'),
   "staging must revalidate live main immediately before deploy and reject a malformed host/floor receipt before the soak");
+assert(stagingFinalizeMutation.includes("if: inputs.deployment_phase == 'finalize-pending'") &&
+  stagingFinalizeMutation.includes('"finalize $CANDIDATE_NAME" </dev/null') &&
+  stagingFinalizeMutation.includes("HOOK2STREAM_REMOTE_RECEIPT=") &&
+  !stagingFinalizeMutation.includes("HOOK2STREAM_PENDING_RECEIPT="),
+  "finalize-pending must call only the host finalize path and consume one final receipt");
+for (const stepName of ["Run trusted 60-minute render and network soak", "Create successful staging receipt",
+  "Sign staging receipt for production host verification", "Attest staging receipt", "Upload staging receipt"]) {
+  assert(yamlNamedListItem(staging, 6, stepName).includes("if: inputs.deployment_phase != 'prepare-pending'"),
+    `${stepName} must be unreachable for a pending-only deployment`);
+}
 const stagingSignStep = staging.slice(staging.indexOf("Sign staging receipt for production host verification"));
 assert(stagingSignStep.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
   stagingSignStep.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
@@ -321,7 +407,8 @@ assert(promotion.includes('ci_run_id="$(jq -r') && promotion.includes(".ciRunId"
   promotion.includes('--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"'),
   "production must resolve the source CI identity from the receipt and download its exact attested candidate");
 assert(promotion.includes("Source CI run:") && promotion.includes("source-ci-run-id:") &&
-  promotion.includes("--run-id \"$SOURCE_CI_RUN_ID\"") && promotion.includes("without rebuild"),
+  promotion.includes('--run-id "$SOURCE_CI_RUN_ID"') &&
+  promotion.includes('gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_NAME"'),
   "production must expose and revalidate the receipt-bound source CI run without rebuilding");
 assert(promotion.includes('test "$GITHUB_REF" = refs/heads/main') && promotion.includes("--jq .protected") &&
   promotion.includes("group: hook2stream-production") && promotion.includes("cancel-in-progress: false") &&
@@ -331,15 +418,31 @@ assert(!promotion.includes('| tee "$RUNNER_TEMP/deploy-output.log"'),
   "production must not mirror potentially sensitive forced-command output into CI logs");
 assert(promotion.includes('> "$RUNNER_TEMP/deploy-output.log" 2>&1') && promotion.includes("umask 077"),
   "production must keep forced-command output in a private runner-local file");
-const productionDeployMutation = promotion.slice(promotion.indexOf("Promote exact staging-tested candidate without rebuild"));
-assert(productionDeployMutation.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
-  productionDeployMutation.includes('compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}') &&
-  productionDeployMutation.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
-    productionDeployMutation.indexOf('"deploy $CANDIDATE_NAME"') &&
-  productionDeployMutation.includes('--minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"'),
+const productionPrepare = yamlNamedListItem(promotion, 6, "Deploy exact staging-tested candidate to pending production runtime");
+const productionFinalize = yamlNamedListItem(promotion, 6, "Finalize pending production candidate with authenticated E2E");
+assert(productionPrepare.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
+  productionPrepare.includes('compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}') &&
+  productionPrepare.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
+    productionPrepare.indexOf('"$host_operation $CANDIDATE_NAME"') &&
+  productionPrepare.includes('--minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"'),
   "production must revalidate live main and the exact signed rollback floor immediately before SSH mutation");
+assert(productionPrepare.includes("host_operation=prepare") && productionPrepare.includes("host_operation=deploy") &&
+  productionPrepare.includes('"$host_operation $CANDIDATE_NAME"') &&
+  productionPrepare.includes("HOOK2STREAM_PENDING_RECEIPT=") &&
+  productionPrepare.includes("remote-deploy-result.mjs validate-pending"),
+  "production prepare-pending and deploy-and-finalize must each map to one host operation");
+assert(productionFinalize.includes("if: inputs.deployment_phase == 'finalize-pending'") &&
+  productionFinalize.includes('"finalize $CANDIDATE_NAME" </dev/null') &&
+  productionFinalize.includes("HOOK2STREAM_REMOTE_RECEIPT="),
+  "production finalize-pending must call only the host finalize path and consume one final receipt");
+assert(stagingReceiptContract.includes("/^[0-9a-f]{32}$/.test(remoteResult.e2eOperationId") &&
+  stagingReceiptContract.includes("validateRemoteResult(metadata, hashes, receipt.remoteResult") &&
+  (promotion.match(/staging-receipt\.mjs validate/g) ?? []).length === 2,
+  "production must validate a receipt whose nested staging E2E operation ID is exact 32-hex before and after approval");
 assert(rollback.includes("if: github.ref == 'refs/heads/main'"),
   "rollback must reject non-main workflow dispatches before environment secrets");
+assert(rollback.includes("    timeout-minutes: 180"),
+  "rollback must remain bounded while allowing its non-mutating authenticated reverification gate");
 assert(rollback.includes('ref: ${{ github.workflow_sha }}') &&
   rollback.includes('test "$GITHUB_SHA" = "$POLICY_SHA"') &&
   (rollback.match(/test "\$\(jq -r \.commit\.sha <<<"\$main_json"\)" = "\$POLICY_SHA"/g) ?? []).length >= 3,

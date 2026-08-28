@@ -131,8 +131,39 @@ x-worker-runtime: &worker-runtime
     - media_keyring
 
 services:
+  caddy-volume-init:
+    image: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE to the immutable Hook2Stream PostgreSQL release image}
+    user: "0:0"
+    read_only: true
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - chown -R 10001:10001 /data /config && chmod 0700 /data /config
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 64M
+          pids: 32
+        reservations:
+          memory: 16M
+
   caddy:
-    image: ${CADDY_IMAGE:-caddy:2.11.4-alpine}
+    image: ${CADDY_IMAGE:?Set CADDY_IMAGE to the immutable Hook2Stream Caddy release image}
+    user: "10001:10001"
     init: true
     restart: unless-stopped
     read_only: true
@@ -488,7 +519,7 @@ services:
           pids: 512
 
   pgbouncer:
-    image: ${PGBOUNCER_IMAGE:-edoburu/pgbouncer:v1.25.2-p0}
+    image: ${PGBOUNCER_IMAGE:?Set PGBOUNCER_IMAGE to the immutable Hook2Stream PgBouncer release image}
     init: true
     restart: unless-stopped
     read_only: true
@@ -815,6 +846,7 @@ services:
 
   egress-api:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    user: "31:31"
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -825,9 +857,9 @@ services:
         target: /etc/squid/squid.conf
         mode: 0444
     tmpfs:
-      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
-      - /var/run:rw,nosuid,nodev,noexec,size=4m
-      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m,uid=31,gid=31,mode=0750
+      - /var/run:rw,nosuid,nodev,noexec,size=4m,uid=31,gid=31,mode=0750
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m,uid=31,gid=31,mode=0750
     healthcheck:
       test: [CMD, squid, -k, parse]
       interval: 30s
@@ -846,6 +878,7 @@ services:
 
   egress-s3:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    user: "31:31"
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -856,9 +889,9 @@ services:
         target: /etc/squid/squid.conf
         mode: 0444
     tmpfs:
-      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
-      - /var/run:rw,nosuid,nodev,noexec,size=4m
-      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m,uid=31,gid=31,mode=0750
+      - /var/run:rw,nosuid,nodev,noexec,size=4m,uid=31,gid=31,mode=0750
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m,uid=31,gid=31,mode=0750
     healthcheck:
       test: [CMD, squid, -k, parse]
       interval: 30s
@@ -877,6 +910,7 @@ services:
 
   egress-control:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    user: "31:31"
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -887,9 +921,9 @@ services:
         target: /etc/squid/squid.conf
         mode: 0444
     tmpfs:
-      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
-      - /var/run:rw,nosuid,nodev,noexec,size=4m
-      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m,uid=31,gid=31,mode=0750
+      - /var/run:rw,nosuid,nodev,noexec,size=4m,uid=31,gid=31,mode=0750
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m,uid=31,gid=31,mode=0750
     healthcheck:
       test: [CMD, squid, -k, parse]
       interval: 30s
@@ -908,6 +942,7 @@ services:
 
   egress-backup:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    user: "31:31"
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -918,9 +953,9 @@ services:
         target: /etc/squid/squid.conf
         mode: 0444
     tmpfs:
-      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
-      - /var/run:rw,nosuid,nodev,noexec,size=4m
-      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m,uid=31,gid=31,mode=0750
+      - /var/run:rw,nosuid,nodev,noexec,size=4m,uid=31,gid=31,mode=0750
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m,uid=31,gid=31,mode=0750
     healthcheck:
       test: [CMD, squid, -k, parse]
       interval: 30s

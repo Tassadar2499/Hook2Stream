@@ -65,7 +65,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     metadata_value=$(jq -r --arg name "$name" '.images[$name] // empty' "$candidate_dir/release-metadata.json")
     [ "$metadata_value" = "$value" ] || fail "$name differs from metadata"
     case "$name:$value" in
-      API_IMAGE:ghcr.io/$owner/hook2stream-api@sha256:*|WORKER_IMAGE:ghcr.io/$owner/hook2stream-worker@sha256:*|BOOTSTRAPPER_IMAGE:ghcr.io/$owner/hook2stream-bootstrapper@sha256:*|WEB_IMAGE:ghcr.io/$owner/hook2stream-web@sha256:*|POSTGRES_BACKUP_IMAGE:ghcr.io/$owner/hook2stream-postgres-backup@sha256:*|POSTGRES_IMAGE:ghcr.io/$owner/hook2stream-postgres@sha256:*|CADDY_IMAGE:caddy@sha256:*|CADDY_IMAGE:docker.io/library/caddy@sha256:*|PGBOUNCER_IMAGE:edoburu/pgbouncer@sha256:*|PGBOUNCER_IMAGE:docker.io/edoburu/pgbouncer@sha256:*|EGRESS_PROXY_IMAGE:ubuntu/squid@sha256:*|EGRESS_PROXY_IMAGE:docker.io/ubuntu/squid@sha256:*) ;;
+      API_IMAGE:ghcr.io/$owner/hook2stream-api@sha256:*|WORKER_IMAGE:ghcr.io/$owner/hook2stream-worker@sha256:*|BOOTSTRAPPER_IMAGE:ghcr.io/$owner/hook2stream-bootstrapper@sha256:*|WEB_IMAGE:ghcr.io/$owner/hook2stream-web@sha256:*|POSTGRES_BACKUP_IMAGE:ghcr.io/$owner/hook2stream-postgres-backup@sha256:*|POSTGRES_IMAGE:ghcr.io/$owner/hook2stream-postgres@sha256:*|CADDY_IMAGE:ghcr.io/$owner/hook2stream-caddy@sha256:*|PGBOUNCER_IMAGE:ghcr.io/$owner/hook2stream-pgbouncer@sha256:*|EGRESS_PROXY_IMAGE:ghcr.io/$owner/hook2stream-egress-proxy@sha256:*) ;;
       *) fail "$name repository is outside the allowlist" ;;
     esac
     seen_names="$seen_names $name"
@@ -111,12 +111,13 @@ if [ -n "$approval_dir" ]; then
       (.stagingWorkflowRunId | type == "number" and . > 0 and floor == .) and
       (.stagingWorkflowRunAttempt | type == "number" and . > 0 and floor == .) and
       (.policySha | type == "string" and test("^[0-9a-f]{40}$")) and
-      (.remoteResult | keys | sort) == ["actualImages","candidateArtifact","checks","commitSha","deployBundleSha256","environment","kind","minimumRollbackReleaseSha","releaseImagesSha256","result","schemaVersion"] and
+      (.remoteResult | keys | sort) == ["actualImages","candidateArtifact","checks","commitSha","deployBundleSha256","e2eOperationId","environment","kind","minimumRollbackReleaseSha","releaseImagesSha256","result","schemaVersion"] and
       .hashes.releaseImagesSha256 == $images and .hashes.deployBundleSha256 == $bundle and
       .remoteResult.kind == "hook2stream-remote-deploy-result" and
       .remoteResult.environment == "staging" and .remoteResult.result == "success" and
       .remoteResult.candidateArtifact == $artifact and
       .remoteResult.commitSha == $commit and .remoteResult.minimumRollbackReleaseSha == $minimum and
+      (.remoteResult.e2eOperationId | type == "string" and test("^[0-9a-f]{32}$")) and
       .remoteResult.actualImages == $expectedImages and
       .remoteResult.checks == ["pre-migration-backup","migration","smoke","e2e","digest-verification"] and
       (.soakResult | keys | sort) == ["candidateArtifact","checks","commitSha","completedAt","elapsedSeconds","environment","hookResult","kind","result","schemaVersion","startedAt","workerRenderHealthy","workerRenderInstances","workerRenderOomKilled"] and

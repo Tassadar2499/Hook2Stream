@@ -65,16 +65,30 @@ grep -Fq "'POSTGRES_BACKUP_IMAGE:storage-janitor'" "$wrapper" \
 grep -Fq 'compose up -d --no-deps caddy postgres-backup storage-janitor' "$release" \
   || fail "the Storj media janitor is not started by deployment"
 grep -Fq 'storageFormats:["H2SEv1"]' "$wrapper" || fail "H2SE rollback capability is not recorded"
+grep -Fq 'hook2stream-application-rollback-v2' "$wrapper" \
+  && grep -Fq 'active-infrastructure-release.json' "$wrapper" \
+  || fail "rollback protocol v2 or active infrastructure marker is missing"
+[ "$(grep -Fc '> "$active_infrastructure.tmp"' "$wrapper")" -eq 1 ] \
+  && [ "$(grep -Fc 'mv -f "$active_infrastructure.tmp" "$active_infrastructure"' "$wrapper")" -eq 1 ] \
+  || fail "active infrastructure marker is not forward-deploy-only state"
 grep -Fq 'HOOK2STREAM_ROLLBACK_RECEIPT=' "$wrapper" || fail "rollback receipt marker is missing"
 grep -Fq 'MIN_ROLLBACK_RELEASE_SHA must identify the first approved H2SE release' "$wrapper" \
   || fail "mandatory pre-mutation rollback floor validation is missing"
 grep -Fq 'minimumRollbackReleaseSha:$minimum' "$wrapper" || fail "rollback receipt does not bind the host floor"
 grep -Fq 'rollback-application.sh' "$wrapper" || fail "forced rollback is not routed through the app-only implementation"
-grep -Fq 'release lacks the forward deploy or application-only rollback implementation' "$wrapper" \
-  || fail "successful releases are not required to carry the app-only rollback implementation"
+grep -Fq 'rollback_program=/usr/local/libexec/hook2stream/rollback-application.sh' "$wrapper" \
+  || fail "rollback is not pinned to the installed root-owned orchestrator"
+if grep -Fq 'rollback_dir/deploy/scripts/rollback-application.sh' "$wrapper"; then
+  fail "rollback executes target bundle control-plane code"
+fi
+grep -Fq 'infrastructure_release_dir/deploy/scripts/lib/deployment-common.sh' "$wrapper" \
+  && grep -Fq 'infrastructure_release_dir/deploy/compose.yaml' "$wrapper" \
+  && grep -Fq 'differs from the active infrastructure release marker' "$wrapper" \
+  || fail "active infrastructure compose/helper source is not validated"
 grep -Fq 'application-images-only' "$wrapper" && grep -Fq 'infrastructure-unchanged' "$wrapper" \
   && grep -Fq 'no-migrations' "$wrapper" || fail "rollback receipt does not attest app-only semantics"
-grep -Fq 'docker image pull' "$rollback" && grep -Fq 'compose up -d --no-deps' "$rollback" \
+grep -Fq 'docker --config "$DOCKER_CONFIG" image pull' "$rollback" \
+  && grep -Fq 'compose up -d --no-deps' "$rollback" \
   || fail "app-only rollback does not explicitly constrain service mutation"
 if grep -Eq 'compose(_tools)? (run|up).*bootstrapper|deploy-release\.sh' "$rollback"; then
   fail "app-only rollback invokes the bootstrapper, migration path, or full deployment"
@@ -86,6 +100,47 @@ grep -Fq 'forced-command.lock' "$wrapper" && grep -Fq 'flock -n 8' "$wrapper" \
   || fail "outer forced-command concurrency lock is missing"
 grep -Fq 'exactly one DEPLOYMENT_ENVIRONMENT' "$wrapper" \
   || fail "production approval environment selection is not duplicate-safe"
+for transactional_contract in \
+  'first deployment requires explicit prepare followed by operator OAuth bootstrap and finalize' \
+  'transactionMode:$transactionMode' \
+  'finalize-transaction:immediate-deploy' \
+  'publish_compensated_state' \
+  'recovery-required.json' \
+  'public Caddy could not be proven stopped' \
+  'rollback-verify' \
+  'recover_failed_rollback' \
+  'rollout_recovery_interrupted' \
+  'runtime-ready-publication-failed' \
+  'compensation_interrupted' \
+  'rollback_recovery_interrupted' \
+  'bounded-e2e-reverification' \
+  'rollback is forbidden while a forward deployment is pending'; do
+  grep -Fq "$transactional_contract" "$wrapper" \
+    || fail "forced command omits transactional boundary: $transactional_contract"
+done
+grep -Fq 'docker stop --time 10 "$recovery_container"' "$wrapper" \
+  && grep -Fq 'docker kill "$recovery_container"' "$wrapper" \
+  || fail "recovery-required path does not fail closed by stopping exact owned Caddy"
+grep -Fq '"$environment" "$active_rollback_env" "$identifier" rollback-verify' "$wrapper" \
+  || fail "rollback does not invoke the mandatory fourth-argument bounded gate"
+if grep -Fq '"$environment" "$active_rollback_env" "$identifier"' "$wrapper" \
+   && ! grep -Fq '"$environment" "$active_rollback_env" "$identifier" rollback-verify' "$wrapper"; then
+  fail "rollback retained the obsolete three-argument authenticated hook"
+fi
+grep -Fq 'infrastructure_ledger=$HOOK2STREAM_RELEASE_STATE_DIR/infrastructure' "$wrapper" \
+  && grep -Fq 'active compensated infrastructure ledger is incomplete or unsafe' "$wrapper" \
+  && grep -Fq 'same-SHA compensated infrastructure ledger is stale or unsafe' "$wrapper" \
+  && grep -Fq '"$HOOK2STREAM_RELEASE_STATE_DIR/infrastructure/$commit.env"' "$wrapper" \
+  && grep -Fq 'install -m 0600 "$compensated_active_env"' "$wrapper" \
+  || fail "rollback cannot resolve the exact compensated infrastructure ledger"
+for rollback_transaction in \
+  'rollback_exit()' \
+  'restore_application()' \
+  'mutation_started=true' \
+  'mv -f "$active_environment_tmp" "$active_environment_file"'; do
+  grep -Fq "$rollback_transaction" "$rollback" \
+    || fail "application rollback omits reversible transaction boundary: $rollback_transaction"
+done
 for soak_contract in \
   'soak accepts exactly one candidate ID' \
   'soak is allowed only on staging' \

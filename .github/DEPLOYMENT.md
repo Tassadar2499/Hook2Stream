@@ -218,12 +218,27 @@ validator also requires the exact two-line `/etc/sudoers.d/hook2stream-deploy`
 grant from `src/deploy/host/sudoers.example`; extra keys, options, or sudo rules
 fail validation. Operator, forced-command deploy, and staging-receipt trust
 roles must all use different ED25519 keys; reusing the deploy
-key for the sudo-capable operator account is a release-blocking privilege
-escalation. The private ED25519 host key must be a non-symlink `root:root 0600`
+key for the password-locked operator account is a release-blocking privilege
+escalation. The operator account has no sudo grant; host acceptance runs only
+from a root shell through the installed root-owned validator. The private
+ED25519 host key must be a non-symlink `root:root 0600`
 file without extended ACLs; its `root:root 0644` public key must match, and both
-must be distinct from every user/receipt authority. The SSH
-client command is exactly `deploy <candidate-id>`, staging-only
-`soak <candidate-id>`, or `rollback <40-character-sha> H2SEv1`.
+must be distinct from every user/receipt authority. The SSH client command is
+exactly cold-bootstrap-only `prepare <candidate-id>`, `finalize <candidate-id>`
+for that same prepared candidate, normal transactional
+`deploy <candidate-id>`, staging-only `soak <candidate-id>`, or
+`rollback <40-character-sha> H2SEv1`.
+
+`prepare` is accepted only before any successful release exists. It publishes
+only a root-owned runtime-ready pending record so the operator can complete the
+invited OAuth workspace/session bootstrap; it never emits a successful receipt.
+`finalize` reuses the host-generated operation ID bound to that pending record
+and publishes success only after authenticated E2E and exact running-digest
+verification. Every later `deploy` performs rollout and finalization inside one
+forced-command transaction. A failed or interrupted upgrade/rollback restores
+the previous application digests when that reversal can be proven. Otherwise
+the host writes `recovery-required.json`, stops its owned public Caddy, and
+blocks all automated operations until explicit operator reconciliation.
 
 Deploy receives one uncompressed tar stream. It contains `candidate/` with the
 four immutable files; production also carries
@@ -251,18 +266,43 @@ requires one healthy non-OOM `worker-render` on the candidate digest. It returns
 only the bound base64 `hook2stream-remote-soak-result` line prefixed with
 `HOOK2STREAM_REMOTE_SOAK_RECEIPT=`; hook stderr/logs are never mirrored into
 Actions output. The signed staging receipt includes this result and the
-`render-network-soak` check.
+`render-network-soak` check. The soak does not spend another render
+entitlement: it reuses the completed real staging render only as throughput
+evidence and runs a 3600-second synthetic FFmpeg load in a dedicated
+networkless/read-only container from the running immutable worker image, with
+the same three-vCPU/1536-MiB limits, while checking public/storage paths,
+cgroup `cpu.stat`, OOM and restarts. The exact labeled container is force-
+removed on every success or failure path.
 
-Every successful release gets a root-owned capability document. Rollback is
-eligible only when that host recorded the target as successful and the target
-explicitly supports `H2SEv1`. GitHub additionally requires the target to equal
+The canonical implementation is `src/deploy/host/authenticated-e2e.sh`.
+Install it as `root:root` mode `0500` and provision only root-owned inputs below
+the encrypted `/srv/hook2stream/e2e` directory. It accepts a pre-issued OAuth
+Mozilla cookie jar, verifies that session and its CSRF token through the public
+`/api/v1/auth/session` endpoint, and never logs authentication or provider
+secrets. Staging signs and repeats a Stripe test webhook only after proving test
+API/Checkout identifiers. Production is a distinct non-billing gate: its
+dedicated QA identity performs deterministic encrypted upload/range,
+OpenRouter pipeline and preview verification, but it never creates a live
+Checkout or starts a final render. The accepted staging receipt proves the
+same digests' Stripe test, 18-render/ZIP and soak behavior. Controlled live
+payment, render/download and refund is a post-deploy operator go-live step.
+See the host README for the file and soak-baseline contracts.
+
+Every successful forward release gets a root-owned protocol-v2 capability
+document and becomes the root-owned active infrastructure marker. Rollback is
+eligible only when that host recorded both the current application and target
+as protocol-v2 successful releases supporting `H2SEv1`. A pre-v2 target or
+current release fails closed. GitHub additionally requires the target to equal
 the configured `MIN_ROLLBACK_RELEASE_SHA` or be its Git descendant, both before
 tailnet access and immediately before SSH mutation. A SHA is an identity, not
 an ordering primitive. Once an H2SE v1 object exists, a release without the
 reader remains ineligible.
 
-Rollback is application-image-only. It replaces API, worker, web, and release
-version while preserving the current bootstrapper and all infrastructure
+Rollback is application-image-only and is executed only by the installed
+`/usr/local/libexec/hook2stream/rollback-application.sh`; target bundle scripts
+are never executed or sourced. The active infrastructure marker is preserved,
+and only its validated root-private Compose/helper bundle is used. Rollback
+replaces API, worker, web, and release version while preserving the current bootstrapper and all infrastructure
 digests. It runs no migration, down-migration, or storage mutation. Before and
 after mutation, the host proves PostgreSQL, PgBouncer, Caddy, the backup sidecar,
 storage janitor, and every egress proxy are unchanged. Incompatible schema

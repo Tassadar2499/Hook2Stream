@@ -304,12 +304,30 @@ grep -Fq 'require_trusted_directory "$encrypted_runtime_dir" 700' \
     "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "release and release-state directories are not root-private"
 for trusted_host_gate in \
+    /usr/local/libexec/hook2stream/validate-host.sh \
     /usr/local/sbin/hook2stream-deploy-launcher \
+    /usr/local/libexec/hook2stream/lib/host-validation-common.sh \
     /usr/local/libexec/hook2stream/lib/forced-command-trust.sh \
     /usr/local/libexec/hook2stream/authenticated-e2e.sh; do
     grep -Fq "$trusted_host_gate" "$deployment_dir/scripts/validate-host.sh" \
         || fail_test "host validator omitted installed gate $trusted_host_gate"
 done
+grep -Fq 'sudo install -o root -g root -m 0555 scripts/validate-host.sh' \
+    "$deployment_dir/host/README.md" \
+    && grep -Fq '/usr/local/libexec/hook2stream/validate-host.sh app staging' \
+        "$deployment_dir/host/README.md" \
+    || fail_test "host runbook does not install and invoke the root-owned validator"
+if grep -Eq '(sudo )?(\./|src/deploy/)?scripts/validate-host\.sh app' \
+    "$deployment_dir/host/README.md" "$deployment_dir/README.md" \
+    "$deployment_dir/../../docs/operations/hook2stream-mvp-runbook.md"; then
+    fail_test "operator documentation still executes a checkout-local host validator"
+fi
+deployment_contract=$deployment_dir/../../.github/DEPLOYMENT.md
+grep -Fq 'The operator account has no sudo grant' "$deployment_contract" \
+    || fail_test "deployment contract does not preserve the no-sudo operator boundary"
+if grep -Fq 'sudo-capable operator' "$deployment_contract"; then
+    fail_test "deployment contract still grants broad sudo capability to the operator"
+fi
 for exact_access_gate in \
     'HOOK2STREAM_OPERATOR_PUBLIC_KEY_SHA256' \
     'HOOK2STREAM_DEPLOY_PUBLIC_KEY_SHA256' \
@@ -325,6 +343,12 @@ for exact_access_gate in \
 done
 grep -Fq 'local password must remain locked' "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "host validator does not require locked SSH account passwords"
+grep -Fq "''|hook2stream-operator) ;;" "$deployment_dir/scripts/validate-host.sh" \
+    && grep -Fq 'operator_user=hook2stream-operator' "$deployment_dir/scripts/validate-host.sh" \
+    || fail_test "host validator cannot be invoked directly by root without broad operator sudo access"
+if grep -Fq 'operator_user=${SUDO_USER:-}' "$deployment_dir/scripts/validate-host.sh"; then
+    fail_test "host validator still requires the locked operator account to obtain broad sudo access"
+fi
 grep -Fq 'root must be the only SSH account with an active local password' "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "host validator does not require an active password only for root"
 grep -Fq 'must not belong to the sudo group' "$deployment_dir/scripts/validate-host.sh" \
@@ -336,6 +360,15 @@ grep -Fq 'tailscale timeout ufw' "$deployment_dir/scripts/validate-host.sh" \
 grep -Fq '/etc/hook2stream/staging-receipt-allowed-signers' \
     "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "production app signer trust file is not host-validated"
+for compensated_infrastructure_gate in \
+    '/srv/hook2stream/release-state/infrastructure' \
+    'compensated infrastructure ledger' \
+    'active_infrastructure_capability=$ledger_capability' \
+    'active_infrastructure_environment=$ledger_environment' \
+    'differs from the active infrastructure release marker'; do
+    grep -Fq "$compensated_infrastructure_gate" "$deployment_dir/scripts/validate-host.sh" \
+        || fail_test "host validator omitted compensated infrastructure gate: $compensated_infrastructure_gate"
+done
 if grep -Eq 'provider-window|provider-lifecycle|HOOK2STREAM_STAGING_HOST_CA|host_ed25519_key-cert' \
     "$deployment_dir/scripts/validate-host.sh" \
     "$deployment_dir/host/deploy.conf.example"; then

@@ -44,6 +44,46 @@ ln -s "$scratch/marker" "$scratch/linked-file"
 if hook2stream_trusted_file "$scratch/linked-file" "$owner_group" 600; then
     fail "a symlink trusted file was accepted"
 fi
+
+release_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+rollback_protocol=hook2stream-application-rollback-v2
+capability=$scratch/release.capabilities.json
+mkdir "$scratch/bin"
+cat > "$scratch/bin/jq" <<'EOF'
+#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+const parsed = JSON.parse(fs.readFileSync(args.at(-1), "utf8"));
+const values = new Map();
+for (let i = 0; i < args.length - 2; i++) {
+  if (args[i] === "--arg") values.set(args[i + 1], args[i + 2]);
+}
+const exactKeys = Object.keys(parsed).sort().join(",") ===
+  "releaseSha,rollbackProtocol,schemaVersion,storageFormats";
+const valid = exactKeys && parsed.schemaVersion === 2 &&
+  parsed.releaseSha === values.get("sha") &&
+  parsed.rollbackProtocol === values.get("protocol") &&
+  Array.isArray(parsed.storageFormats) && parsed.storageFormats.length === 1 &&
+  parsed.storageFormats[0] === "H2SEv1";
+process.exit(valid ? 0 : 1);
+EOF
+chmod 0755 "$scratch/bin/jq"
+PATH=$scratch/bin:$PATH
+export PATH
+printf '%s\n' \
+    "{\"schemaVersion\":1,\"releaseSha\":\"$release_sha\",\"storageFormats\":[\"H2SEv1\"]}" \
+    > "$capability"
+chmod 0600 "$capability"
+if hook2stream_validate_rollback_capability \
+    "$capability" "$release_sha" "$rollback_protocol" "$owner_group"; then
+    fail "an adversarial pre-v2 successful-release capability was accepted for rollback"
+fi
+printf '%s\n' \
+    "{\"schemaVersion\":2,\"releaseSha\":\"$release_sha\",\"storageFormats\":[\"H2SEv1\"],\"rollbackProtocol\":\"$rollback_protocol\"}" \
+    > "$capability"
+hook2stream_validate_rollback_capability \
+    "$capability" "$release_sha" "$rollback_protocol" "$owner_group" \
+    || fail "the exact rollback protocol v2 capability was rejected"
 if command -v setfacl >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
     printf '%s\n' acl-marker > "$scratch/acl-marker"
     chmod 0640 "$scratch/acl-marker"
@@ -217,6 +257,7 @@ for launcher in "$app_launcher"; do
 done
 for app_gate in \
     'deploy-forced-command.sh' \
+    'rollback-application.sh' \
     'validate-candidate.sh' \
     'lib/forced-command-trust.sh'; do
     grep -F "$app_gate" "$app_launcher" >/dev/null \

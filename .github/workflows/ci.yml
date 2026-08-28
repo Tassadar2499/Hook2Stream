@@ -16,6 +16,8 @@ jobs:
       HOOK2STREAM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Build hardened PostgreSQL integration dependency
         run: docker build --file src/deploy/postgres/Dockerfile --tag hook2stream-postgres:ci .
@@ -28,7 +30,7 @@ jobs:
             --publish 127.0.0.1:5432:5432 \
             --env POSTGRES_PASSWORD=postgres \
             hook2stream-postgres:ci
-          for attempt in {1..30}; do
+          for _attempt in {1..30}; do
             if docker exec hook2stream-ci-postgres pg_isready -q -U postgres -d postgres; then
               test "$(docker exec hook2stream-ci-postgres psql -At -U postgres -d postgres -c 'show server_version')" = 17.11
               exit 0
@@ -40,6 +42,9 @@ jobs:
 
       - name: Build pinned quarantined MinIO acceptance dependency
         run: docker build --file src/deploy/minio/Dockerfile --tag hook2stream-minio:ci .
+
+      - name: Build hardened Caddy acceptance dependency
+        run: docker build --file src/deploy/caddy/Dockerfile --tag hook2stream-caddy:ci .
 
       - name: Start and verify MinIO/Caddy acceptance dependency
         run: src/ci/start-minio-acceptance.sh "$GITHUB_ENV"
@@ -108,6 +113,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
@@ -183,6 +190,24 @@ jobs:
             secret_consumer: false
             deployable: true
             build_args: ""
+          - name: caddy
+            dockerfile: src/deploy/caddy/Dockerfile
+            runtime: caddy
+            secret_consumer: false
+            deployable: true
+            build_args: ""
+          - name: pgbouncer
+            dockerfile: src/deploy/pgbouncer/Dockerfile
+            runtime: pgbouncer
+            secret_consumer: true
+            deployable: true
+            build_args: ""
+          - name: egress-proxy
+            dockerfile: src/deploy/egress-proxy/Dockerfile
+            runtime: squid
+            secret_consumer: false
+            deployable: true
+            build_args: ""
           - name: minio
             dockerfile: src/deploy/minio/Dockerfile
             runtime: minio
@@ -191,6 +216,8 @@ jobs:
             build_args: ""
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - run: docker build ${{ matrix.build_args }} --file "${{ matrix.dockerfile }}" --tag "hook2stream-${{ matrix.name }}:ci" .
       - if: matrix.runtime == 'dotnet'
         run: docker run --rm --entrypoint dotnet "hook2stream-${{ matrix.name }}:ci" --list-runtimes | grep -q Microsoft.AspNetCore.App
@@ -198,6 +225,14 @@ jobs:
         run: docker run --rm --entrypoint node "hook2stream-${{ matrix.name }}:ci" --version
       - if: matrix.runtime == 'postgres'
         run: docker run --rm --entrypoint pg_dump "hook2stream-${{ matrix.name }}:ci" --version
+      - if: matrix.runtime == 'caddy'
+        run: test "$(docker run --rm --entrypoint caddy "hook2stream-${{ matrix.name }}:ci" version)" = v2.11.4
+      - if: matrix.runtime == 'pgbouncer'
+        run: docker run --rm --entrypoint pgbouncer "hook2stream-${{ matrix.name }}:ci" --version | grep -F 'PgBouncer 1.25.2'
+      - if: matrix.runtime == 'squid'
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' "hook2stream-${{ matrix.name }}:ci")" = 31:31
+          docker run --rm --entrypoint squid "hook2stream-${{ matrix.name }}:ci" -v | grep -F 'Version 7.6'
       - name: Verify hardened PostgreSQL privilege drop
         if: matrix.name == 'postgres'
         run: |
@@ -308,6 +343,8 @@ jobs:
             deploy_var: POSTGRES_IMAGE
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Resolve immutable image reference
         id: image
@@ -354,6 +391,7 @@ jobs:
           image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
           fail-build: true
           severity-cutoff: high
+          only-fixed: false
           output-format: table
 
       - name: Record digest-pinned release reference
@@ -383,56 +421,86 @@ jobs:
 
   runtime-images:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: containers
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: caddy
-            source: caddy:2.11.4-alpine
+            dockerfile: src/deploy/caddy/Dockerfile
             deploy_var: CADDY_IMAGE
           - name: pgbouncer
-            source: edoburu/pgbouncer:v1.25.2-p0
+            dockerfile: src/deploy/pgbouncer/Dockerfile
             deploy_var: PGBOUNCER_IMAGE
           - name: egress-proxy
-            source: ubuntu/squid:6.6-24.04_edge
+            dockerfile: src/deploy/egress-proxy/Dockerfile
             deploy_var: EGRESS_PROXY_IMAGE
     steps:
-      - name: Pull reviewed runtime image
-        run: docker pull --platform linux/amd64 "${{ matrix.source }}"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - name: Resolve exact runtime digest
+      - name: Resolve immutable runtime image reference
         id: image
         shell: bash
         env:
-          SOURCE_IMAGE: ${{ matrix.source }}
+          IMAGE_NAME: hook2stream-${{ matrix.name }}
         run: |
-          reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$SOURCE_IMAGE")"
-          case "$reference" in
-            *@sha256:????????????????????????????????????????????????????????????????) ;;
-            *) echo "runtime image did not resolve to a sha256 digest" >&2; exit 1 ;;
-          esac
-          echo "reference=$reference" >> "$GITHUB_OUTPUT"
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          echo "tag=${repository}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Scan exact runtime digest
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Publish hardened runtime image with SBOM and provenance
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=release-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.name }}
+
+      - name: Scan exact published runtime digest
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
-          image: ${{ steps.image.outputs.reference }}
+          image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
           fail-build: true
           severity-cutoff: high
+          only-fixed: false
           output-format: table
 
       - name: Record runtime digest
         shell: bash
         env:
           DEPLOY_VARIABLE: ${{ matrix.deploy_var }}
-          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.repository }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p release-digests
-          printf '%s=%s\n' "$DEPLOY_VARIABLE" "$IMAGE_REFERENCE" > "release-digests/${{ matrix.name }}.txt"
+          printf '%s=%s@%s\n' "$DEPLOY_VARIABLE" "$IMAGE_REPOSITORY" "$IMAGE_DIGEST" > "release-digests/${{ matrix.name }}.txt"
 
       - name: Upload runtime digest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -456,6 +524,8 @@ jobs:
       artifact-name: ${{ steps.identity.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Download exact image digests
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

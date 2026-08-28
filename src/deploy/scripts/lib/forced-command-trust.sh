@@ -35,6 +35,120 @@ hook2stream_trusted_file() {
         && hook2stream_no_extended_acl "$trusted_path"
 }
 
+hook2stream_validate_ghcr_pull_auth() {
+    [ "$#" -eq 4 ] || return 1
+    hook2stream_registry_dir=$1
+    hook2stream_registry_username=$2
+    hook2stream_registry_auth_sha256=$3
+    hook2stream_registry_owner_group=$4
+    printf '%s\n' "$hook2stream_registry_username" \
+        | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$' \
+        || return 1
+    printf '%s\n' "$hook2stream_registry_auth_sha256" \
+        | grep -Eq '^[0-9a-f]{64}$' || return 1
+    hook2stream_trusted_directory \
+        "$hook2stream_registry_dir" "$hook2stream_registry_owner_group" 700 \
+        || return 1
+    hook2stream_registry_config=$hook2stream_registry_dir/config.json
+    hook2stream_trusted_file \
+        "$hook2stream_registry_config" "$hook2stream_registry_owner_group" 600 \
+        || return 1
+    hook2stream_registry_entries=$(printf '%s\n' config.json identity.attestation)
+    [ "$(find "$hook2stream_registry_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' \
+        | LC_ALL=C sort)" = "$hook2stream_registry_entries" ] || return 1
+    jq -e --arg username "$hook2stream_registry_username" '
+      (keys | sort) == ["auths"] and
+      (.auths | type == "object" and (keys | sort) == ["ghcr.io"]) and
+      (.auths["ghcr.io"] | type == "object" and (keys | sort) == ["auth"]) and
+      (.auths["ghcr.io"].auth | type == "string" and length > 0) and
+      (.auths["ghcr.io"].auth as $encoded |
+       ($encoded | test("^[A-Za-z0-9+/]+={0,2}$")) and
+       (($encoded | @base64d) as $credential |
+        (($credential | @base64) == $encoded) and
+        ($credential | startswith($username + ":")) and
+        ($credential | length) > (($username | length) + 1) and
+        (($credential | split(":")) | length) == 2 and
+        ($credential | test("[\\r\\n\\u0000]") | not))
+       )
+      )
+    ' "$hook2stream_registry_config" >/dev/null 2>&1 || return 1
+    hook2stream_registry_actual_sha256=$(jq -jr '.auths["ghcr.io"].auth' \
+        "$hook2stream_registry_config" | sha256sum | awk '{ print $1 }') \
+        || return 1
+    [ "$hook2stream_registry_actual_sha256" = \
+        "$hook2stream_registry_auth_sha256" ]
+}
+
+hook2stream_validate_ghcr_identity_attestation() {
+    [ "$#" -eq 6 ] || return 1
+    hook2stream_identity_registry_dir=$1
+    hook2stream_identity_environment=$2
+    hook2stream_identity_username=$3
+    hook2stream_identity_id=$4
+    hook2stream_identity_sha256=$5
+    hook2stream_identity_owner_group=$6
+    case "$hook2stream_identity_environment" in staging|production) ;; *) return 1 ;; esac
+    printf '%s\n' "$hook2stream_identity_username" \
+        | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$' \
+        || return 1
+    printf '%s\n' "$hook2stream_identity_id" \
+        | grep -Eq "^hook2stream-${hook2stream_identity_environment}-[0-9a-f]{32}$" \
+        || return 1
+    printf '%s\n' "$hook2stream_identity_sha256" \
+        | grep -Eq '^[0-9a-f]{64}$' || return 1
+    hook2stream_identity_file=$hook2stream_identity_registry_dir/identity.attestation
+    hook2stream_trusted_file \
+        "$hook2stream_identity_file" "$hook2stream_identity_owner_group" 600 \
+        || return 1
+    hook2stream_expected_attestation=$(printf '%s\n' \
+        'schema=hook2stream-ghcr-pull-identity-v1' \
+        "environment=$hook2stream_identity_environment" \
+        "username=$hook2stream_identity_username" \
+        "credential_identity=$hook2stream_identity_id" \
+        'operator_attests_read_packages_only=true' \
+        'operator_attests_environment_exclusive=true' \
+        'scope_verification=provider-unavailable')
+    [ "$(cat "$hook2stream_identity_file")" = "$hook2stream_expected_attestation" ] \
+        || return 1
+    hook2stream_identity_actual_sha256=$(sha256sum "$hook2stream_identity_file" \
+        | awk '{ print $1 }') || return 1
+    [ "$hook2stream_identity_actual_sha256" = "$hook2stream_identity_sha256" ]
+}
+
+hook2stream_remove_stale_ghcr_auth_temporaries() {
+    [ "$#" -eq 2 ] || return 1
+    hook2stream_stale_registry_dir=$1
+    hook2stream_stale_owner_group=$2
+    for hook2stream_stale_path in \
+        "$hook2stream_stale_registry_dir"/.config.json.tmp.* \
+        "$hook2stream_stale_registry_dir"/.identity.attestation.tmp.*; do
+        [ -e "$hook2stream_stale_path" ] || [ -L "$hook2stream_stale_path" ] || continue
+        hook2stream_trusted_file "$hook2stream_stale_path" \
+            "$hook2stream_stale_owner_group" 600 || return 1
+        rm -f -- "$hook2stream_stale_path" || return 1
+    done
+}
+
+hook2stream_validate_rollback_capability() {
+    [ "$#" -eq 4 ] || return 1
+    hook2stream_capability_file=$1
+    hook2stream_capability_sha=$2
+    hook2stream_capability_protocol=$3
+    hook2stream_capability_owner_group=$4
+    printf '%s\n' "$hook2stream_capability_sha" | grep -Eq '^[0-9a-f]{40}$' \
+        || return 1
+    [ "$hook2stream_capability_protocol" = hook2stream-application-rollback-v2 ] \
+        || return 1
+    hook2stream_trusted_file "$hook2stream_capability_file" \
+        "$hook2stream_capability_owner_group" 600 || return 1
+    jq -e --arg sha "$hook2stream_capability_sha" \
+        --arg protocol "$hook2stream_capability_protocol" 'select(
+      (keys | sort) == ["releaseSha","rollbackProtocol","schemaVersion","storageFormats"] and
+      .schemaVersion == 2 and .releaseSha == $sha and
+      .rollbackProtocol == $protocol and .storageFormats == ["H2SEv1"]
+    )' "$hook2stream_capability_file" >/dev/null 2>&1
+}
+
 hook2stream_validate_exact_allowed_signer() {
     [ "$#" -eq 2 ] || return 1
     hook2stream_signers_path=$1

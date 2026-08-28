@@ -31,6 +31,17 @@ test-only image as deployable; all images that can enter a candidate retain the
 blocking High/Critical gate. A MinIO finding can never be waived into staging
 or production.
 
+Caddy, PgBouncer, and the four Squid egress proxies are repository-owned
+hardened release images, not mutable external runtime tags. CI builds Caddy
+2.11.4 from its exact upstream commit on Go 1.27.0 with reviewed patched Go
+modules and a scratch runtime; PgBouncer 1.25.2 from its checksummed release
+tarball on patched Alpine 3.24; and Squid 7.6 from exact patched Alpine
+packages. Each image is published to the repository GHCR namespace with
+SBOM/provenance, scanned at its published digest with the same blocking
+High/Critical (`only-fixed=false`) policy, and then allowlisted only under its
+`ghcr.io/<owner>/hook2stream-*` repository. External Caddy, edoburu/PgBouncer,
+and Ubuntu/Squid digests are rejected by candidate validation.
+
 ## Deployed app-host contract
 
 Copy the matching `environments/*.env.example` to the root-owned release
@@ -160,8 +171,8 @@ VNC at the boot prompt must be proved by the live provider probe before relying
 on it. Finally validate:
 
 ```sh
-sudo ./scripts/validate-host.sh app staging
-sudo ./scripts/validate-host.sh app production
+/usr/local/libexec/hook2stream/validate-host.sh app staging
+/usr/local/libexec/hook2stream/validate-host.sh app production
 ```
 
 Run only the command matching that host. The validator proves the exact
@@ -193,8 +204,14 @@ Install the app gate only after `/srv/hook2stream` is the active encrypted
 mount. The mount root remains `root:root` mode `0755`; configuration, releases,
 state, and `/etc/hook2stream` are root-private. The deploy user's parent paths
 must not be writable or symlinked. Install the reviewed forced-command launcher,
-wrapper, candidate validator, libraries, and E2E script with the exact ownership
-and modes enforced by `validate-host.sh`.
+wrapper, candidate validator, libraries, E2E script, and
+`/usr/local/libexec/hook2stream/rollback-application.sh` with the exact
+ownership and modes enforced by `validate-host.sh`. The rollback orchestrator
+is `root:root` mode `0555` and never executes the target candidate's copy. A
+successful forward deploy writes protocol-v2 capability state and
+`active-infrastructure-release.json`; rollback preserves that marker and uses
+only its validated root-private Compose/helper bundle. Pre-v2 current or target
+release capability records are rejected.
 
 Create `/srv/hook2stream/config/staging.env` or `production.env` from the
 matching environment template as `root:root` mode `0600`. Install
@@ -203,10 +220,33 @@ Replace both public-key fingerprint placeholders with the exact OpenSSH SHA-256
 fingerprints for the single operator key and the single environment-specific CI
 deploy key. `validate-host.sh` rejects extra/unrestricted keys and any sudoers
 content other than `host/sudoers.example`, including effective grants from a
-different drop-in or group. Run `sudo tailscale set --ssh=false` before host
+different drop-in or group.
+
+Run `deploy/providers/serversguru/configure-ghcr-pull-auth.sh` with a unique
+32-hex operator identity suffix and distinct GitHub credential per environment,
+then copy all four printed non-secret pins to `deploy.conf`. Docker login proves
+only credential usability: GitHub does not expose PAT scopes here. The
+root-only `identity.attestation` therefore records the operator's
+`read:packages`-only and environment-exclusive assertions, and its SHA-256 is
+enforced by the launcher, deploy scripts, and host validator.
+
+Run `sudo tailscale set --ssh=false` before host
 validation; the deployment contract uses ordinary OpenSSH only. The validator
 also rejects named/default POSIX ACLs on trusted files, secrets, and the Docker
 socket.
+
+Install `host/authenticated-e2e.sh` unchanged as the root-owned mode `0500`
+path configured by `HOOK2STREAM_AUTHENTICATED_E2E_HOOK`. Provision its
+environment-specific expected-email, licensed MP3 and staging soak baseline
+inputs under `/srv/hook2stream/e2e` as documented in
+[`host/README.md`](host/README.md). On a cold host, install the OAuth session
+only after `prepare-pending` has made the public origin available; established
+hosts must have a valid session before `deploy-and-finalize`. The script calls
+the public API and fails closed. Staging performs
+upload/OpenRouter/test-billing/render; production performs deterministic
+upload/OpenRouter/preview but no live billing or final render. Printing either
+capability line without its environment-specific checks is not an installation
+option.
 Production installs the staging-receipt allowed-signers file with exactly one
 named ED25519 authority; additional or wildcard records are rejected. An
 accepted promotion carries and verifies the signed staging receipt before
@@ -223,9 +263,11 @@ deploys the existing artifact without rebuild, runs acceptance plus the
 60-minute soak, and signs a receipt. The soak is a separate staging-only forced
 command for the exact current candidate. It holds the deployment lock for
 3600--3900 seconds, invokes the root-owned E2E hook in `soak-60m` mode, and
-requires a completed render, at least 3300 active render seconds, concurrency
-one, at least 60 successful network checks, no throttling/OOM, and one healthy
-candidate-digest `worker-render`. Its strict result is included in the signed
+requires the prior completed 18-item render, at least 3300 seconds of synthetic
+FFmpeg load in an isolated ephemeral container from the exact worker digest
+with the same CPU/memory limits, concurrency one, at least 60
+successful network checks, no meaningful cgroup/host throttling or OOM, and one
+healthy candidate-digest `worker-render`. Its strict result is included in the signed
 application receipt; hook diagnostics are not exposed to CI logs. Production
 takes the successful staging workflow
 run ID and accepts only its exact candidate after GitHub Environment approval.
@@ -238,6 +280,49 @@ The forced command rejects
 archive traversal, links, special files, unknown images, tags, checksum/schema
 or receipt mismatch; host `flock` is the second concurrency lock.
 
+The staging and production workflows expose three explicit deployment phases:
+
+- `prepare-pending` is permitted only for the first, cold database bootstrap,
+  when no `last-successful.env` exists. It starts the candidate runtime through
+  the host `prepare` transaction and returns a pending receipt, but does not
+  declare the release successful, run the soak, or make it promotable. The
+  operator then completes invite-only OAuth onboarding against that running
+  origin, creates the QA workspace, and installs the resulting cookie jar as a
+  root-owned private E2E input.
+- `finalize-pending` sends only `finalize <candidate-id>`. It must name the exact
+  prepared candidate and reuses its persisted E2E operation identity; it
+  revalidates the running digests and all bound evidence before authenticated
+  E2E and successful-state publication. A cold authenticated-E2E failure leaves
+  that exact pending transaction available for a corrected retry.
+- `deploy-and-finalize` is the normal path after any successful release exists.
+  The host `deploy` command performs runtime deployment, authenticated E2E,
+  digest verification, and state publication as one locked host transaction.
+  It must not be split into an operator handoff, and it is rejected for the
+  first cold deployment.
+
+`release-state/pending-deploy.json` binds more than the commit SHA: it records
+the full `release-candidate-<sha>-<run_id>-<attempt>` artifact name, environment,
+previous successful SHA, release-images, bundle and derived environment hashes,
+the 32-hex E2E operation ID, and, in production, the receipt, signature and
+allowed-signer hashes. Only an exact replay may reuse it; a different artifact,
+same-SHA attempt, changed approval, or other drift is rejected. The operation
+ID remains stable within that transaction and makes its mutating E2E requests
+idempotent, while a later candidate attempt receives a new ID. A successful
+remote result is stored per full candidate and may be re-emitted after lost SSH
+output only after the host revalidates the successful environment, active
+infrastructure marker, live health, and actual running digests.
+
+If normal deployment or finalization fails after a previous release existed,
+the gate compensates by restoring that previous application image set. It does
+not down-migrate the database or restore old infrastructure images: the
+candidate infrastructure bundle remains the active infrastructure ledger, and
+the published state records that coherent combination. Compensation is itself
+signal-safe. If application restoration, digest verification, or state
+publication cannot be proven, the gate writes root-owned
+`release-state/recovery-required.json`, stops public Caddy ingress where it can
+prove ownership, and blocks every automated deploy, finalize, soak, and
+rollback until an operator reconciles runtime and ledger state manually.
+
 Before the first candidate, finish the deploy-key, host trust, MagicDNS,
 rollback-marker, integration callback, and DNS handoff in
 [`DEPLOYMENT.md`](../../.github/DEPLOYMENT.md). The host and matching GitHub
@@ -247,8 +332,13 @@ MagicDNS names.
 
 Rollback is application-only. It changes API, workers, and web to a previously
 successful H2SE-compatible target, preserves bootstrap and infrastructure
-digests, and runs no migration. Incompatible schema rollback requires a forward
-fix or separately approved write-stop/restore.
+digests, and runs no migration. Before committing rollback state, the host runs
+the bounded, non-mutating `rollback-verify` authenticated gate for OAuth,
+H2SE Range reads, worker state, preview/export reads, and denied egress. A gate,
+digest, or signal failure reverses the application to the original release; if
+that reversal cannot be proved, the same recovery-required marker and ingress
+shutdown boundary apply. Incompatible schema rollback requires a forward fix
+or separately approved write-stop/restore.
 
 ## Local and CI MinIO
 

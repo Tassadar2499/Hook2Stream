@@ -9,8 +9,8 @@ fail() { printf '%s\n' "Servers.Guru provider contract test: $*" >&2; exit 1; }
 
 [ -d "$provider" ] || fail 'Servers.Guru provider contour is missing'
 [ "$(find "$provider" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)" = \
-    "$(printf '%s\n' README.md policy.json tailscale-policy.hujson)" ] \
-    || fail 'provider contour must contain only README.md, policy.json, and tailscale-policy.hujson'
+    "$(printf '%s\n' README.md configure-ghcr-pull-auth.sh policy.json tailscale-policy.hujson)" ] \
+    || fail 'provider contour may contain only docs, policy, tailnet policy, and the host-local GHCR installer'
 [ -z "$(find "$provider" -mindepth 1 -type d -print -quit)" ] \
     || fail 'manual provider contour must not contain automation subdirectories'
 [ ! -e "$repository_root/deploy/providers/digitalocean" ] \
@@ -81,6 +81,8 @@ grep -Fq 'There is no Terraform, create, reinstall, resize, renew, or' "$provide
     || fail 'manual no-mutation boundary is not documented'
 grep -Fq 'GitHub Actions must not receive' "$provider/README.md" \
     || fail 'provider credential isolation is not documented'
+grep -Fq 'configure-ghcr-pull-auth.sh' "$provider/README.md" \
+    || fail 'host-local GHCR credential installation is not documented'
 if grep -Eqi '(password|secret|token|api[_-]?key)[[:space:]]*[:=][[:space:]]*[^[:space:]]+' "$policy"; then
     fail 'policy contains credential-shaped material'
 fi

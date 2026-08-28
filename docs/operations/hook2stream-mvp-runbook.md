@@ -198,8 +198,15 @@ without the mount.
 Before the first host validation, also install the Docker mount-guard template,
 persist `/proc` with `hidepid=2` or `hidepid=invisible`, create root-private
 `config`, `releases`, and `release-state` directories, install the exact
-environment file and scalar secrets, and replace the fail-closed authenticated
-E2E template with the reviewed environment implementation. Create
+environment file and scalar secrets, and install
+`src/deploy/host/authenticated-e2e.sh` unchanged as the root-owned mode `0500`
+authenticated hook. Before the first release, provision its
+environment-specific expected-email scalar, licensed MP3 and staging soak
+baseline below the encrypted `/srv/hook2stream/e2e` directory exactly as
+documented in the host README. The OAuth cookie jar is installed later, during
+the explicit cold-bootstrap handoff after the candidate origin is running; do
+not use a placeholder. At finalization, missing, linked, loosely permissioned,
+stale or wrong-account inputs block deployment. Create
 `hook2stream-deploy` separately from the operator, without Docker/secrets-group
 membership, and install the forced-command launcher, `authorized_keys`,
 sudoers, validation libraries, and production signer file with the modes
@@ -220,8 +227,8 @@ VNC reaches the boot prompt before depending on this path. Run the environment-s
 validator after bootstrap and every reboot:
 
 ```sh
-sudo src/deploy/scripts/validate-host.sh app staging
-sudo src/deploy/scripts/validate-host.sh app production
+/usr/local/libexec/hook2stream/validate-host.sh app staging
+/usr/local/libexec/hook2stream/validate-host.sh app production
 ```
 
 It must prove the exact backing file -> loop -> LUKS2 -> mapper -> mount chain,
@@ -418,13 +425,64 @@ The `CI` workflow creates one immutable
 `release-candidate-<sha>-<run_id>-<attempt>` containing schema-v1 metadata,
 digest-only images, the app deploy bundle, and checksums. It never creates or
 deploys staging automatically. After the permanent staging host has passed
-provider and host acceptance, the separately dispatched staging workflow takes a successful protected-main
-`source_ci_run_id`, verifies its attestations and candidate, deploys it without
-rebuild, runs smoke/E2E/storage gates plus the 60-minute soak, and publishes a
-signed staging receipt. Production proves that receipt refers to the exact
-candidate through `workflow_dispatch` with the staging run ID, waits for
-two-reviewer/no-self-review GitHub Environment approval, and deploys the same
-digests without rebuild.
+provider and host acceptance, the separately dispatched staging workflow takes
+a successful protected-main `source_ci_run_id`, verifies its attestations and
+candidate, deploys it without rebuild, runs smoke/E2E/storage gates plus the
+60-minute soak, and publishes a signed staging receipt. Production proves that
+receipt refers to the exact candidate through `workflow_dispatch` with the
+staging run ID, waits for two-reviewer/no-self-review GitHub Environment
+approval, and deploys the same digests without rebuild.
+
+The first release in each environment is an explicit two-dispatch cold
+bootstrap:
+
+1. Dispatch the selected workflow with
+   `deployment_phase=prepare-pending`. The host accepts `prepare` only when
+   `last-successful.env` does not exist, starts the candidate runtime, and
+   returns a pending receipt. It does not mark the candidate successful, run
+   soak, or issue promotion evidence.
+2. Against that running origin, sign in with the dedicated pre-invited Google
+   QA account, complete onboarding, and verify/create the intended QA workspace.
+   Export the short-lived OAuth cookie jar and atomically install it below
+   `/srv/hook2stream/e2e` as the configured non-symlink `root:root` private
+   file. Do not place Cookie or CSRF values in shell history or logs.
+3. Dispatch the same source run and full artifact with
+   `deployment_phase=finalize-pending`. The host revalidates the pending
+   candidate and running digests, runs authenticated E2E, then publishes the
+   successful release state. A cold E2E failure retains the exact pending
+   transaction for a corrected retry; it does not authorize another candidate.
+
+After a successful release exists, use only the default
+`deployment_phase=deploy-and-finalize`. Its `deploy` forced command performs
+runtime transition, authenticated E2E, digest verification, and successful
+state publication as one host-side transaction under the deployment `flock`.
+There is no operator handoff between deployment and validation, and `prepare`
+is rejected on an established host.
+
+The root-owned `release-state/pending-deploy.json` binds the full candidate
+artifact, not merely its commit: environment, previous successful SHA,
+release-images, bundle and derived environment hashes, a generated 32-hex E2E
+operation ID, and, in production, staging receipt/signature/allowed-signer
+hashes. Only an exact replay may reuse this state. A same-SHA artifact from a
+different run/attempt, a changed signer file, or any other drift is rejected.
+The persisted operation ID provides stable idempotency keys within an exact
+attempt, while different attempts receive different IDs. The successful remote
+result is also stored per full artifact; after a lost SSH response it may be
+re-emitted only after live health, the active-infrastructure ledger, the
+successful environment, and all running digests are revalidated.
+
+All candidate runtimes come from repository-owned GHCR builds. In particular,
+Caddy 2.11.4 is rebuilt from its exact upstream commit on the pinned Go 1.27.0
+builder with reviewed security dependency updates and a scratch runtime under
+UID/GID 10001. Before Caddy starts, a no-network, capability-limited one-shot
+job uses the pinned PostgreSQL image to initialize/chown only the named
+`/data` and `/config` volumes; the public Caddy container retains only
+`NET_BIND_SERVICE` and cannot run as root;
+PgBouncer 1.25.2 is built from its checksummed upstream release; and Squid 7.6
+uses exact patched Alpine 3.24 packages and runs as UID/GID 31. Their published
+digests carry SBOM/provenance and must pass the blocking High/Critical scan with
+`only-fixed=false`. Candidate validation rejects the former external Caddy,
+edoburu/PgBouncer, and Ubuntu/Squid repositories.
 
 Freeze protected `main` from the staging workflow dispatch through its signed
 application receipt, production approval, and
@@ -462,18 +520,40 @@ descendant of it. Production promotes the exact staging-tested descendant.
 invokes only the root-owned forced command. Candidate validation rejects tags,
 unknown images, checksum/schema/repository mismatch, archive traversal, links,
 special files, and receipt mismatch. GitHub concurrency and host `flock` both
-serialize deployment. After `deploy <candidate-id>` succeeds on staging, CI
-opens a separate `soak <candidate-id>` SSH operation. The wrapper accepts it
-only for the exact currently successful candidate and holds
+serialize deployment. After `deploy <candidate-id>` or the first successful
+`finalize <candidate-id>` completes on staging, CI opens a separate
+`soak <candidate-id>` SSH operation. The wrapper accepts it only for the exact
+currently successful candidate and holds
 the same `flock` for the entire sustained test; rollback invalidates this
 eligibility.
+
+If a normal deploy or finalization fails after a previous successful release,
+the host compensates by restoring that previous application image set. It does
+not perform a down migration and does not restore old Caddy, PostgreSQL,
+PgBouncer, backup, proxy, or bootstrap images: the candidate infrastructure
+bundle remains active, and the durable ledger must describe the candidate
+infrastructure plus restored application. Compensation handles termination
+signals as part of the transaction. If application restoration, digest
+verification, or state publication cannot be proven, the host writes
+`/srv/hook2stream/release-state/recovery-required.json`, stops the owned public
+Caddy container where possible, and blocks all automated deploy, finalize,
+soak, and rollback commands. Treat that marker as a manual incident: reconcile
+database, runtime digests, `last-successful.env`, and
+`active-infrastructure-release.json` before clearing it. Never delete the
+marker merely to unblock CI.
 
 Before any migration, the wrapper requires the signed Storj marker, authenticated
 media probe, and a backup newer than two hours. Rollback changes only API,
 workers, and web to previously successful H2SE-compatible digests. It never
 runs a down migration or rolls back PostgreSQL/Caddy/PgBouncer/backup/proxy
-images. An incompatible database schema requires a forward fix or separately
-approved write-stop and restore.
+images. Before it commits rollback state, the root-owned orchestrator runs the
+bounded, non-mutating `rollback-verify` gate: exact OAuth identity, H2SE
+single-range read, worker state, preview/export reads, and denied egress. It
+does not upload media, create billing events, start renders, or migrate the
+database. A gate, digest, or signal failure reverses the app to its original
+release; an unprovable reversal enters the same recovery-required and
+closed-ingress state. An incompatible database schema requires a forward fix
+or separately approved write-stop and restore.
 
 ## Backup and recovery drills
 
@@ -517,17 +597,24 @@ shared-CPU throttling, and at least 20 percent free disk. The render/network
 soak is a separate root-owned `HOOK2STREAM_E2E_HOOK ... soak-60m` operation,
 not a readiness loop. It must run for 3600--3900 measured seconds and return one
 strict `hook2stream-soak-hook-result-v1` JSON line proving at least one completed
-render, at least 3300 active render seconds, maximum render concurrency one, at
+18-item staging render, at least 3300 active FFmpeg load seconds, maximum
+render concurrency one, at
 least 60 network checks with zero failures, no CPU throttling, and no OOM. The
-active interval is measured from actual sequential representative render-job
-execution, not sleep time. Each minute contributes a network check only after
+checked-in authenticated hook records the real initial render duration during
+the staging release gate, rejects only a slowdown over 20 percent against a
+retained same-SKU baseline no older than 90 days, and then starts one bounded
+3600-second `lavfi` to null FFmpeg process in a dedicated networkless,
+read-only container built from the exact running worker digest with the same
+three-vCPU/1536-MiB limits. The labeled container is removed in every exit
+path. It does not consume a content rerender or another billing
+entitlement. Each minute contributes a network check only after
 both public/API readiness and an authenticated small Storj HEAD/Range cycle
 succeed. The operator hook samples `/proc/stat` once per minute and retains the
 raw deltas privately: `cpuThrottled=false` is permitted only when no five-minute
-window exceeds 10 percent steal time and deterministic render throughput stays
-within 20 percent of the accepted same-SKU probe baseline while CPU is active.
-Docker's configured three-vCPU quota is recorded separately and is not mistaken
-for provider steal. Missing samples or a missing baseline fails closed. The
+window exceeds 10 percent steal time, cgroup `nr_throttled`/`throttled_usec`
+remain within policy, and real render throughput is no more than 20 percent
+slower than the accepted same-SKU probe baseline. A faster host passes.
+Missing samples or a missing baseline fails closed. The
 wrapper then independently proves exactly one healthy `worker-render`, its
 candidate digest, and `OOMKilled=false`; the signed receipt binds the result to
 the candidate and commit. Hook stderr and diagnostics
