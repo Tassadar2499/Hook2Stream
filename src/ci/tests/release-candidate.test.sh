@@ -24,10 +24,10 @@ for key in API_IMAGE WORKER_IMAGE BOOTSTRAPPER_IMAGE WEB_IMAGE POSTGRES_BACKUP_I
     BOOTSTRAPPER_IMAGE) image=ghcr.io/example/hook2stream-bootstrapper ;;
     WEB_IMAGE) image=ghcr.io/example/hook2stream-web ;;
     POSTGRES_BACKUP_IMAGE) image=ghcr.io/example/hook2stream-postgres-backup ;;
-    CADDY_IMAGE) image=caddy ;;
+    CADDY_IMAGE) image=ghcr.io/example/hook2stream-caddy ;;
     POSTGRES_IMAGE) image=ghcr.io/example/hook2stream-postgres ;;
-    PGBOUNCER_IMAGE) image=edoburu/pgbouncer ;;
-    EGRESS_PROXY_IMAGE) image=ubuntu/squid ;;
+    PGBOUNCER_IMAGE) image=ghcr.io/example/hook2stream-pgbouncer ;;
+    EGRESS_PROXY_IMAGE) image=ghcr.io/example/hook2stream-egress-proxy ;;
   esac
   printf '%s=%s\n' "$key" "${image}@sha256:${digest}" > "$fragments/${index}.env"
 done
@@ -47,6 +47,33 @@ GITHUB_REPOSITORY_OWNER=ambient-owner node "$ci_dir/release-candidate.mjs" valid
   --sha "$sha" \
   --run-id "$run_id" \
   --run-attempt "$run_attempt"
+
+for runtime_replacement in \
+  'hook2stream-caddy|docker.io/library/caddy' \
+  'hook2stream-pgbouncer|docker.io/edoburu/pgbouncer' \
+  'hook2stream-egress-proxy|docker.io/ubuntu/squid'; do
+  hardened_repository=${runtime_replacement%%|*}
+  external_repository=${runtime_replacement#*|}
+  mutated="$scratch/external-${hardened_repository}"
+  cp -a "$candidate" "$mutated"
+  sed -i \
+    "s#ghcr.io/example/${hardened_repository}@#${external_repository}@#g" \
+    "$mutated/release-images.env" \
+    "$mutated/release-metadata.json"
+  (
+    cd "$mutated"
+    sha256sum deploy-bundle.tar.gz release-images.env release-metadata.json > SHA256SUMS
+  )
+  if node "$ci_dir/release-candidate.mjs" validate \
+    --candidate "$mutated" \
+    --repository "$repository" \
+    --sha "$sha" \
+    --run-id "$run_id" \
+    --run-attempt "$run_attempt" >/dev/null 2>&1; then
+    echo "candidate validator accepted external runtime repository: $external_repository" >&2
+    exit 1
+  fi
+done
 
 cp -a "$candidate" "$scratch/official-postgres-candidate"
 sed -i \

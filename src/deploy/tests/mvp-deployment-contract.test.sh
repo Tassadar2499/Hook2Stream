@@ -65,16 +65,30 @@ grep -Fq "'POSTGRES_BACKUP_IMAGE:storage-janitor'" "$wrapper" \
 grep -Fq 'compose up -d --no-deps caddy postgres-backup storage-janitor' "$release" \
   || fail "the Storj media janitor is not started by deployment"
 grep -Fq 'storageFormats:["H2SEv1"]' "$wrapper" || fail "H2SE rollback capability is not recorded"
+grep -Fq 'hook2stream-application-rollback-v2' "$wrapper" \
+  && grep -Fq 'active-infrastructure-release.json' "$wrapper" \
+  || fail "rollback protocol v2 or active infrastructure marker is missing"
+[ "$(grep -Fc '> "$active_infrastructure.tmp"' "$wrapper")" -eq 1 ] \
+  && [ "$(grep -Fc 'mv -f "$active_infrastructure.tmp" "$active_infrastructure"' "$wrapper")" -eq 1 ] \
+  || fail "active infrastructure marker is not forward-deploy-only state"
 grep -Fq 'HOOK2STREAM_ROLLBACK_RECEIPT=' "$wrapper" || fail "rollback receipt marker is missing"
 grep -Fq 'MIN_ROLLBACK_RELEASE_SHA must identify the first approved H2SE release' "$wrapper" \
   || fail "mandatory pre-mutation rollback floor validation is missing"
 grep -Fq 'minimumRollbackReleaseSha:$minimum' "$wrapper" || fail "rollback receipt does not bind the host floor"
 grep -Fq 'rollback-application.sh' "$wrapper" || fail "forced rollback is not routed through the app-only implementation"
-grep -Fq 'release lacks the forward deploy or application-only rollback implementation' "$wrapper" \
-  || fail "successful releases are not required to carry the app-only rollback implementation"
+grep -Fq 'rollback_program=/usr/local/libexec/hook2stream/rollback-application.sh' "$wrapper" \
+  || fail "rollback is not pinned to the installed root-owned orchestrator"
+if grep -Fq 'rollback_dir/deploy/scripts/rollback-application.sh' "$wrapper"; then
+  fail "rollback executes target bundle control-plane code"
+fi
+grep -Fq 'infrastructure_release_dir/deploy/scripts/lib/deployment-common.sh' "$wrapper" \
+  && grep -Fq 'infrastructure_release_dir/deploy/compose.yaml' "$wrapper" \
+  && grep -Fq 'differs from the active infrastructure release marker' "$wrapper" \
+  || fail "active infrastructure compose/helper source is not validated"
 grep -Fq 'application-images-only' "$wrapper" && grep -Fq 'infrastructure-unchanged' "$wrapper" \
   && grep -Fq 'no-migrations' "$wrapper" || fail "rollback receipt does not attest app-only semantics"
-grep -Fq 'docker image pull' "$rollback" && grep -Fq 'compose up -d --no-deps' "$rollback" \
+grep -Fq 'docker --config "$DOCKER_CONFIG" image pull' "$rollback" \
+  && grep -Fq 'compose up -d --no-deps' "$rollback" \
   || fail "app-only rollback does not explicitly constrain service mutation"
 if grep -Eq 'compose(_tools)? (run|up).*bootstrapper|deploy-release\.sh' "$rollback"; then
   fail "app-only rollback invokes the bootstrapper, migration path, or full deployment"

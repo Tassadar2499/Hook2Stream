@@ -1,5 +1,5 @@
-ARG GO_IMAGE=golang:1.27.0-alpine3.24
-ARG POSTGRES_BASE_IMAGE=postgres:17.11-alpine3.24
+ARG GO_IMAGE=docker.io/library/golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc
+ARG POSTGRES_BASE_IMAGE=docker.io/library/postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
 
 FROM ${GO_IMAGE} AS storage-tool-build
 

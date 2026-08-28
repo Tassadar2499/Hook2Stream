@@ -11,6 +11,7 @@ release_state_dir=${HOOK2STREAM_RELEASE_STATE_DIR:-}
 secret_state_dir=${HOOK2STREAM_SECRET_STATE_DIR:-/var/lib/hook2stream/secrets}
 generations_dir=${secret_state_dir}/generations
 deployment_program=${deployment_program:-hook2stream-deploy}
+. "$deployment_dir/scripts/lib/forced-command-trust.sh"
 
 deployment_log() {
     printf '%s\n' "${deployment_program}: $*"
@@ -63,11 +64,13 @@ compose() {
     deployment_compose_storage_mode=$(deployment_storage_mode)
     case "${deployment_compose_secret_provider}:${deployment_compose_storage_mode}" in
         file:external)
-            docker compose --env-file "$environment_file" \
+            docker --config "${DOCKER_CONFIG:?DOCKER_CONFIG is required}" \
+                compose --env-file "$environment_file" \
                 -f "$deployment_dir/compose.yaml" "$@"
             ;;
         vault:external)
-            docker compose --env-file "$environment_file" \
+            docker --config "${DOCKER_CONFIG:?DOCKER_CONFIG is required}" \
+                compose --env-file "$environment_file" \
                 -f "$deployment_dir/compose.yaml" \
                 -f "$deployment_dir/compose.vault.yaml" "$@"
             ;;
@@ -75,6 +78,25 @@ compose() {
             fail "deployed releases require SECRET_PROVIDER=file|vault and STORAGE_MODE=external; MinIO is local/CI only"
             ;;
     esac
+}
+
+deployment_validate_ghcr_pull_auth() {
+    : "${DOCKER_CONFIG:?DOCKER_CONFIG is required}"
+    : "${HOOK2STREAM_GHCR_USERNAME:?HOOK2STREAM_GHCR_USERNAME is required}"
+    : "${HOOK2STREAM_GHCR_AUTH_SHA256:?HOOK2STREAM_GHCR_AUTH_SHA256 is required}"
+    : "${HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY:?HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY is required}"
+    : "${HOOK2STREAM_GHCR_IDENTITY_SHA256:?HOOK2STREAM_GHCR_IDENTITY_SHA256 is required}"
+    deployment_registry_owner=$(id -u):$(id -g)
+    hook2stream_validate_ghcr_pull_auth \
+        "$DOCKER_CONFIG" "$HOOK2STREAM_GHCR_USERNAME" \
+        "$HOOK2STREAM_GHCR_AUTH_SHA256" "$deployment_registry_owner" \
+        || fail "GHCR pull authentication is missing, unsafe, malformed, or differs from the pinned environment credential"
+    deployment_environment=$(read_env_value DEPLOYMENT_ENVIRONMENT)
+    hook2stream_validate_ghcr_identity_attestation \
+        "$DOCKER_CONFIG" "$deployment_environment" "$HOOK2STREAM_GHCR_USERNAME" \
+        "$HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY" "$HOOK2STREAM_GHCR_IDENTITY_SHA256" \
+        "$deployment_registry_owner" \
+        || fail "GHCR credential identity attestation is missing, unsafe, malformed, or differs from its environment pin"
 }
 
 compose_tools() {

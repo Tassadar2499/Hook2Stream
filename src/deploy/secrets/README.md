@@ -109,6 +109,19 @@ test identity, so explicitly remove a retired one after validating the cutover.
 None of these root/bootstrap values may be reused for Storj, staging, or
 production. Local MinIO is not a deployed backup or durability boundary.
 
+## Deployment E2E credentials
+
+Authenticated release-gate inputs are deliberately outside `SECRETS_DIR`
+because no application container consumes them. Store the environment-specific
+OAuth cookie jar, expected-email scalar, licensed MP3, and staging soak baseline
+below `/srv/hook2stream/e2e` as
+`root:root` mode `0400` or `0600`; keep the directory `0700`. The checked-in
+`host/authenticated-e2e.sh` rejects symlinks, other owners, looser modes and
+files outside this encrypted directory. Never copy these inputs into a release
+candidate, GitHub secret/artifact, container mount, provider metadata, command
+argument, or deploy log. Refresh the short-lived OAuth cookie jar through an
+operator-controlled browser session before it expires.
+
 ## Optional Vault rendering
 
 The default MVP may use `SECRET_PROVIDER=file`. The optional one-shot Vault

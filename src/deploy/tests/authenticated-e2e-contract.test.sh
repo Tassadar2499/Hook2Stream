@@ -1,0 +1,335 @@
+#!/bin/sh
+set -eu
+
+deployment_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+hook=$deployment_dir/host/authenticated-e2e.sh
+legacy=$deployment_dir/host/authenticated-e2e.example
+fail() { printf '%s\n' "authenticated E2E contract test: $*" >&2; exit 1; }
+
+[ -x "$hook" ] || fail "canonical authenticated hook is missing or not executable"
+[ ! -e "$legacy" ] || fail "fail-closed placeholder must not coexist with the canonical hook"
+command -v python3 >/dev/null 2>&1 || fail "Python 3 is required"
+
+for contract in \
+  '/api/v1/auth/session' \
+  '/api/v1/account/me' \
+  '/api/v1/releases/audio-uploads' \
+  '/parts/1' \
+  'bytes=0-1,4-5' \
+  '/api/v1/billing/stripe/webhook' \
+  'previewVideo' \
+  'completed_lanes = {"audio", "analysis", "transcript", "artwork", "hooks", "campaign", "preview"}' \
+  'len(videos) != 18' \
+  'testsrc2=size=1080x1920:rate=30' \
+  '"3600s"' \
+  'hook2stream-soak-hook-result-v1' \
+  'five-minute CPU steal exceeded ten percent' \
+  'render worker cgroup throttling exceeded ten percent of soak time' \
+  'real 18-item render throughput is over 20 percent slower than the accepted same-SKU baseline' \
+  'hook2stream-denied.invalid:443'; do
+  grep -Fq "$contract" "$hook" || fail "hook omits live contract: $contract"
+done
+
+for secret_boundary in \
+  'HOOK2STREAM_E2E_AUTH_FILE' \
+  'HOOK2STREAM_E2E_EXPECTED_EMAIL_FILE' \
+  'HOOK2STREAM_E2E_MP3_FILE' \
+  'HOOK2STREAM_E2E_SOAK_BASELINE_FILE' \
+  'MozillaCookieJar' \
+  'cookie.domain_specified' \
+  'O_NOFOLLOW' \
+  'root-owned mode 0700' \
+  'sk_test_' \
+  'cs_test_'; do
+  grep -Fq "$secret_boundary" "$hook" || fail "hook omits secret boundary: $secret_boundary"
+done
+
+if grep -Eq 'sk_live_|cs_live_|art_credits_5|technicalRetry|contentChange|HOOK2STREAM_E2E_(LIVE_ENTITLEMENT|PRODUCTION_QA)_FILE' "$hook"; then
+  fail "production hook may not create a live Checkout or consume an unbound entitlement"
+fi
+
+if grep -Eq 'shell[[:space:]]*=[[:space:]]*True|os\.system\(|subprocess\.(call|run|Popen)\([^]]*shell' "$hook"; then
+  fail "hook may not pass secret-bearing state through a shell"
+fi
+
+python3 - "$hook" <<'PY'
+import ast
+import hashlib
+import hmac
+import http.cookiejar
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text(encoding="utf-8")
+tree = ast.parse(source, filename=str(path))
+compile(tree, str(path), "exec")
+
+wait_calls = [
+    node
+    for node in ast.walk(tree)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "wait_json"
+]
+if len(wait_calls) != 6:
+    raise SystemExit("authenticated hook must retain the six bounded wait_json calls")
+for call in wait_calls:
+    if (
+        len(call.args) not in {5, 6}
+        or not isinstance(call.args[0], ast.Name)
+        or call.args[0].id != "client"
+        or call.keywords
+    ):
+        raise SystemExit(
+            f"wait_json call on line {call.lineno} does not pass client first or changed shape"
+        )
+
+# Compile-time Python accepts a missing positional argument. Validate every
+# direct call to a top-level hook function against its declared signature so a
+# duplicated/malformed wait or helper call cannot become a deploy-time failure.
+functions = {
+    node.name: node
+    for node in tree.body
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+}
+for call in ast.walk(tree):
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        continue
+    definition = functions.get(call.func.id)
+    if definition is None:
+        continue
+    positional = [*definition.args.posonlyargs, *definition.args.args]
+    positional_names = [argument.arg for argument in positional]
+    required_count = len(positional) - len(definition.args.defaults)
+    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        raise SystemExit(f"starred local call on line {call.lineno} cannot be checked")
+    if definition.args.vararg is None and len(call.args) > len(positional):
+        raise SystemExit(f"too many arguments for {call.func.id} on line {call.lineno}")
+    keyword_names = [keyword.arg for keyword in call.keywords]
+    if any(name is None for name in keyword_names):
+        raise SystemExit(f"expanded keyword call on line {call.lineno} cannot be checked")
+    if len(keyword_names) != len(set(keyword_names)):
+        raise SystemExit(f"duplicate keyword for {call.func.id} on line {call.lineno}")
+    supplied_positionally = set(positional_names[:len(call.args)])
+    if supplied_positionally.intersection(keyword_names):
+        raise SystemExit(f"argument supplied twice for {call.func.id} on line {call.lineno}")
+    allowed_keywords = set(positional_names) | {
+        argument.arg for argument in definition.args.kwonlyargs
+    }
+    if definition.args.kwarg is None and not set(keyword_names).issubset(allowed_keywords):
+        raise SystemExit(f"unknown keyword for {call.func.id} on line {call.lineno}")
+    supplied = supplied_positionally | set(keyword_names)
+    missing = set(positional_names[:required_count]) - supplied
+    missing.update(
+        argument.arg
+        for argument, default in zip(
+            definition.args.kwonlyargs, definition.args.kw_defaults, strict=True
+        )
+        if default is None and argument.arg not in supplied
+    )
+    if missing:
+        raise SystemExit(
+            f"missing argument(s) {sorted(missing)} for {call.func.id} on line {call.lineno}"
+        )
+
+module = types.ModuleType("hook2stream_authenticated_e2e_contract")
+module.__file__ = str(path)
+sys.modules[module.__name__] = module
+exec(compile(tree, str(path), "exec"), module.__dict__)
+
+with tempfile.TemporaryDirectory() as directory:
+    env = Path(directory) / "gate.env"
+    env.write_text("PUBLIC_ORIGIN=https://hook2stream.com\nPUBLIC_ORIGIN=duplicate\n", encoding="utf-8")
+    try:
+        module.parse_env_file(env)
+    except module.GateError:
+        pass
+    else:
+        raise SystemExit("duplicate environment keys unexpectedly passed")
+
+    secret = Path(directory) / "webhook-secret"
+    secret.write_text("whsec_contract_only\n", encoding="utf-8")
+    payload = b'{"bounded":true}'
+    signed = module.sign_test_webhook(secret, payload, 123456)
+    expected = hmac.new(
+        b"whsec_contract_only", b"123456." + payload, hashlib.sha256
+    ).hexdigest()
+    if signed != f"t=123456,v1={expected}":
+        raise SystemExit("file-based webhook signing changed bytes")
+
+    cookies = Path(directory) / "session.cookies"
+    jar = http.cookiejar.MozillaCookieJar(str(cookies))
+    for name, value, http_only in (
+        ("__Host-h2s_session", "session-contract-value", True),
+        ("__Host-h2s_csrf", "csrf-contract-value-that-is-long-enough", False),
+    ):
+        jar.set_cookie(http.cookiejar.Cookie(
+            version=0, name=name, value=value, port=None, port_specified=False,
+            domain="staging.hook2stream.com", domain_specified=False,
+            domain_initial_dot=False, path="/", path_specified=True,
+            secure=True, expires=4102444800, discard=False, comment=None,
+            comment_url=None, rest={"HttpOnly": None} if http_only else {},
+            rfc2109=False,
+        ))
+    jar.save(ignore_discard=True, ignore_expires=True)
+    client = module.ApiClient("https://staging.hook2stream.com", "oauth-session", cookies)
+    if client.file_csrf != "csrf-contract-value-that-is-long-enough":
+        raise SystemExit("OAuth cookie jar did not load CSRF from the file")
+
+    scoped = Path(directory) / "scoped.cookies"
+    scoped_jar = http.cookiejar.MozillaCookieJar(str(scoped))
+    for name in ("__Host-h2s_session", "__Host-h2s_csrf"):
+        scoped_jar.set_cookie(http.cookiejar.Cookie(
+            version=0, name=name, value="domain-scoped-cookie-must-fail", port=None,
+            port_specified=False, domain=".staging.hook2stream.com", domain_specified=True,
+            domain_initial_dot=True, path="/", path_specified=True, secure=True,
+            expires=4102444800, discard=False, comment=None, comment_url=None, rest={},
+            rfc2109=False,
+        ))
+    scoped_jar.save(ignore_discard=True, ignore_expires=True)
+    try:
+        module.ApiClient("https://staging.hook2stream.com", "oauth-session", scoped)
+    except module.GateError:
+        pass
+    else:
+        raise SystemExit("domain-scoped __Host- cookies unexpectedly passed")
+
+if module.idempotency("render-initial", "a" * 40) != module.idempotency(
+    "render-initial", "a" * 40
+):
+    raise SystemExit("release operation idempotency key is not deterministic")
+
+gate_names = {
+    target.id
+    for node in tree.body
+    if isinstance(node, ast.Assign)
+    for target in node.targets
+    if isinstance(target, ast.Name) and target.id.endswith("_GATE")
+}
+if gate_names != {"STAGING_GATE", "PRODUCTION_GATE"}:
+    raise SystemExit("staging and production must publish distinct truthful capabilities")
+
+release = ast.get_source_segment(
+    source,
+    next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "release_gate"),
+)
+if not (
+    release.index("upload_audio(client, config, commit)")
+    < release.index("advance_pipeline(client, project_id, commit)")
+):
+    raise SystemExit("authenticated media ingest no longer precedes the pipeline")
+staging_release = release[release.index("entitlement_id = staging_billing_entitlement("):]
+ordered_release_checks = [
+    "staging_billing_entitlement(",
+    "render_and_export(",
+    "verify_egress_deny(",
+    "atomic_state(",
+    "print(STAGING_GATE)",
+]
+positions = [staging_release.index(check) for check in ordered_release_checks]
+if positions != sorted(positions) or staging_release.count("print(STAGING_GATE)") != 1:
+    raise SystemExit("capability output is not strictly after every live release check")
+production_branch = next(
+    node
+    for node in ast.walk(next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "release_gate"
+    ))
+    if isinstance(node, ast.If)
+    and isinstance(node.test, ast.Compare)
+    and ast.get_source_segment(source, node.test) == 'environment == "production"'
+)
+production_source = ast.get_source_segment(source, production_branch)
+if (
+    "print(PRODUCTION_GATE)" not in production_source
+    or not any(isinstance(node, ast.Return) for node in ast.walk(production_branch))
+    or "render_and_export(" in production_source
+    or "staging_billing_entitlement(" in production_source
+):
+    raise SystemExit("production gate does not stop before billing/final render")
+
+upload = next(
+    node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "upload_audio"
+)
+upload_calls = {
+    node.func.id: node.lineno
+    for node in ast.walk(upload)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id in {"wait_job", "head_and_ranges"}
+}
+if set(upload_calls) != {"wait_job", "head_and_ranges"} or not (
+    upload_calls["wait_job"] < upload_calls["head_and_ranges"]
+):
+    raise SystemExit("media content was read before the ingest job completed")
+
+soak = ast.get_source_segment(
+    source,
+    next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "soak_gate"),
+)
+for check in (
+    'create_soak_container(soak_image, commit)',
+    'soak_container_state(soak_name, soak_image, commit)',
+    'remove_soak_container(soak_name, soak_image, commit)',
+    'docker_service_state(project, "worker-render")',
+    'container_cpu_stat(soak_pid)',
+    'client.request("HEAD", state["contentPath"], {200})',
+    'real_seconds / 18 > baseline["renderSecondsPerItem"] * 1.2',
+    'return_code != 124',
+    'print(json.dumps(result',
+):
+    if check not in soak:
+        raise SystemExit(f"soak omitted live evidence before output: {check}")
+if '/renders' in soak or 'staging_billing_entitlement(' in soak or 'client.json("POST"' in soak:
+    raise SystemExit("soak may not consume a billing or render entitlement")
+
+creator = ast.get_source_segment(
+    source,
+    next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "create_soak_container"
+    ),
+)
+for boundary in (
+    '"--pull=never"',
+    '"--network=none"',
+    '"--read-only"',
+    '"--cap-drop=ALL"',
+    '"--security-opt=no-new-privileges"',
+    '"--cpus=3"',
+    '"--memory=1536m"',
+    '"--pids-limit=256"',
+    '"--entrypoint=timeout"',
+    '"testsrc2=size=1080x1920:rate=30"',
+):
+    if boundary not in creator:
+        raise SystemExit(f"synthetic FFmpeg container omitted isolation boundary {boundary}")
+PY
+
+temporary_dir=$(mktemp -d)
+trap 'rm -rf "$temporary_dir"' EXIT
+if "$hook" staging /does/not/exist deadbeef >"$temporary_dir/stdout" 2>"$temporary_dir/stderr"; then
+  fail "invalid invocation unexpectedly succeeded"
+fi
+[ ! -s "$temporary_dir/stdout" ] || fail "failed hook wrote a capability to stdout"
+grep -Fq 'invalid commit' "$temporary_dir/stderr" || fail "invalid invocation did not fail closed"
+
+for environment_file in \
+  "$deployment_dir/environments/staging.env.example" \
+  "$deployment_dir/environments/production.env.example"; do
+  grep -Fxq 'HOOK2STREAM_E2E_AUTH_KIND=oauth-session' "$environment_file" \
+    || fail "$(basename "$environment_file") does not select the OAuth session file contract"
+  grep -Fxq 'HOOK2STREAM_E2E_WORK_DIR=/srv/hook2stream/e2e' "$environment_file" \
+    || fail "$(basename "$environment_file") does not keep E2E scratch encrypted"
+done
+grep -Fxq 'HOOK2STREAM_E2E_STRIPE_MODE=test' \
+  "$deployment_dir/environments/staging.env.example" \
+  || fail "staging does not pin the automated transaction to Stripe test mode"
+if grep -q '^HOOK2STREAM_E2E_STRIPE_MODE=' \
+  "$deployment_dir/environments/production.env.example"; then
+  fail "production may not configure an automated Stripe transaction mode"
+fi
+
+printf '%s\n' "authenticated E2E contract test: live public API, file credentials, render/export and soak boundaries passed"

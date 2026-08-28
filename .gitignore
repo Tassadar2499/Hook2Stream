@@ -42,6 +42,8 @@ ScaffoldingReadMe.txt
 .env.*.local
 
 # Local infrastructure credentials and encrypted operator state
+/src/deploy/secrets/*
+!/src/deploy/secrets/README.md
 *.pem
 *.key
 id_*

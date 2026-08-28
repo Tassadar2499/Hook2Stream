@@ -32,11 +32,11 @@ services:
       context: ../..
       dockerfile: src/deploy/backup/Dockerfile
       args:
-        POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-postgres:17.11-alpine3.24}
+        POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-docker.io/library/postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
 
   postgres:
     build:
       context: ../..
       dockerfile: src/deploy/postgres/Dockerfile
       args:
-        POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-postgres:17.11-alpine3.24}
+        POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-docker.io/library/postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}

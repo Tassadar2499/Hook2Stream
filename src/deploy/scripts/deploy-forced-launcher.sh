@@ -2,7 +2,9 @@
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-unset CDPATH ENV BASH_ENV
+unset CDPATH ENV BASH_ENV DOCKER_CONFIG \
+    HOOK2STREAM_GHCR_USERNAME HOOK2STREAM_GHCR_AUTH_SHA256 \
+    HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY HOOK2STREAM_GHCR_IDENTITY_SHA256
 
 config=/etc/hook2stream/deploy.conf
 wrapper=/usr/local/libexec/hook2stream/deploy-forced-command.sh
@@ -23,6 +25,7 @@ done
     || { printf '%s\n' "deploy launcher: wrapper library directory must be root:root mode 0755" >&2; exit 1; }
 for trusted_program in \
     "$wrapper" \
+    "$wrapper_dir/rollback-application.sh" \
     "$wrapper_dir/validate-candidate.sh" \
     "$wrapper_dir/lib/forced-command-trust.sh"; do
     [ -f "$trusted_program" ] && [ ! -L "$trusted_program" ] \

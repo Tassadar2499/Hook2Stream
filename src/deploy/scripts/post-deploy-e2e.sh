@@ -69,18 +69,29 @@ if [ "$environment" = staging ]; then
     [ "$robots" = "noindex, nofollow, noarchive" ] || fail "staging noindex header is missing"
 fi
 
-# Health checks are not evidence that encrypted media, workers, rendering and
-# billing still work. A separately installed root-owned scenario owns its
-# environment-specific OAuth/billing credentials and must emit exactly this
-# capability record after exercising the full release gate. Its output is
-# captured so credentials or browser traces cannot leak into deploy logs.
-expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-idempotency,egress-deny'
+# Health checks are not encrypted-media or worker evidence. A root-owned
+# scenario owns its environment-specific OAuth inputs and emits the exact
+# environment capability below. Only staging mutates test billing/final render;
+# production stops after upload/OpenRouter/preview. Output is captured so no
+# credential or browser trace reaches deploy logs.
+case "$environment" in
+  staging)
+    expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-test-idempotency,egress-deny'
+    ;;
+  production)
+    expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,egress-deny'
+    ;;
+esac
 if ! authenticated_gate=$("$HOOK2STREAM_AUTHENTICATED_E2E_HOOK" "$environment" "$environment_file" "$commit" \
     2>"$temporary_dir/authenticated-e2e.stderr"); then
-    fail "authenticated encrypted-media/worker/billing scenario failed"
+    fail "authenticated environment release scenario failed"
 fi
 [ "$authenticated_gate" = "$expected_gate" ] \
     || fail "authenticated E2E hook did not attest the complete release gate"
 unset authenticated_gate
 
-printf '%s\n' "post-deploy E2E: public, authenticated H2SE, worker/render/export, and billing gates passed for $commit"
+if [ "$environment" = staging ]; then
+  printf '%s\n' "post-deploy E2E: staging H2SE, workers, render/export, and Stripe-test gates passed for $commit"
+else
+  printf '%s\n' "post-deploy E2E: production H2SE upload, workers, OpenRouter, and preview gates passed for $commit"
+fi

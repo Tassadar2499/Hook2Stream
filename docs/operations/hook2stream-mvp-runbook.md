@@ -198,8 +198,13 @@ without the mount.
 Before the first host validation, also install the Docker mount-guard template,
 persist `/proc` with `hidepid=2` or `hidepid=invisible`, create root-private
 `config`, `releases`, and `release-state` directories, install the exact
-environment file and scalar secrets, and replace the fail-closed authenticated
-E2E template with the reviewed environment implementation. Create
+environment file and scalar secrets, and install
+`src/deploy/host/authenticated-e2e.sh` unchanged as the root-owned mode `0500`
+authenticated hook. Provision its environment-specific OAuth cookie jar,
+expected-email scalar, licensed MP3 and soak/live-entitlement files below the
+encrypted `/srv/hook2stream/e2e` directory exactly as documented in the host
+README. Missing, linked, loosely permissioned, stale or wrong-account inputs
+block deployment. Create
 `hook2stream-deploy` separately from the operator, without Docker/secrets-group
 membership, and install the forced-command launcher, `authorized_keys`,
 sudoers, validation libraries, and production signer file with the modes
@@ -426,6 +431,19 @@ candidate through `workflow_dispatch` with the staging run ID, waits for
 two-reviewer/no-self-review GitHub Environment approval, and deploys the same
 digests without rebuild.
 
+All candidate runtimes come from repository-owned GHCR builds. In particular,
+Caddy 2.11.4 is rebuilt from its exact upstream commit on the pinned Go 1.27.0
+builder with reviewed security dependency updates and a scratch runtime under
+UID/GID 10001. Before Caddy starts, a no-network, capability-limited one-shot
+job uses the pinned PostgreSQL image to initialize/chown only the named
+`/data` and `/config` volumes; the public Caddy container retains only
+`NET_BIND_SERVICE` and cannot run as root;
+PgBouncer 1.25.2 is built from its checksummed upstream release; and Squid 7.6
+uses exact patched Alpine 3.24 packages and runs as UID/GID 31. Their published
+digests carry SBOM/provenance and must pass the blocking High/Critical scan with
+`only-fixed=false`. Candidate validation rejects the former external Caddy,
+edoburu/PgBouncer, and Ubuntu/Squid repositories.
+
 Freeze protected `main` from the staging workflow dispatch through its signed
 application receipt, production approval, and
 the production SSH deployment. A merge during deploy or the 60-minute soak
@@ -517,17 +535,24 @@ shared-CPU throttling, and at least 20 percent free disk. The render/network
 soak is a separate root-owned `HOOK2STREAM_E2E_HOOK ... soak-60m` operation,
 not a readiness loop. It must run for 3600--3900 measured seconds and return one
 strict `hook2stream-soak-hook-result-v1` JSON line proving at least one completed
-render, at least 3300 active render seconds, maximum render concurrency one, at
+18-item staging render, at least 3300 active FFmpeg load seconds, maximum
+render concurrency one, at
 least 60 network checks with zero failures, no CPU throttling, and no OOM. The
-active interval is measured from actual sequential representative render-job
-execution, not sleep time. Each minute contributes a network check only after
+checked-in authenticated hook records the real initial render duration during
+the staging release gate, rejects only a slowdown over 20 percent against a
+retained same-SKU baseline no older than 90 days, and then starts one bounded
+3600-second `lavfi` to null FFmpeg process in a dedicated networkless,
+read-only container built from the exact running worker digest with the same
+three-vCPU/1536-MiB limits. The labeled container is removed in every exit
+path. It does not consume a content rerender or another billing
+entitlement. Each minute contributes a network check only after
 both public/API readiness and an authenticated small Storj HEAD/Range cycle
 succeed. The operator hook samples `/proc/stat` once per minute and retains the
 raw deltas privately: `cpuThrottled=false` is permitted only when no five-minute
-window exceeds 10 percent steal time and deterministic render throughput stays
-within 20 percent of the accepted same-SKU probe baseline while CPU is active.
-Docker's configured three-vCPU quota is recorded separately and is not mistaken
-for provider steal. Missing samples or a missing baseline fails closed. The
+window exceeds 10 percent steal time, cgroup `nr_throttled`/`throttled_usec`
+remain within policy, and real render throughput is no more than 20 percent
+slower than the accepted same-SKU probe baseline. A faster host passes.
+Missing samples or a missing baseline fails closed. The
 wrapper then independently proves exactly one healthy `worker-render`, its
 candidate digest, and `OOMKilled=false`; the signed receipt binds the result to
 the candidate and commit. Hook stderr and diagnostics

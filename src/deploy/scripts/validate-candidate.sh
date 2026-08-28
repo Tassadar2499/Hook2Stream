@@ -65,7 +65,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     metadata_value=$(jq -r --arg name "$name" '.images[$name] // empty' "$candidate_dir/release-metadata.json")
     [ "$metadata_value" = "$value" ] || fail "$name differs from metadata"
     case "$name:$value" in
-      API_IMAGE:ghcr.io/$owner/hook2stream-api@sha256:*|WORKER_IMAGE:ghcr.io/$owner/hook2stream-worker@sha256:*|BOOTSTRAPPER_IMAGE:ghcr.io/$owner/hook2stream-bootstrapper@sha256:*|WEB_IMAGE:ghcr.io/$owner/hook2stream-web@sha256:*|POSTGRES_BACKUP_IMAGE:ghcr.io/$owner/hook2stream-postgres-backup@sha256:*|POSTGRES_IMAGE:ghcr.io/$owner/hook2stream-postgres@sha256:*|CADDY_IMAGE:caddy@sha256:*|CADDY_IMAGE:docker.io/library/caddy@sha256:*|PGBOUNCER_IMAGE:edoburu/pgbouncer@sha256:*|PGBOUNCER_IMAGE:docker.io/edoburu/pgbouncer@sha256:*|EGRESS_PROXY_IMAGE:ubuntu/squid@sha256:*|EGRESS_PROXY_IMAGE:docker.io/ubuntu/squid@sha256:*) ;;
+      API_IMAGE:ghcr.io/$owner/hook2stream-api@sha256:*|WORKER_IMAGE:ghcr.io/$owner/hook2stream-worker@sha256:*|BOOTSTRAPPER_IMAGE:ghcr.io/$owner/hook2stream-bootstrapper@sha256:*|WEB_IMAGE:ghcr.io/$owner/hook2stream-web@sha256:*|POSTGRES_BACKUP_IMAGE:ghcr.io/$owner/hook2stream-postgres-backup@sha256:*|POSTGRES_IMAGE:ghcr.io/$owner/hook2stream-postgres@sha256:*|CADDY_IMAGE:ghcr.io/$owner/hook2stream-caddy@sha256:*|PGBOUNCER_IMAGE:ghcr.io/$owner/hook2stream-pgbouncer@sha256:*|EGRESS_PROXY_IMAGE:ghcr.io/$owner/hook2stream-egress-proxy@sha256:*) ;;
       *) fail "$name repository is outside the allowlist" ;;
     esac
     seen_names="$seen_names $name"

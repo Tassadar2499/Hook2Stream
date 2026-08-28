@@ -1,4 +1,4 @@
-ARG POSTGRES_BASE_IMAGE=postgres:17.11-alpine3.24
+ARG POSTGRES_BASE_IMAGE=docker.io/library/postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
 FROM ${POSTGRES_BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="Hook2Stream PostgreSQL" \

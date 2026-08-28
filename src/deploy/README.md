@@ -31,6 +31,17 @@ test-only image as deployable; all images that can enter a candidate retain the
 blocking High/Critical gate. A MinIO finding can never be waived into staging
 or production.
 
+Caddy, PgBouncer, and the four Squid egress proxies are repository-owned
+hardened release images, not mutable external runtime tags. CI builds Caddy
+2.11.4 from its exact upstream commit on Go 1.27.0 with reviewed patched Go
+modules and a scratch runtime; PgBouncer 1.25.2 from its checksummed release
+tarball on patched Alpine 3.24; and Squid 7.6 from exact patched Alpine
+packages. Each image is published to the repository GHCR namespace with
+SBOM/provenance, scanned at its published digest with the same blocking
+High/Critical (`only-fixed=false`) policy, and then allowlisted only under its
+`ghcr.io/<owner>/hook2stream-*` repository. External Caddy, edoburu/PgBouncer,
+and Ubuntu/Squid digests are rejected by candidate validation.
+
 ## Deployed app-host contract
 
 Copy the matching `environments/*.env.example` to the root-owned release
@@ -193,8 +204,14 @@ Install the app gate only after `/srv/hook2stream` is the active encrypted
 mount. The mount root remains `root:root` mode `0755`; configuration, releases,
 state, and `/etc/hook2stream` are root-private. The deploy user's parent paths
 must not be writable or symlinked. Install the reviewed forced-command launcher,
-wrapper, candidate validator, libraries, and E2E script with the exact ownership
-and modes enforced by `validate-host.sh`.
+wrapper, candidate validator, libraries, E2E script, and
+`/usr/local/libexec/hook2stream/rollback-application.sh` with the exact
+ownership and modes enforced by `validate-host.sh`. The rollback orchestrator
+is `root:root` mode `0555` and never executes the target candidate's copy. A
+successful forward deploy writes protocol-v2 capability state and
+`active-infrastructure-release.json`; rollback preserves that marker and uses
+only its validated root-private Compose/helper bundle. Pre-v2 current or target
+release capability records are rejected.
 
 Create `/srv/hook2stream/config/staging.env` or `production.env` from the
 matching environment template as `root:root` mode `0600`. Install
@@ -203,10 +220,30 @@ Replace both public-key fingerprint placeholders with the exact OpenSSH SHA-256
 fingerprints for the single operator key and the single environment-specific CI
 deploy key. `validate-host.sh` rejects extra/unrestricted keys and any sudoers
 content other than `host/sudoers.example`, including effective grants from a
-different drop-in or group. Run `sudo tailscale set --ssh=false` before host
+different drop-in or group.
+
+Run `deploy/providers/serversguru/configure-ghcr-pull-auth.sh` with a unique
+32-hex operator identity suffix and distinct GitHub credential per environment,
+then copy all four printed non-secret pins to `deploy.conf`. Docker login proves
+only credential usability: GitHub does not expose PAT scopes here. The
+root-only `identity.attestation` therefore records the operator's
+`read:packages`-only and environment-exclusive assertions, and its SHA-256 is
+enforced by the launcher, deploy scripts, and host validator.
+
+Run `sudo tailscale set --ssh=false` before host
 validation; the deployment contract uses ordinary OpenSSH only. The validator
 also rejects named/default POSIX ACLs on trusted files, secrets, and the Docker
 socket.
+
+Install `host/authenticated-e2e.sh` unchanged as the root-owned mode `0500`
+path configured by `HOOK2STREAM_AUTHENTICATED_E2E_HOOK`. Provision its
+environment-specific OAuth session, expected-email, licensed MP3 and staging
+soak baseline inputs under `/srv/hook2stream/e2e` as documented in
+[`host/README.md`](host/README.md). The script calls the public API and fails
+closed. Staging performs upload/OpenRouter/test-billing/render; production
+performs deterministic upload/OpenRouter/preview but no live billing or final
+render. Printing either capability line without its environment-specific
+checks is not an installation option.
 Production installs the staging-receipt allowed-signers file with exactly one
 named ED25519 authority; additional or wildcard records are rejected. An
 accepted promotion carries and verifies the signed staging receipt before
@@ -223,9 +260,11 @@ deploys the existing artifact without rebuild, runs acceptance plus the
 60-minute soak, and signs a receipt. The soak is a separate staging-only forced
 command for the exact current candidate. It holds the deployment lock for
 3600--3900 seconds, invokes the root-owned E2E hook in `soak-60m` mode, and
-requires a completed render, at least 3300 active render seconds, concurrency
-one, at least 60 successful network checks, no throttling/OOM, and one healthy
-candidate-digest `worker-render`. Its strict result is included in the signed
+requires the prior completed 18-item render, at least 3300 seconds of synthetic
+FFmpeg load in an isolated ephemeral container from the exact worker digest
+with the same CPU/memory limits, concurrency one, at least 60
+successful network checks, no meaningful cgroup/host throttling or OOM, and one
+healthy candidate-digest `worker-render`. Its strict result is included in the signed
 application receipt; hook diagnostics are not exposed to CI logs. Production
 takes the successful staging workflow
 run ID and accepts only its exact candidate after GitHub Environment approval.

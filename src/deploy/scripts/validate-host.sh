@@ -50,7 +50,7 @@ hook2stream_host_profile "$role" "$environment" \
     || fail "Ubuntu 24.04 is required"
 case "$(uname -m)" in x86_64|amd64) ;; *) fail "amd64 is required" ;; esac
 
-for tool in awk cat cryptsetup cvtsudoers date df docker findmnt getent getfacl grep id jq losetup lsblk passwd ss sshd ssh-keygen stat swapon systemctl tailscale timeout ufw visudo; do
+for tool in awk cat cryptsetup cvtsudoers date df docker ffprobe findmnt getent getfacl grep id jq losetup lsblk passwd python3 ss sshd ssh-keygen stat swapon systemctl tailscale timeout ufw visudo; do
     require_command "$tool"
 done
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
@@ -324,6 +324,21 @@ read_deploy_config_value() {
 }
 operator_key_fingerprint=$(read_deploy_config_value HOOK2STREAM_OPERATOR_PUBLIC_KEY_SHA256)
 deploy_key_fingerprint=$(read_deploy_config_value HOOK2STREAM_DEPLOY_PUBLIC_KEY_SHA256)
+registry_auth_dir=$(read_deploy_config_value DOCKER_CONFIG)
+registry_auth_username=$(read_deploy_config_value HOOK2STREAM_GHCR_USERNAME)
+registry_auth_sha256=$(read_deploy_config_value HOOK2STREAM_GHCR_AUTH_SHA256)
+registry_credential_identity=$(read_deploy_config_value HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY)
+registry_identity_sha256=$(read_deploy_config_value HOOK2STREAM_GHCR_IDENTITY_SHA256)
+[ "$registry_auth_dir" = /srv/hook2stream/registry-auth ] \
+    || fail "deploy config DOCKER_CONFIG must use the canonical encrypted registry-auth path"
+hook2stream_validate_ghcr_pull_auth \
+    "$registry_auth_dir" "$registry_auth_username" "$registry_auth_sha256" 0:0 \
+    || fail "GHCR pull authentication is missing, unsafe, malformed, or differs from the pinned environment credential"
+hook2stream_validate_ghcr_identity_attestation \
+    "$registry_auth_dir" "$environment" "$registry_auth_username" \
+    "$registry_credential_identity" "$registry_identity_sha256" 0:0 \
+    || fail "GHCR credential identity attestation is missing, unsafe, malformed, or differs from its environment pin"
+require_encrypted_subpath "$registry_auth_dir" "GHCR pull-auth directory"
 for key_fingerprint in "$operator_key_fingerprint" "$deploy_key_fingerprint"; do
     printf '%s\n' "$key_fingerprint" | grep -Eq '^SHA256:[A-Za-z0-9+/]{43}$' \
         || fail "deploy config public-key fingerprints must use OpenSSH SHA256 form"
@@ -390,6 +405,7 @@ require_trusted_directory /usr/local/libexec/hook2stream 755 "app deploy gate di
 require_trusted_directory /usr/local/libexec/hook2stream/lib 755 "app deploy gate library directory"
 for trusted_gate in \
     /usr/local/libexec/hook2stream/deploy-forced-command.sh \
+    /usr/local/libexec/hook2stream/rollback-application.sh \
     /usr/local/libexec/hook2stream/validate-candidate.sh \
     /usr/local/libexec/hook2stream/lib/forced-command-trust.sh; do
     require_trusted_file "$trusted_gate" 555 "app deploy gate program"
@@ -397,6 +413,54 @@ done
 require_trusted_file /usr/local/libexec/hook2stream/post-deploy-e2e.sh 500 "app post-deploy E2E hook"
 require_trusted_file /usr/local/libexec/hook2stream/authenticated-e2e.sh 500 \
     "app authenticated E2E and sustained soak hook"
+last_successful=/srv/hook2stream/release-state/last-successful.env
+active_infrastructure=/srv/hook2stream/release-state/active-infrastructure-release.json
+if [ -e "$active_infrastructure" ] || [ -L "$active_infrastructure" ]; then
+    require_trusted_file "$last_successful" 600 "last successful release environment"
+    require_trusted_file "$active_infrastructure" 600 "active infrastructure release marker"
+    current_release=$(awk -F= '
+      $1 == "RELEASE_VERSION" { count++; value=substr($0,index($0,"=")+1) }
+      END { if (count != 1) exit 1; print value }
+    ' "$last_successful") || fail "last successful environment has no unique RELEASE_VERSION"
+    rollback_protocol=hook2stream-application-rollback-v2
+    hook2stream_validate_rollback_capability \
+        "/srv/hook2stream/release-state/successful/$current_release.capabilities.json" \
+        "$current_release" "$rollback_protocol" 0:0 \
+        || fail "current application release is not rollback protocol v2 capable"
+    active_infrastructure_state=$(jq -ce --arg protocol "$rollback_protocol" 'select(
+      (keys | sort) == ["deployBundleSha256","kind","releaseSha","rollbackProtocol","schemaVersion"] and
+      .schemaVersion == 2 and .kind == "hook2stream-active-infrastructure-release" and
+      .rollbackProtocol == $protocol and
+      (.releaseSha | type == "string" and test("^[0-9a-f]{40}$")) and
+      (.deployBundleSha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    )' "$active_infrastructure") || fail "active infrastructure marker is not rollback protocol v2"
+    active_infrastructure_release=$(printf '%s' "$active_infrastructure_state" | jq -r '.releaseSha')
+    active_infrastructure_bundle=$(printf '%s' "$active_infrastructure_state" | jq -r '.deployBundleSha256')
+    hook2stream_validate_rollback_capability \
+        "/srv/hook2stream/release-state/successful/$active_infrastructure_release.capabilities.json" \
+        "$active_infrastructure_release" "$rollback_protocol" 0:0 \
+        || fail "active infrastructure release is not rollback protocol v2 capable"
+    require_trusted_file \
+        "/srv/hook2stream/release-state/successful/$active_infrastructure_release.env" 600 \
+        "active infrastructure release environment"
+    active_infrastructure_dir=/srv/hook2stream/releases/$active_infrastructure_release
+    require_trusted_directory "$active_infrastructure_dir" 700 "active infrastructure release directory"
+    require_trusted_file "$active_infrastructure_dir/.deploy-bundle.sha256" 600 \
+        "active infrastructure bundle digest"
+    require_trusted_file "$active_infrastructure_dir/deploy/compose.yaml" 600 \
+        "active infrastructure Compose source"
+    require_trusted_file "$active_infrastructure_dir/deploy/scripts/lib/deployment-common.sh" 600 \
+        "active infrastructure deployment helper"
+    require_trusted_file "$active_infrastructure_dir/deploy/scripts/lib/forced-command-trust.sh" 700 \
+        "active infrastructure trust helper"
+    [ "$(cat "$active_infrastructure_dir/.deploy-bundle.sha256")" = "$active_infrastructure_bundle" ] \
+        || fail "active infrastructure bundle differs from its forward-deploy marker"
+elif [ -e "$last_successful" ] || [ -L "$last_successful" ]; then
+    # A pre-v2 installation may have a successful environment but no active
+    # infrastructure marker. It remains forward-deployable so the next
+    # successful release can establish v2 state; rollback itself fails closed.
+    require_trusted_file "$last_successful" 600 "legacy last successful release environment"
+fi
 if [ "$environment" = production ]; then
     require_trusted_file /etc/hook2stream/staging-receipt-allowed-signers 600 \
         "app staging allowed-signers file"

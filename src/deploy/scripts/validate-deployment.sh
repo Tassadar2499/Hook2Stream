@@ -57,11 +57,11 @@ done
 for test_path in "$deployment_dir"/tests/*.test.sh; do
     sh "$test_path"
 done
-validation_caddy_image=$(awk -F= '
-    $1 == "CADDY_IMAGE" { print substr($0, index($0, "=") + 1) }
-' "$deployment_dir/.env.example")
-[ -n "$validation_caddy_image" ] \
-    || fail "CADDY_IMAGE is missing from .env.example"
+validation_caddy_image=hook2stream-caddy:ci
+docker build \
+    --file "$deployment_dir/caddy/Dockerfile" \
+    --tag "$validation_caddy_image" \
+    "$deployment_dir/../.."
 
 validate_caddyfile() {
     validation_caddyfile=$1

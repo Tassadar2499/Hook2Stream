@@ -47,6 +47,7 @@ trap 'exit 130' HUP INT TERM
 
 deployment_require_base_tools
 deployment_require_command curl
+deployment_validate_ghcr_pull_auth
 deployment_acquire_lock
 
 storage_mode=$(deployment_storage_mode)
@@ -268,6 +269,10 @@ wait_for_service api || fail "api did not become healthy"
 current_stage=web
 compose up -d --no-deps web
 wait_for_service web || fail "web did not become healthy"
+
+current_stage=caddy-volume-ownership
+compose stop caddy
+compose_tools run --rm --no-deps caddy-volume-init
 
 current_stage=edge-backup-and-media-janitor
 compose up -d --no-deps caddy postgres-backup storage-janitor

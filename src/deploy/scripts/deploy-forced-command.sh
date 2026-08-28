@@ -17,12 +17,30 @@ read_deployment_environment() {
   env_value=$(awk -F= '$1 == "DEPLOYMENT_ENVIRONMENT" {print substr($0,index($0,"=")+1)}' "$env_file")
   case "$env_value" in staging|production) printf '%s\n' "$env_value" ;; *) fail "DEPLOYMENT_ENVIRONMENT must be staging or production" ;; esac
 }
+read_unique_environment_value() {
+  env_file=$1; env_name=$2
+  env_count=$(awk -F= -v name="$env_name" '$1 == name {count++} END {print count + 0}' "$env_file")
+  [ "$env_count" -eq 1 ] || fail "$env_file must contain exactly one $env_name"
+  awk -F= -v name="$env_name" '$1 == name {print substr($0,index($0,"=")+1)}' "$env_file"
+}
+rollback_protocol=hook2stream-application-rollback-v2
+validate_rollback_capability() {
+  capability_file=$1; capability_sha=$2
+  hook2stream_validate_rollback_capability \
+    "$capability_file" "$capability_sha" "$rollback_protocol" 0:0 \
+    || fail "release $capability_sha is not rollback protocol v2 and H2SEv1 capable"
+}
 [ "$(id -u)" -eq 0 ] || fail "wrapper must run as root through the exact sudoers rule"
 : "${HOOK2STREAM_ENV_FILE:?HOOK2STREAM_ENV_FILE is required}"
 : "${HOOK2STREAM_RELEASES_DIR:=/srv/hook2stream/releases}"
 : "${HOOK2STREAM_RELEASE_STATE_DIR:=/srv/hook2stream/release-state}"
 : "${HOOK2STREAM_E2E_HOOK:?HOOK2STREAM_E2E_HOOK must name the root-owned post-deploy E2E hook}"
 : "${MIN_ROLLBACK_RELEASE_SHA:?MIN_ROLLBACK_RELEASE_SHA must identify the first approved H2SE release}"
+: "${DOCKER_CONFIG:?DOCKER_CONFIG must name the encrypted GHCR pull-auth directory}"
+: "${HOOK2STREAM_GHCR_USERNAME:?HOOK2STREAM_GHCR_USERNAME is required}"
+: "${HOOK2STREAM_GHCR_AUTH_SHA256:?HOOK2STREAM_GHCR_AUTH_SHA256 is required}"
+: "${HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY:?HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY is required}"
+: "${HOOK2STREAM_GHCR_IDENTITY_SHA256:?HOOK2STREAM_GHCR_IDENTITY_SHA256 is required}"
 [ "$HOOK2STREAM_RELEASES_DIR" = /srv/hook2stream/releases ] \
   || fail "release directory is not canonical"
 [ "$HOOK2STREAM_RELEASE_STATE_DIR" = /srv/hook2stream/release-state ] \
@@ -41,6 +59,18 @@ hook2stream_trusted_directory "$HOOK2STREAM_RELEASE_STATE_DIR" 0:0 700 \
   || fail "release-state directory must be root:root mode 0700"
 hook2stream_trusted_file "$HOOK2STREAM_ENV_FILE" 0:0 600 \
   || fail "environment file must be root:root mode 0600"
+[ "$DOCKER_CONFIG" = /srv/hook2stream/registry-auth ] \
+  || fail "DOCKER_CONFIG is not the canonical encrypted registry-auth path"
+validate_ghcr_pull_auth() {
+  hook2stream_validate_ghcr_pull_auth \
+    "$DOCKER_CONFIG" "$HOOK2STREAM_GHCR_USERNAME" \
+    "$HOOK2STREAM_GHCR_AUTH_SHA256" 0:0 \
+    || fail "GHCR pull authentication is missing, unsafe, malformed, or differs from the pinned environment credential"
+  hook2stream_validate_ghcr_identity_attestation \
+    "$DOCKER_CONFIG" "$configured_environment" "$HOOK2STREAM_GHCR_USERNAME" \
+    "$HOOK2STREAM_GHCR_CREDENTIAL_IDENTITY" "$HOOK2STREAM_GHCR_IDENTITY_SHA256" 0:0 \
+    || fail "GHCR credential identity attestation is missing, unsafe, malformed, or differs from its environment pin"
+}
 configured_environment=$(read_deployment_environment "$HOOK2STREAM_ENV_FILE")
 case "$HOOK2STREAM_ENV_FILE:$configured_environment" in
   /srv/hook2stream/config/staging.env:staging|/srv/hook2stream/config/production.env:production) ;;
@@ -57,6 +87,9 @@ case "$MIN_ROLLBACK_RELEASE_SHA" in *[!0-9a-f]*|'') fail "MIN_ROLLBACK_RELEASE_S
 [ "${#MIN_ROLLBACK_RELEASE_SHA}" -eq 40 ] || fail "MIN_ROLLBACK_RELEASE_SHA is invalid"
 hook2stream_trusted_file "$HOOK2STREAM_E2E_HOOK" 0:0 500 \
   || fail "E2E hook must be root:root mode 0500"
+rollback_program=/usr/local/libexec/hook2stream/rollback-application.sh
+hook2stream_trusted_file "$rollback_program" 0:0 555 \
+  || fail "installed application rollback program must be root:root mode 0555"
 command -v timeout >/dev/null 2>&1 || fail "timeout is required"
 forced_lock=$HOOK2STREAM_RELEASE_STATE_DIR/forced-command.lock
 if [ ! -e "$forced_lock" ]; then (umask 077 && : > "$forced_lock"); fi
@@ -74,6 +107,7 @@ case "$operation" in
   deploy)
     [ "$#" -eq 2 ] || fail "deploy accepts exactly one candidate ID"
     case "$identifier" in release-candidate-[0-9a-f]*-[0-9]*-[0-9]*) ;; *) fail "invalid candidate ID" ;; esac
+    validate_ghcr_pull_auth
     incoming=$(mktemp -d "$HOOK2STREAM_RELEASE_STATE_DIR/incoming.XXXXXX")
     trap 'rm -rf "$incoming"' EXIT
     trap 'exit 130' HUP INT TERM
@@ -110,8 +144,7 @@ case "$operation" in
       mv "$release_tmp" "$release_dir" || fail "could not atomically publish release directory"
     fi
     hook2stream_trusted_file "$release_dir/deploy/scripts/deploy-release.sh" 0:0 700 \
-      && hook2stream_trusted_file "$release_dir/deploy/scripts/rollback-application.sh" 0:0 700 \
-      || fail "release lacks the forward deploy or application-only rollback implementation"
+      || fail "release lacks the forward deploy implementation"
     release_env=$HOOK2STREAM_RELEASE_STATE_DIR/candidate-$commit.env
     image_names=' API_IMAGE WORKER_IMAGE BOOTSTRAPPER_IMAGE WEB_IMAGE POSTGRES_BACKUP_IMAGE CADDY_IMAGE POSTGRES_IMAGE PGBOUNCER_IMAGE EGRESS_PROXY_IMAGE RELEASE_VERSION '
     awk -F= -v names="$image_names" 'index(names, " " $1 " ") == 0 {print}' "$HOOK2STREAM_ENV_FILE" > "$release_env.tmp"
@@ -139,9 +172,17 @@ case "$operation" in
     install -m 0600 "$release_env" "$HOOK2STREAM_RELEASE_STATE_DIR/last-successful.env.tmp"
     mv -f "$HOOK2STREAM_RELEASE_STATE_DIR/last-successful.env.tmp" "$HOOK2STREAM_RELEASE_STATE_DIR/last-successful.env"
     install -m 0600 "$release_env" "$successful_dir/$commit.env"
-    jq -cn --arg sha "$commit" '{schemaVersion:1,releaseSha:$sha,storageFormats:["H2SEv1"]}' > "$successful_dir/$commit.capabilities.json.tmp"
+    jq -cn --arg sha "$commit" --arg protocol "$rollback_protocol" \
+      '{schemaVersion:2,releaseSha:$sha,storageFormats:["H2SEv1"],rollbackProtocol:$protocol}' \
+      > "$successful_dir/$commit.capabilities.json.tmp"
     chmod 0600 "$successful_dir/$commit.capabilities.json.tmp"
     mv -f "$successful_dir/$commit.capabilities.json.tmp" "$successful_dir/$commit.capabilities.json"
+    active_infrastructure=$HOOK2STREAM_RELEASE_STATE_DIR/active-infrastructure-release.json
+    jq -cn --arg sha "$commit" --arg bundle "$bundle_sha" --arg protocol "$rollback_protocol" \
+      '{schemaVersion:2,kind:"hook2stream-active-infrastructure-release",releaseSha:$sha,deployBundleSha256:$bundle,rollbackProtocol:$protocol}' \
+      > "$active_infrastructure.tmp"
+    chmod 0600 "$active_infrastructure.tmp"
+    mv -f "$active_infrastructure.tmp" "$active_infrastructure"
     current_candidate=$HOOK2STREAM_RELEASE_STATE_DIR/current-candidate.json
     if [ "$environment" = staging ]; then
       activated_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -235,33 +276,67 @@ case "$operation" in
     [ "$#" -eq 3 ] && [ "$3" = H2SEv1 ] || fail "rollback requires COMMIT_SHA H2SEv1"
     case "$identifier" in *[!0-9a-f]*|'') fail "rollback requires a full 40-character commit SHA" ;; esac
     [ "${#identifier}" -eq 40 ] || fail "rollback requires a full 40-character commit SHA"
-    rollback_env=$HOOK2STREAM_RELEASE_STATE_DIR/successful/$identifier.env; rollback_dir=$HOOK2STREAM_RELEASES_DIR/$identifier
+    validate_ghcr_pull_auth
+    rollback_env=$HOOK2STREAM_RELEASE_STATE_DIR/successful/$identifier.env
     current_env=$HOOK2STREAM_RELEASE_STATE_DIR/last-successful.env
-    hook2stream_trusted_directory "$rollback_dir" 0:0 700 \
-      && hook2stream_trusted_file "$rollback_dir/.deploy-bundle.sha256" 0:0 600 \
-      && hook2stream_trusted_file "$rollback_env" 0:0 600 \
-      && hook2stream_trusted_file "$rollback_dir/deploy/scripts/rollback-application.sh" 0:0 700 \
-      || fail "commit is not an application-rollback-capable locally successful release"
-    hook2stream_trusted_file "$current_env" 0:0 600 \
+    hook2stream_trusted_file "$rollback_env" 0:0 600 \
+      && hook2stream_trusted_file "$current_env" 0:0 600 \
       || fail "current successful environment is unavailable or unsafe"
-    capabilities=$HOOK2STREAM_RELEASE_STATE_DIR/successful/$identifier.capabilities.json
-    hook2stream_trusted_file "$capabilities" 0:0 600 \
-      || fail "rollback target has no safely recorded storage capability"
-    jq -e --arg sha "$identifier" '.schemaVersion == 1 and .releaseSha == $sha and (.storageFormats | index("H2SEv1") != null)' "$capabilities" >/dev/null \
-      || fail "rollback target cannot read H2SEv1"
+    validate_rollback_capability \
+      "$HOOK2STREAM_RELEASE_STATE_DIR/successful/$identifier.capabilities.json" "$identifier"
+    current_release=$(read_unique_environment_value "$current_env" RELEASE_VERSION)
+    case "$current_release" in *[!0-9a-f]*|'') fail "current release SHA is invalid" ;; esac
+    [ "${#current_release}" -eq 40 ] || fail "current release SHA is invalid"
+    validate_rollback_capability \
+      "$HOOK2STREAM_RELEASE_STATE_DIR/successful/$current_release.capabilities.json" "$current_release"
+    active_infrastructure=$HOOK2STREAM_RELEASE_STATE_DIR/active-infrastructure-release.json
+    hook2stream_trusted_file "$active_infrastructure" 0:0 600 \
+      || fail "active infrastructure release marker is unavailable or unsafe"
+    infrastructure_state=$(jq -ce --arg protocol "$rollback_protocol" 'select(
+      (keys | sort) == ["deployBundleSha256","kind","releaseSha","rollbackProtocol","schemaVersion"] and
+      .schemaVersion == 2 and .kind == "hook2stream-active-infrastructure-release" and
+      .rollbackProtocol == $protocol and
+      (.releaseSha | type == "string" and test("^[0-9a-f]{40}$")) and
+      (.deployBundleSha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    )' "$active_infrastructure") || fail "active infrastructure marker is not protocol v2"
+    infrastructure_release=$(printf '%s' "$infrastructure_state" | jq -r '.releaseSha')
+    infrastructure_bundle_sha=$(printf '%s' "$infrastructure_state" | jq -r '.deployBundleSha256')
+    validate_rollback_capability \
+      "$HOOK2STREAM_RELEASE_STATE_DIR/successful/$infrastructure_release.capabilities.json" \
+      "$infrastructure_release"
+    infrastructure_env=$HOOK2STREAM_RELEASE_STATE_DIR/successful/$infrastructure_release.env
+    hook2stream_trusted_file "$infrastructure_env" 0:0 600 \
+      || fail "active infrastructure environment is unavailable or unsafe"
+    for infrastructure_variable in \
+      BOOTSTRAPPER_IMAGE POSTGRES_BACKUP_IMAGE CADDY_IMAGE POSTGRES_IMAGE \
+      PGBOUNCER_IMAGE EGRESS_PROXY_IMAGE; do
+      [ "$(read_unique_environment_value "$current_env" "$infrastructure_variable")" = \
+        "$(read_unique_environment_value "$infrastructure_env" "$infrastructure_variable")" ] \
+        || fail "$infrastructure_variable differs from the active infrastructure release marker"
+    done
+    infrastructure_release_dir=$HOOK2STREAM_RELEASES_DIR/$infrastructure_release
+    hook2stream_trusted_directory "$infrastructure_release_dir" 0:0 700 \
+      && hook2stream_trusted_file "$infrastructure_release_dir/.deploy-bundle.sha256" 0:0 600 \
+      && hook2stream_trusted_file "$infrastructure_release_dir/deploy/compose.yaml" 0:0 600 \
+      && hook2stream_trusted_file "$infrastructure_release_dir/deploy/scripts/lib/deployment-common.sh" 0:0 600 \
+      && hook2stream_trusted_file "$infrastructure_release_dir/deploy/scripts/lib/forced-command-trust.sh" 0:0 700 \
+      || fail "active infrastructure bundle is unavailable or unsafe"
+    [ "$(cat "$infrastructure_release_dir/.deploy-bundle.sha256")" = "$infrastructure_bundle_sha" ] \
+      || fail "active infrastructure bundle differs from its successful forward-deploy marker"
     environment=$(read_deployment_environment "$rollback_env")
     [ "$environment" = "$configured_environment" ] \
       || fail "rollback target differs from the configured host environment"
     [ "$(read_deployment_environment "$current_env")" = "$environment" ] \
       || fail "rollback target belongs to a different environment"
     active_rollback_env=$HOOK2STREAM_RELEASE_STATE_DIR/active-rollback-$identifier.env
-    env -u HOOK2STREAM_RELEASE_STATE_DIR "$rollback_dir/deploy/scripts/rollback-application.sh" \
-      "$current_env" "$rollback_env" "$active_rollback_env" "$identifier"
+    env -u HOOK2STREAM_RELEASE_STATE_DIR "$rollback_program" \
+      "$current_env" "$rollback_env" "$active_rollback_env" "$identifier" \
+      "$infrastructure_release_dir/deploy"
     "$HOOK2STREAM_E2E_HOOK" "$environment" "$active_rollback_env" "$identifier"
     actual_images='{}'
     for mapping in 'API_IMAGE:api' 'WORKER_IMAGE:worker-media' 'WORKER_IMAGE:worker-analysis' 'WORKER_IMAGE:worker-control' 'WORKER_IMAGE:worker-render' 'WORKER_IMAGE:worker-export' 'WEB_IMAGE:web' 'POSTGRES_BACKUP_IMAGE:postgres-backup' 'POSTGRES_BACKUP_IMAGE:storage-janitor' 'CADDY_IMAGE:caddy' 'POSTGRES_IMAGE:postgres' 'PGBOUNCER_IMAGE:pgbouncer' 'EGRESS_PROXY_IMAGE:egress-api' 'EGRESS_PROXY_IMAGE:egress-s3' 'EGRESS_PROXY_IMAGE:egress-control' 'EGRESS_PROXY_IMAGE:egress-backup'; do
       name=${mapping%%:*}; service=${mapping#*:}
-      container=$(HOOK2STREAM_ENV_FILE=$active_rollback_env sh -c '. "$1/scripts/lib/deployment-common.sh"; compose ps -q "$2"' _ "$rollback_dir/deploy" "$service")
+      container=$(HOOK2STREAM_ENV_FILE=$active_rollback_env sh -c '. "$1/scripts/lib/deployment-common.sh"; compose ps -q "$2"' _ "$infrastructure_release_dir/deploy" "$service")
       actual=$(docker inspect --format '{{.Config.Image}}' "$container")
       expected=$(awk -F= -v name="$name" '$1 == name {print substr($0,index($0,"=")+1)}' "$active_rollback_env")
       [ "$actual" = "$expected" ] || fail "$service is not running the rollback digest"

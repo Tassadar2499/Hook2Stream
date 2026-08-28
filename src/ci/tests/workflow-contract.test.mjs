@@ -54,6 +54,12 @@ for (const [name, workflow] of [["ci", ci], ["staging", staging], ["promotion", 
   }
 }
 
+const ciCheckoutsWithoutCredentials = ci.match(
+  /- uses: actions\/checkout@[0-9a-f]{40}[^\n]*\n\s+with:\n\s+persist-credentials: false/g,
+) ?? [];
+assert(ciCheckoutsWithoutCredentials.length === 6,
+  "all six CI checkouts must disable persisted Git credentials");
+
 for (const [name, workflow] of [["promotion", promotion]]) {
   assert(workflow.includes('case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in') &&
     workflow.includes('"ssh-ed25519 "*') &&
@@ -68,6 +74,9 @@ assert(ci.includes("pattern: release-digest-*-${{ github.sha }}-${{ github.run_i
   "digest-fragment download must be scoped to the current run attempt");
 assert(ci.includes("Build pinned quarantined MinIO acceptance dependency") && ci.includes("src/ci/start-minio-acceptance.sh"),
   "MinIO must remain an isolated local/CI acceptance dependency");
+assert(ci.includes("Build hardened Caddy acceptance dependency") &&
+  ci.includes("docker build --file src/deploy/caddy/Dockerfile --tag hook2stream-caddy:ci ."),
+  "MinIO acceptance must use the hardened source-built Caddy image");
 assert(!ci.includes("deploy-staging:") && !ci.includes("environment: staging") && !ci.includes("STAGING_RECEIPT_SIGNING_KEY"),
   "main CI must stop after publishing the immutable candidate and must not deploy staging");
 const publishSection = ci.slice(ci.indexOf("  publish:"), ci.indexOf("  runtime-images:"));
@@ -87,6 +96,9 @@ const expectedContainerDeployability = new Map([
   ["web", true],
   ["postgres-backup", true],
   ["postgres", true],
+  ["caddy", true],
+  ["pgbouncer", true],
+  ["egress-proxy", true],
   ["minio", false],
 ]);
 const containerMatrixStart = containerSection.indexOf("      matrix:\n        include:\n");
@@ -97,7 +109,7 @@ const containerMatrixSection = containerSection.slice(containerMatrixStart, cont
 const containerMatrixRows = containerMatrixSection.split("\n").filter((line) =>
   line.match(/^ */)[0].length === 10 && line.trimStart().startsWith("-"));
 assert(containerMatrixRows.length === expectedContainerDeployability.size,
-  "container matrix must contain exactly seven list items");
+  "container matrix must contain exactly ten list items");
 const containerMatrixNames = containerMatrixRows.map((line) => {
   const match = line.match(/^ {10}- name: ([a-z0-9-]+)$/);
   assert(match !== null, `container matrix contains a non-canonical row: ${line.trim()}`);
@@ -105,7 +117,7 @@ const containerMatrixNames = containerMatrixRows.map((line) => {
 }).sort();
 assert(JSON.stringify(containerMatrixNames) ===
   JSON.stringify([...expectedContainerDeployability.keys()].sort()),
-  "container matrix must contain exactly the seven reviewed entries");
+  "container matrix must contain exactly the ten reviewed entries");
 for (const [name, deployable] of expectedContainerDeployability) {
   const entry = yamlNamedListItem(containerSection, 10, name);
   assert((entry.match(/^\s{12}deployable: (?:true|false)$/gm) ?? []).length === 1 &&
@@ -113,7 +125,7 @@ for (const [name, deployable] of expectedContainerDeployability) {
   `${name} must declare deployable: ${deployable} exactly once`);
 }
 assert((containerSection.match(/^\s{12}deployable: false$/gm) ?? []).length === 1 &&
-  (containerSection.match(/^\s{12}deployable: true$/gm) ?? []).length === 6,
+  (containerSection.match(/^\s{12}deployable: true$/gm) ?? []).length === 9,
   "only MinIO may be non-deployable in the container matrix");
 
 const deployableScan = yamlNamedListItem(containerSection, 6,
@@ -154,8 +166,60 @@ for (const [name, block] of [["deployable", deployableScan], ["MinIO inventory",
     `${name} scan must use exactly the reviewed Anchore inputs`);
 }
 const runtimeSection = ci.slice(ci.indexOf("  runtime-images:"), ci.indexOf("  release-candidate:"));
+assert(runtimeSection.includes("    needs: containers\n"),
+  "runtime publication must wait for the mandatory container gate");
 assert(!/^\s*-\s+name:\s*postgres\s*$/m.test(runtimeSection) && !runtimeSection.includes("POSTGRES_IMAGE"),
   "official PostgreSQL must not be recorded as a reviewed runtime image");
+const expectedRuntimeImages = new Map([
+  ["caddy", ["src/deploy/caddy/Dockerfile", "CADDY_IMAGE"]],
+  ["pgbouncer", ["src/deploy/pgbouncer/Dockerfile", "PGBOUNCER_IMAGE"]],
+  ["egress-proxy", ["src/deploy/egress-proxy/Dockerfile", "EGRESS_PROXY_IMAGE"]],
+]);
+const runtimeMatrixStart = runtimeSection.indexOf("      matrix:\n        include:\n");
+const runtimeMatrixEnd = runtimeSection.indexOf("    steps:\n", runtimeMatrixStart);
+assert(runtimeMatrixStart >= 0 && runtimeMatrixEnd > runtimeMatrixStart,
+  "hardened runtime matrix boundaries are missing or malformed");
+const runtimeMatrixSection = runtimeSection.slice(runtimeMatrixStart, runtimeMatrixEnd);
+const runtimeRows = runtimeMatrixSection.split("\n").filter((line) =>
+  line.match(/^ */)[0].length === 10 && line.trimStart().startsWith("-"));
+assert(runtimeRows.length === expectedRuntimeImages.size,
+  "runtime publish matrix must contain exactly three reviewed source builds");
+for (const [name, [dockerfile, deployVar]] of expectedRuntimeImages) {
+  const entry = yamlNamedListItem(runtimeSection, 10, name);
+  assert(entry.includes(`            dockerfile: ${dockerfile}`) &&
+    entry.includes(`            deploy_var: ${deployVar}`) &&
+    !entry.includes("source:"),
+  `${name} runtime must use its repository-owned source/hardened Dockerfile`);
+}
+assert(!runtimeSection.includes("docker pull") &&
+  !runtimeSection.includes("caddy:2.11.4-alpine") &&
+  !runtimeSection.includes("edoburu/pgbouncer") &&
+  !runtimeSection.includes("ubuntu/squid"),
+  "runtime publication must not reuse the vulnerable external images");
+const runtimeBuild = yamlNamedListItem(runtimeSection, 6,
+  "Publish hardened runtime image with SBOM and provenance");
+assert(runtimeBuild.includes("        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a") &&
+  runtimeBuild.includes("          file: ${{ matrix.dockerfile }}") &&
+  runtimeBuild.includes("          push: true") &&
+  runtimeBuild.includes("          platforms: linux/amd64") &&
+  runtimeBuild.includes("          sbom: true") &&
+  runtimeBuild.includes("          provenance: mode=max"),
+  "hardened runtimes must be published for amd64 with SBOM and max provenance");
+const runtimeScan = yamlNamedListItem(runtimeSection, 6, "Scan exact published runtime digest");
+assert(runtimeScan.includes("        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2") &&
+  runtimeScan.includes("          image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}") &&
+  runtimeScan.includes("          fail-build: true") &&
+  runtimeScan.includes("          severity-cutoff: high") &&
+  runtimeScan.includes("          only-fixed: false") &&
+  runtimeScan.includes("          output-format: table") &&
+  !runtimeScan.includes("continue-on-error"),
+  "every published runtime must retain the exact blocking High/Critical gate");
+assert(JSON.stringify(canonicalYamlChildKeys(runtimeScan, 10, "runtime scan")) ===
+  JSON.stringify(expectedScanInputs),
+  "runtime scan must use exactly the reviewed Anchore inputs");
+for (const repository of ["hook2stream-caddy", "hook2stream-pgbouncer", "hook2stream-egress-proxy"]) {
+  assert(candidateBuilder.includes(repository), `${repository} must be enforced by the candidate repository allowlist`);
+}
 assert(!ci.includes("postgres:17.10"), "CI must not retain PostgreSQL 17.10");
 for (const removedPath of [
   ".github/workflows/storage-ci.yml",

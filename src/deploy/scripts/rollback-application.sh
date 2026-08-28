@@ -9,24 +9,37 @@ fail_rollback() {
 
 usage() {
     printf '%s\n' \
-        "Usage: rollback-application.sh CURRENT_ENV TARGET_ENV ACTIVE_ENV TARGET_SHA" \
+        "Usage: rollback-application.sh CURRENT_ENV TARGET_ENV ACTIVE_ENV TARGET_SHA ACTIVE_INFRA_DEPLOY_DIR" \
         "" \
         "Replaces only API_IMAGE, WORKER_IMAGE, WEB_IMAGE and RELEASE_VERSION." \
         "It never starts the bootstrapper, runs a migration, or mutates infrastructure services." >&2
     exit 2
 }
 
-[ "$#" -eq 4 ] || usage
+[ "$#" -eq 5 ] || usage
 current_environment_file=$1
 target_environment_file=$2
 active_environment_file=$3
 target_release_sha=$4
+deployment_dir=$5
 
 case "$target_release_sha" in
     *[!0-9a-f]*|'') fail_rollback "TARGET_SHA must be a full lowercase commit SHA" ;;
 esac
 [ "${#target_release_sha}" -eq 40 ] \
     || fail_rollback "TARGET_SHA must be a full lowercase commit SHA"
+case "$deployment_dir" in /*/deploy) ;; *) fail_rollback "ACTIVE_INFRA_DEPLOY_DIR must be an absolute deploy directory" ;; esac
+[ -d "$deployment_dir" ] && [ ! -L "$deployment_dir" ] \
+    || fail_rollback "ACTIVE_INFRA_DEPLOY_DIR must be a real directory"
+deployment_owner=$(id -u):$(id -g)
+for deployment_helper in \
+    "$deployment_dir/compose.yaml" \
+    "$deployment_dir/scripts/lib/deployment-common.sh" \
+    "$deployment_dir/scripts/lib/forced-command-trust.sh"; do
+    [ -f "$deployment_helper" ] && [ ! -L "$deployment_helper" ] \
+        && [ "$(stat -c '%u:%g' "$deployment_helper")" = "$deployment_owner" ] \
+        || fail_rollback "active infrastructure compose/helper source is unsafe"
+done
 
 validate_recorded_environment() {
     rollback_environment_path=$1
@@ -101,34 +114,30 @@ awk -F= \
     { print }
 ' "$current_environment_file" > "$active_environment_tmp"
 chmod 0600 "$active_environment_tmp"
-mv -f "$active_environment_tmp" "$active_environment_file"
-trap - EXIT HUP INT TERM
-
-validate_recorded_environment "$active_environment_file" "active rollback environment"
+validate_recorded_environment "$active_environment_tmp" "pending active rollback environment"
 for rollback_variable in $application_variables; do
-    active_value=$(read_unique_environment_value "$active_environment_file" "$rollback_variable")
+    active_value=$(read_unique_environment_value "$active_environment_tmp" "$rollback_variable")
     target_value=$(read_unique_environment_value "$target_environment_file" "$rollback_variable")
     [ "$active_value" = "$target_value" ] \
         || fail_rollback "$rollback_variable was not selected from the rollback target"
 done
 for rollback_variable in $infrastructure_variables; do
-    active_value=$(read_unique_environment_value "$active_environment_file" "$rollback_variable")
+    active_value=$(read_unique_environment_value "$active_environment_tmp" "$rollback_variable")
     current_value=$(read_unique_environment_value "$current_environment_file" "$rollback_variable")
     [ "$active_value" = "$current_value" ] \
         || fail_rollback "$rollback_variable must remain at the current infrastructure digest"
 done
-[ "$(read_unique_environment_value "$active_environment_file" RELEASE_VERSION)" = "$target_release_sha" ] \
+[ "$(read_unique_environment_value "$active_environment_tmp" RELEASE_VERSION)" = "$target_release_sha" ] \
     || fail_rollback "active rollback RELEASE_VERSION is invalid"
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-deployment_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 deployment_program=rollback-application
-HOOK2STREAM_ENV_FILE=$active_environment_file
+HOOK2STREAM_ENV_FILE=$active_environment_tmp
 export HOOK2STREAM_ENV_FILE
-. "$script_dir/lib/deployment-common.sh"
+. "$deployment_dir/scripts/lib/deployment-common.sh"
 
 deployment_require_base_tools
 deployment_require_command curl
+deployment_validate_ghcr_pull_auth
 case "$(deployment_secret_provider)" in
     file) ;;
     *) fail "application rollback requires environment-local file secrets" ;;
@@ -175,8 +184,17 @@ done
 
 current_stage=application-image-pull
 for rollback_variable in $application_variables; do
-    docker image pull "$(read_env_value "$rollback_variable")"
+    docker --config "$DOCKER_CONFIG" image pull "$(read_env_value "$rollback_variable")"
 done
+
+# Publish the selected environment only after every target application digest
+# has been authenticated and pulled. An auth/registry failure leaves any
+# existing active rollback environment untouched.
+mv -f "$active_environment_tmp" "$active_environment_file"
+trap - EXIT HUP INT TERM
+HOOK2STREAM_ENV_FILE=$active_environment_file
+environment_file=$active_environment_file
+export HOOK2STREAM_ENV_FILE
 
 current_stage=leaf-workers
 compose up -d --no-deps worker-media worker-analysis worker-render worker-export
