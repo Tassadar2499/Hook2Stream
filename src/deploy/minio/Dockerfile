@@ -1,5 +1,5 @@
-ARG GO_IMAGE=docker.io/library/golang:1.25.12-alpine3.23@sha256:f128118f1f3a7f38949c57f03d29d13e4afdb06b86f840f8f43e8031e6c1a73a
-ARG ALPINE_IMAGE=docker.io/library/alpine:3.22.5@sha256:7c8cb692ae09657cbc4a3f3cbd0e8d5a2690ba38386aaaf252dbb060bf5eb2e6
+ARG GO_IMAGE=docker.io/library/golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc
+ARG ALPINE_IMAGE=docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 ARG MINIO_RELEASE=RELEASE.2025-10-15T17-29-55Z
 ARG MINIO_COMMIT=9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
 FROM ${GO_IMAGE} AS build
@@ -33,13 +33,17 @@ ARG MINIO_RELEASE
 ARG MINIO_COMMIT
 
 LABEL org.opencontainers.image.title="Hook2Stream local/CI MinIO" \
-      org.opencontainers.image.description="Source build of the final MinIO community release; deployment security gate enforced separately" \
+      org.opencontainers.image.description="Quarantined source build of the final MinIO community release for disposable local/CI acceptance only" \
       org.opencontainers.image.source="https://github.com/minio/minio" \
       com.hook2stream.minio.source-release="${MINIO_RELEASE}" \
       com.hook2stream.minio.source-commit="${MINIO_COMMIT}" \
+      com.hook2stream.minio.security-policy="inventory-only-never-deploy" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-RUN addgroup -S -g 10001 minio \
+RUN apk add --no-cache \
+        libcrypto3=3.5.8-r0 \
+        libssl3=3.5.8-r0 \
+    && addgroup -S -g 10001 minio \
     && adduser -S -D -H -u 10001 -G minio minio \
     && mkdir -p /data /licenses \
     && chown minio:minio /data \

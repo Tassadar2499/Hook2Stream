@@ -38,7 +38,7 @@ jobs:
           docker logs hook2stream-ci-postgres >&2
           exit 1
 
-      - name: Build audited MinIO acceptance dependency
+      - name: Build pinned quarantined MinIO acceptance dependency
         run: docker build --file src/deploy/minio/Dockerfile --tag hook2stream-minio:ci .
 
       - name: Start and verify MinIO/Caddy acceptance dependency
@@ -151,36 +151,43 @@ jobs:
             dockerfile: src/Hook2Stream.Api/Dockerfile
             runtime: dotnet
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: worker
             dockerfile: src/Hook2Stream.Worker/Dockerfile
             runtime: dotnet
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: bootstrapper
             dockerfile: src/Hook2Stream.Bootstrapper/Dockerfile
             runtime: dotnet
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: web
             dockerfile: src/web/Dockerfile
             runtime: node
             secret_consumer: false
+            deployable: true
             build_args: --build-arg NEXT_PUBLIC_AUTH_MODE=oauth
           - name: postgres-backup
             dockerfile: src/deploy/backup/Dockerfile
             runtime: postgres
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: postgres
             dockerfile: src/deploy/postgres/Dockerfile
             runtime: postgres
             secret_consumer: false
+            deployable: true
             build_args: ""
           - name: minio
             dockerfile: src/deploy/minio/Dockerfile
             runtime: minio
             secret_consumer: false
+            deployable: false
             build_args: ""
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -233,13 +240,35 @@ jobs:
             echo "runtime image can read the group-only secret without group_add" >&2
             exit 1
           fi
-      - name: Scan container for high and critical vulnerabilities
+      - name: Scan deployable container for high and critical vulnerabilities
+        if: matrix.deployable == true
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: hook2stream-${{ matrix.name }}:ci
           fail-build: true
           severity-cutoff: high
+          only-fixed: false
           output-format: table
+      - name: Inventory quarantined local/CI MinIO vulnerabilities
+        if: matrix.name == 'minio' && matrix.deployable == false
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: hook2stream-${{ matrix.name }}:ci
+          fail-build: false
+          severity-cutoff: high
+          only-fixed: false
+          output-format: table
+      - name: Record MinIO quarantine policy
+        if: matrix.name == 'minio' && matrix.deployable == false
+        shell: bash
+        run: |
+          echo "::warning title=Local-only MinIO security inventory::This archived upstream image is never published, bundled, staged, or deployed; review the inventory in the preceding step."
+          {
+            echo "### Quarantined local/CI MinIO"
+            echo
+            echo "This archived upstream image is acceptance-test infrastructure only."
+            echo "It is excluded from publish and release candidates; its vulnerability inventory is not a deployment waiver."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

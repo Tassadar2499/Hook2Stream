@@ -380,7 +380,10 @@ incomplete multipart uploads older than 24 hours. Backup uploads do not use
 multipart. There is no storage host, MinIO deployment workflow, storage
 GitHub Environment, storage Tailscale node, or storage forced command. The
 checked-in `compose.minio.yaml` remains solely for disposable local development
-and CI and is excluded from release candidates.
+and CI and is excluded from release candidates. Because the final MinIO
+Community release is archived, its CI vulnerability scan is inventory-only;
+the image is never published or deployed, while every candidate image retains
+the blocking High/Critical scan.
 
 ## Secrets and encryption
 

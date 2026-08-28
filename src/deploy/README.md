@@ -24,7 +24,12 @@ deployed object-storage host or storage release pipeline.
 
 `compose.minio.yaml` must never run on staging or production and is excluded
 from immutable candidates. Its `Manage` storage mode, root credentials, bucket
-bootstrap, and test routing are local/CI conveniences only.
+bootstrap, and test routing are local/CI conveniences only. The final MinIO
+Community source release is archived and no longer receives OSS security
+fixes. CI therefore records its vulnerability inventory without treating that
+test-only image as deployable; all images that can enter a candidate retain the
+blocking High/Critical gate. A MinIO finding can never be waived into staging
+or production.
 
 ## Deployed app-host contract
 
@@ -252,6 +257,8 @@ it only with an explicit local/CI environment and `STORAGE_MODE=minio`. Local
 MinIO may use `StorageProvisioningMode=Manage`, test CORS/lifecycle behavior,
 and local bootstrap/root secrets. It is not published as a production runtime
 image, is not included in a release candidate, and never stores a backup claim.
+Its CI scan is inventory-only because upstream Community Edition is archived;
+the release-candidate exclusions are the fail-closed deployment boundary.
 
 ## Validation and external gates
 

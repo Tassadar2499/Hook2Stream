@@ -21,6 +21,33 @@ function assert(condition, message) {
   }
 }
 
+function yamlNamedListItem(text, indentation, name) {
+  const marker = `${" ".repeat(indentation)}- name: ${name}\n`;
+  const start = text.indexOf(marker);
+  assert(start >= 0, `missing YAML list item: ${name}`);
+  const lines = text.slice(start).split("\n");
+  const block = [lines[0]];
+  for (const line of lines.slice(1)) {
+    const leadingSpaces = line.match(/^ */)[0].length;
+    if (line.trim() !== "" && leadingSpaces <= indentation) {
+      break;
+    }
+    block.push(line);
+  }
+  return block.join("\n");
+}
+
+function canonicalYamlChildKeys(block, indentation, context) {
+  const directChildren = block.split("\n").filter((line) =>
+    line.trim() !== "" && line.match(/^ */)[0].length === indentation);
+  const keys = directChildren.map((line) => {
+    const match = line.match(new RegExp(`^ {${indentation}}([a-z][a-z0-9-]*):(?: .*)?$`));
+    assert(match !== null, `${context} contains a non-canonical direct child: ${line.trim()}`);
+    return match[1];
+  });
+  return keys.sort();
+}
+
 for (const [name, workflow] of [["ci", ci], ["staging", staging], ["promotion", promotion], ["rollback", rollback]]) {
   for (const match of workflow.matchAll(/^\s*uses:\s*[^\s@]+@([^\s#]+)/gm)) {
     assert(/^[0-9a-f]{40}$/.test(match[1]), `${name} workflow contains a non-immutable action reference: ${match[0].trim()}`);
@@ -39,7 +66,7 @@ const attemptSpecificDigestName = "release-digest-${{ matrix.name }}-${{ github.
 assert(ci.split(attemptSpecificDigestName).length - 1 === 2, "both digest-fragment uploads must include run ID and run attempt");
 assert(ci.includes("pattern: release-digest-*-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"),
   "digest-fragment download must be scoped to the current run attempt");
-assert(ci.includes("Build audited MinIO acceptance dependency") && ci.includes("src/ci/start-minio-acceptance.sh"),
+assert(ci.includes("Build pinned quarantined MinIO acceptance dependency") && ci.includes("src/ci/start-minio-acceptance.sh"),
   "MinIO must remain an isolated local/CI acceptance dependency");
 assert(!ci.includes("deploy-staging:") && !ci.includes("environment: staging") && !ci.includes("STAGING_RECEIPT_SIGNING_KEY"),
   "main CI must stop after publishing the immutable candidate and must not deploy staging");
@@ -53,6 +80,79 @@ const containerSection = ci.slice(ci.indexOf("  containers:"), ci.indexOf("  pub
 assert(/^\s*-\s+name:\s*postgres\s*$/m.test(containerSection) && containerSection.includes("src/deploy/postgres/Dockerfile") &&
   containerSection.includes("Verify hardened PostgreSQL privilege drop"),
   "container checks must build, scan, and verify the hardened PostgreSQL image");
+const expectedContainerDeployability = new Map([
+  ["api", true],
+  ["worker", true],
+  ["bootstrapper", true],
+  ["web", true],
+  ["postgres-backup", true],
+  ["postgres", true],
+  ["minio", false],
+]);
+const containerMatrixStart = containerSection.indexOf("      matrix:\n        include:\n");
+const containerMatrixEnd = containerSection.indexOf("    steps:\n", containerMatrixStart);
+assert(containerMatrixStart >= 0 && containerMatrixEnd > containerMatrixStart,
+  "container matrix boundaries are missing or malformed");
+const containerMatrixSection = containerSection.slice(containerMatrixStart, containerMatrixEnd);
+const containerMatrixRows = containerMatrixSection.split("\n").filter((line) =>
+  line.match(/^ */)[0].length === 10 && line.trimStart().startsWith("-"));
+assert(containerMatrixRows.length === expectedContainerDeployability.size,
+  "container matrix must contain exactly seven list items");
+const containerMatrixNames = containerMatrixRows.map((line) => {
+  const match = line.match(/^ {10}- name: ([a-z0-9-]+)$/);
+  assert(match !== null, `container matrix contains a non-canonical row: ${line.trim()}`);
+  return match[1];
+}).sort();
+assert(JSON.stringify(containerMatrixNames) ===
+  JSON.stringify([...expectedContainerDeployability.keys()].sort()),
+  "container matrix must contain exactly the seven reviewed entries");
+for (const [name, deployable] of expectedContainerDeployability) {
+  const entry = yamlNamedListItem(containerSection, 10, name);
+  assert((entry.match(/^\s{12}deployable: (?:true|false)$/gm) ?? []).length === 1 &&
+    entry.includes(`            deployable: ${deployable}`),
+  `${name} must declare deployable: ${deployable} exactly once`);
+}
+assert((containerSection.match(/^\s{12}deployable: false$/gm) ?? []).length === 1 &&
+  (containerSection.match(/^\s{12}deployable: true$/gm) ?? []).length === 6,
+  "only MinIO may be non-deployable in the container matrix");
+
+const deployableScan = yamlNamedListItem(containerSection, 6,
+  "Scan deployable container for high and critical vulnerabilities");
+assert(deployableScan.includes("        if: matrix.deployable == true") &&
+  deployableScan.includes("        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2") &&
+  deployableScan.includes("          image: hook2stream-${{ matrix.name }}:ci") &&
+  deployableScan.includes("          fail-build: true") &&
+  deployableScan.includes("          severity-cutoff: high") &&
+  deployableScan.includes("          only-fixed: false") &&
+  deployableScan.includes("          output-format: table") &&
+  !deployableScan.includes("continue-on-error"),
+  "every deployable container must retain the blocking High/Critical vulnerability gate");
+
+const minioInventory = yamlNamedListItem(containerSection, 6,
+  "Inventory quarantined local/CI MinIO vulnerabilities");
+assert(minioInventory.includes("        if: matrix.name == 'minio' && matrix.deployable == false") &&
+  minioInventory.includes("        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2") &&
+  minioInventory.includes("          image: hook2stream-${{ matrix.name }}:ci") &&
+  minioInventory.includes("          fail-build: false") &&
+  minioInventory.includes("          severity-cutoff: high") &&
+  minioInventory.includes("          only-fixed: false") &&
+  minioInventory.includes("          output-format: table") &&
+  !minioInventory.includes("continue-on-error"),
+  "archived MinIO must retain a complete non-blocking local/CI vulnerability inventory");
+
+const minioPolicy = yamlNamedListItem(containerSection, 6, "Record MinIO quarantine policy");
+assert(minioPolicy.includes("        if: matrix.name == 'minio' && matrix.deployable == false") &&
+  minioPolicy.includes("This archived upstream image is never published, bundled, staged, or deployed"),
+  "the MinIO inventory must visibly record its non-deployable quarantine policy");
+assert((containerSection.match(/fail-build: false/g) ?? []).length === 1 &&
+  !containerSection.includes("continue-on-error:"),
+  "no container scan other than the MinIO inventory may bypass the vulnerability gate");
+const expectedScanInputs = ["fail-build", "image", "only-fixed", "output-format", "severity-cutoff"];
+for (const [name, block] of [["deployable", deployableScan], ["MinIO inventory", minioInventory]]) {
+  const inputKeys = canonicalYamlChildKeys(block, 10, `${name} scan`);
+  assert(JSON.stringify(inputKeys) === JSON.stringify(expectedScanInputs),
+    `${name} scan must use exactly the reviewed Anchore inputs`);
+}
 const runtimeSection = ci.slice(ci.indexOf("  runtime-images:"), ci.indexOf("  release-candidate:"));
 assert(!/^\s*-\s+name:\s*postgres\s*$/m.test(runtimeSection) && !runtimeSection.includes("POSTGRES_IMAGE"),
   "official PostgreSQL must not be recorded as a reviewed runtime image");
