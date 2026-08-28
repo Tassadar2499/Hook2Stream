@@ -52,11 +52,22 @@ if grep -Eq 'shell[[:space:]]*=[[:space:]]*True|os\.system\(|subprocess\.(call|r
   fail "hook may not pass secret-bearing state through a shell"
 fi
 
+post_gate=$deployment_dir/scripts/post-deploy-e2e.sh
+for orphan_boundary in \
+  'child_pid=$!' \
+  'kill -TERM "$child_pid"' \
+  'wait "$child_pid"' \
+  'authenticated-e2e.stdout'; do
+  grep -Fq "$orphan_boundary" "$post_gate" \
+    || fail "post-deploy shell omits authenticated-child cancellation boundary: $orphan_boundary"
+done
+
 python3 - "$hook" <<'PY'
 import ast
 import hashlib
 import hmac
 import http.cookiejar
+import json
 import sys
 import tempfile
 import types
@@ -197,10 +208,100 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise SystemExit("domain-scoped __Host- cookies unexpectedly passed")
 
-if module.idempotency("render-initial", "a" * 40) != module.idempotency(
-    "render-initial", "a" * 40
+operation_one = "1" * 32
+operation_two = "2" * 32
+if module.idempotency("render-initial", "a" * 40, operation_one) != module.idempotency(
+    "render-initial", "a" * 40, operation_one
 ):
     raise SystemExit("release operation idempotency key is not deterministic")
+if module.idempotency("audio", "a" * 40, operation_one) == module.idempotency(
+    "audio", "a" * 40, operation_two
+):
+    raise SystemExit("same-SHA E2E attempts unexpectedly share an idempotency key")
+
+# Model the API's completed-upload behavior: replaying one operation would
+# receive the completed session and PUT=>409, while two persisted wrapper
+# attempts for the same release must allocate independent sessions.
+class ReplayUploadClient:
+    def __init__(self):
+        self.by_key = {}
+        self.sessions = {}
+
+    def request(self, method, path, expected, **_kwargs):
+        if method == "GET" and path.startswith("/api/v1/uploads/"):
+            session = path.rsplit("/", 1)[-1]
+            state = self.sessions[session]
+            if state["completed"]:
+                return module.Response(409, {}, b'{}')
+            body = json.dumps({
+                "completedParts": [] if state["receipt"] is None else [state["receipt"]]
+            }).encode()
+            return module.Response(200, {}, body)
+        raise AssertionError((method, path))
+
+    def json(self, method, path, expected, **kwargs):
+        if method == "POST" and path == "/api/v1/releases/audio-uploads":
+            key = kwargs["headers"]["Idempotency-Key"]
+            if key not in self.by_key:
+                number = len(self.by_key) + 1
+                project = f"00000000-0000-0000-0000-{number:012d}"
+                session = f"10000000-0000-0000-0000-{number:012d}"
+                asset = f"20000000-0000-0000-0000-{number:012d}"
+                self.by_key[key] = (project, session, asset)
+                self.sessions[session] = {"completed": False, "receipt": None}
+            project, session, asset = self.by_key[key]
+            return ({
+                "project": {"id": project},
+                "upload": {"sessionId": session, "assetId": asset, "partCount": 1},
+            }, None)
+        if method == "PUT" and path.endswith("/parts/1"):
+            session = path.split("/")[4]
+            state = self.sessions[session]
+            if state["completed"]:
+                raise module.GateError("modeled HTTP 409 for completed upload")
+            receipt = {
+                "partNumber": 1,
+                "plaintextLength": kwargs["data_file"].stat().st_size,
+                "sha256": hashlib.sha256(kwargs["data_file"].read_bytes()).hexdigest(),
+                "eTag": "modeled-etag",
+            }
+            state["receipt"] = receipt
+            return receipt, None
+        if method == "GET" and path.startswith("/api/v1/uploads/"):
+            session = path.rsplit("/", 1)[-1]
+            state = self.sessions[session]
+            if state["completed"]:
+                raise module.GateError("modeled upload.not_resumable 409")
+            return {"completedParts": [state["receipt"]]}, None
+        if method == "POST" and path.endswith("/complete"):
+            session = path.split("/")[4]
+            self.sessions[session]["completed"] = True
+            number = int(session[-12:])
+            return {"jobId": f"30000000-0000-0000-0000-{number:012d}"}, None
+        raise AssertionError((method, path))
+
+with tempfile.TemporaryDirectory() as directory:
+    media = Path(directory) / "fixture.mp3"
+    media.write_bytes(b"ID3" + b"same-sha-replay" * 100)
+    original_private_file = module.private_e2e_file
+    original_wait_job = module.wait_job
+    original_ranges = module.head_and_ranges
+    module.private_e2e_file = lambda *_args, **_kwargs: media
+    module.wait_job = lambda *_args, **_kwargs: {}
+    module.head_and_ranges = lambda *_args, **_kwargs: None
+    try:
+        replay_client = ReplayUploadClient()
+        first = module.upload_audio(replay_client, {}, "a" * 40, operation_one)
+        resumed_first = module.upload_audio(
+            replay_client, {}, "a" * 40, operation_one
+        )
+        second = module.upload_audio(replay_client, {}, "a" * 40, operation_two)
+    finally:
+        module.private_e2e_file = original_private_file
+        module.wait_job = original_wait_job
+        module.head_and_ranges = original_ranges
+    if first != resumed_first or first == second or len(replay_client.by_key) != 2:
+        raise SystemExit("same-SHA repeated E2E did not allocate attempt-scoped upload state")
 
 gate_names = {
     target.id
@@ -209,16 +310,16 @@ gate_names = {
     for target in node.targets
     if isinstance(target, ast.Name) and target.id.endswith("_GATE")
 }
-if gate_names != {"STAGING_GATE", "PRODUCTION_GATE"}:
-    raise SystemExit("staging and production must publish distinct truthful capabilities")
+if gate_names != {"STAGING_GATE", "PRODUCTION_GATE", "ROLLBACK_GATE"}:
+    raise SystemExit("release and bounded rollback paths must publish distinct truthful capabilities")
 
 release = ast.get_source_segment(
     source,
     next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "release_gate"),
 )
 if not (
-    release.index("upload_audio(client, config, commit)")
-    < release.index("advance_pipeline(client, project_id, commit)")
+    release.index("upload_audio(")
+    < release.index("advance_pipeline(")
 ):
     raise SystemExit("authenticated media ingest no longer precedes the pipeline")
 staging_release = release[release.index("entitlement_id = staging_billing_entitlement("):]
@@ -249,6 +350,36 @@ if (
     or "staging_billing_entitlement(" in production_source
 ):
     raise SystemExit("production gate does not stop before billing/final render")
+
+rollback = ast.get_source_segment(
+    source,
+    next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "rollback_gate"),
+)
+for check in (
+    "verify_auth(client, config)",
+    'load_rollback_state(config, environment, commit)',
+    'head_and_ranges(client, state["contentPath"])',
+    'head_and_ranges(client, state["previewPath"])',
+    "verify_egress_deny(",
+    "print(ROLLBACK_GATE)",
+):
+    if check not in rollback:
+        raise SystemExit(f"bounded rollback gate omits live read-only evidence: {check}")
+if 'client.json("POST"' in rollback:
+    raise SystemExit("bounded rollback verification may not mutate billing/render state")
+
+auth = ast.get_source_segment(
+    source,
+    next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_auth"),
+)
+for check in (
+    'required(config, "GOOGLE_CLIENT_ID")',
+    '"/api/v1/auth/callback"',
+    '{"openid", "email", "profile"}',
+    'query.get("response_type") != ["code"]',
+):
+    if check not in auth:
+        raise SystemExit(f"OAuth login redirect is not bound to runtime config: {check}")
 
 upload = next(
     node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "upload_audio"
@@ -310,7 +441,7 @@ PY
 
 temporary_dir=$(mktemp -d)
 trap 'rm -rf "$temporary_dir"' EXIT
-if "$hook" staging /does/not/exist deadbeef >"$temporary_dir/stdout" 2>"$temporary_dir/stderr"; then
+if "$hook" staging /does/not/exist deadbeef 11111111111111111111111111111111 >"$temporary_dir/stdout" 2>"$temporary_dir/stderr"; then
   fail "invalid invocation unexpectedly succeeded"
 fi
 [ ! -s "$temporary_dir/stdout" ] || fail "failed hook wrote a capability to stdout"

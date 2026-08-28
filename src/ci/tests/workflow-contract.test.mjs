@@ -11,6 +11,7 @@ const staging = read(".github/workflows/stage-candidate.yml");
 const promotion = read(".github/workflows/promote-production.yml");
 const rollback = read(".github/workflows/rollback.yml");
 const candidateBuilder = read("src/ci/release-candidate.mjs");
+const stagingReceiptContract = read("src/ci/staging-receipt.mjs");
 const stagingSecretJob = staging.slice(staging.indexOf("  deploy-staging:"));
 const productionSecretJob = promotion.slice(promotion.indexOf("  deploy-production:"));
 
@@ -20,6 +21,11 @@ function assert(condition, message) {
     process.exit(1);
   }
 }
+
+assert(stagingSecretJob.includes("    timeout-minutes: 360"),
+  "staging job timeout must cover authenticated E2E plus the separately bounded soak");
+assert(productionSecretJob.includes("    timeout-minutes: 300"),
+  "production job timeout must cover the sequential worker E2E worst-case deadlines and compensation");
 
 function yamlNamedListItem(text, indentation, name) {
   const marker = `${" ".repeat(indentation)}- name: ${name}\n`;
@@ -262,8 +268,13 @@ assert(staging.includes('gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_
   "staging must download and attest the exact candidate from the selected CI run");
 assert(staging.includes("environment: staging") && staging.includes("group: hook2stream-staging") &&
   staging.includes("cancel-in-progress: false") && staging.includes("tags: tag:hook2stream-ci-staging") &&
-  staging.includes('"deploy $CANDIDATE_NAME"'),
+  staging.includes('"$host_operation $CANDIDATE_NAME"'),
   "staging must serialize forced-command deploys through the staging Environment and Tailscale ACL tag");
+for (const workflow of [staging, promotion]) {
+  assert(workflow.includes("deployment_phase:") && workflow.includes("          - prepare-pending") &&
+    workflow.includes("          - deploy-and-finalize") && workflow.includes("          - finalize-pending"),
+  "two-phase workflows must expose exactly the explicit cold prepare, deploy, and finalize choices");
+}
 assert(staging.includes('DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}') && staging.includes('ping: ${{ secrets.DEPLOY_HOST }}') &&
   staging.includes("^h2s-app-staging\\.[a-z0-9-]+\\.ts\\.net$") &&
   staging.includes('$1 != host || $2 != "ssh-ed25519" || NF != 3') &&
@@ -292,26 +303,37 @@ assert(staging.includes("Validate staging receipt authority before deployment") 
   "staging must fail early on signer mismatch, bind the private signer to its exact public authority, and self-verify the receipt");
 assert(stagingSecretJob.includes('MIN_ROLLBACK_RELEASE_SHA: ${{ vars.MIN_ROLLBACK_RELEASE_SHA }}') &&
   !staging.slice(0, staging.indexOf("  deploy-staging:")).includes("MIN_ROLLBACK_RELEASE_SHA:") &&
-  (staging.match(/--minimum-release-sha "\$MIN_ROLLBACK_RELEASE_SHA"/g) ?? []).length === 3 &&
+  (staging.match(/--minimum-release-sha "\$MIN_ROLLBACK_RELEASE_SHA"/g) ?? []).length === 4 &&
   staging.includes('compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}'),
   "staging must bind the Environment rollback floor to a floor-capable candidate, host result, soak, and signed receipt");
 assert(staging.includes("Run trusted 60-minute render and network soak") &&
   staging.includes('"soak $CANDIDATE_NAME"') && staging.includes("HOOK2STREAM_REMOTE_SOAK_RECEIPT=") &&
   staging.includes("staging-receipt.mjs validate-soak") && staging.includes("--soak-result remote-soak-result.json") &&
-  staging.indexOf('"deploy $CANDIDATE_NAME"') < staging.indexOf('"soak $CANDIDATE_NAME"') &&
+  staging.indexOf('"$host_operation $CANDIDATE_NAME"') < staging.indexOf('"soak $CANDIDATE_NAME"') &&
   staging.indexOf('"soak $CANDIDATE_NAME"') < staging.indexOf("Create successful staging receipt") &&
   !staging.includes("for minute in $(seq 1 60)"),
   "the signed staging receipt must require the separate trusted sustained render/network soak");
-const stagingDeployMutation = staging.slice(
-  staging.indexOf("Deploy candidate through forced SSH and run host smoke/E2E"),
-  staging.indexOf("Run trusted 60-minute render and network soak"),
-);
+const stagingDeployMutation = yamlNamedListItem(staging, 6, "Deploy candidate to a pending runtime through forced SSH");
+const stagingFinalizeMutation = yamlNamedListItem(staging, 6, "Finalize pending candidate with authenticated E2E");
 assert(stagingDeployMutation.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
   stagingDeployMutation.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
-    stagingDeployMutation.indexOf('"deploy $CANDIDATE_NAME"') &&
+    stagingDeployMutation.indexOf('"$host_operation $CANDIDATE_NAME"') &&
+  stagingDeployMutation.includes("host_operation=prepare") && stagingDeployMutation.includes("host_operation=deploy") &&
+  stagingDeployMutation.includes("HOOK2STREAM_PENDING_RECEIPT=") &&
+  stagingDeployMutation.includes("remote-deploy-result.mjs validate-pending") &&
   stagingDeployMutation.includes("remote-deploy-result.mjs validate \\") &&
   staging.indexOf("remote-deploy-result.mjs validate \\") < staging.indexOf('"soak $CANDIDATE_NAME"'),
   "staging must revalidate live main immediately before deploy and reject a malformed host/floor receipt before the soak");
+assert(stagingFinalizeMutation.includes("if: inputs.deployment_phase == 'finalize-pending'") &&
+  stagingFinalizeMutation.includes('"finalize $CANDIDATE_NAME" </dev/null') &&
+  stagingFinalizeMutation.includes("HOOK2STREAM_REMOTE_RECEIPT=") &&
+  !stagingFinalizeMutation.includes("HOOK2STREAM_PENDING_RECEIPT="),
+  "finalize-pending must call only the host finalize path and consume one final receipt");
+for (const stepName of ["Run trusted 60-minute render and network soak", "Create successful staging receipt",
+  "Sign staging receipt for production host verification", "Attest staging receipt", "Upload staging receipt"]) {
+  assert(yamlNamedListItem(staging, 6, stepName).includes("if: inputs.deployment_phase != 'prepare-pending'"),
+    `${stepName} must be unreachable for a pending-only deployment`);
+}
 const stagingSignStep = staging.slice(staging.indexOf("Sign staging receipt for production host verification"));
 assert(stagingSignStep.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
   stagingSignStep.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
@@ -385,7 +407,8 @@ assert(promotion.includes('ci_run_id="$(jq -r') && promotion.includes(".ciRunId"
   promotion.includes('--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"'),
   "production must resolve the source CI identity from the receipt and download its exact attested candidate");
 assert(promotion.includes("Source CI run:") && promotion.includes("source-ci-run-id:") &&
-  promotion.includes("--run-id \"$SOURCE_CI_RUN_ID\"") && promotion.includes("without rebuild"),
+  promotion.includes('--run-id "$SOURCE_CI_RUN_ID"') &&
+  promotion.includes('gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_NAME"'),
   "production must expose and revalidate the receipt-bound source CI run without rebuilding");
 assert(promotion.includes('test "$GITHUB_REF" = refs/heads/main') && promotion.includes("--jq .protected") &&
   promotion.includes("group: hook2stream-production") && promotion.includes("cancel-in-progress: false") &&
@@ -395,15 +418,31 @@ assert(!promotion.includes('| tee "$RUNNER_TEMP/deploy-output.log"'),
   "production must not mirror potentially sensitive forced-command output into CI logs");
 assert(promotion.includes('> "$RUNNER_TEMP/deploy-output.log" 2>&1') && promotion.includes("umask 077"),
   "production must keep forced-command output in a private runner-local file");
-const productionDeployMutation = promotion.slice(promotion.indexOf("Promote exact staging-tested candidate without rebuild"));
-assert(productionDeployMutation.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
-  productionDeployMutation.includes('compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}') &&
-  productionDeployMutation.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
-    productionDeployMutation.indexOf('"deploy $CANDIDATE_NAME"') &&
-  productionDeployMutation.includes('--minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"'),
+const productionPrepare = yamlNamedListItem(promotion, 6, "Deploy exact staging-tested candidate to pending production runtime");
+const productionFinalize = yamlNamedListItem(promotion, 6, "Finalize pending production candidate with authenticated E2E");
+assert(productionPrepare.includes('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') &&
+  productionPrepare.includes('compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}') &&
+  productionPrepare.indexOf('test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"') <
+    productionPrepare.indexOf('"$host_operation $CANDIDATE_NAME"') &&
+  productionPrepare.includes('--minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"'),
   "production must revalidate live main and the exact signed rollback floor immediately before SSH mutation");
+assert(productionPrepare.includes("host_operation=prepare") && productionPrepare.includes("host_operation=deploy") &&
+  productionPrepare.includes('"$host_operation $CANDIDATE_NAME"') &&
+  productionPrepare.includes("HOOK2STREAM_PENDING_RECEIPT=") &&
+  productionPrepare.includes("remote-deploy-result.mjs validate-pending"),
+  "production prepare-pending and deploy-and-finalize must each map to one host operation");
+assert(productionFinalize.includes("if: inputs.deployment_phase == 'finalize-pending'") &&
+  productionFinalize.includes('"finalize $CANDIDATE_NAME" </dev/null') &&
+  productionFinalize.includes("HOOK2STREAM_REMOTE_RECEIPT="),
+  "production finalize-pending must call only the host finalize path and consume one final receipt");
+assert(stagingReceiptContract.includes("/^[0-9a-f]{32}$/.test(remoteResult.e2eOperationId") &&
+  stagingReceiptContract.includes("validateRemoteResult(metadata, hashes, receipt.remoteResult") &&
+  (promotion.match(/staging-receipt\.mjs validate/g) ?? []).length === 2,
+  "production must validate a receipt whose nested staging E2E operation ID is exact 32-hex before and after approval");
 assert(rollback.includes("if: github.ref == 'refs/heads/main'"),
   "rollback must reject non-main workflow dispatches before environment secrets");
+assert(rollback.includes("    timeout-minutes: 180"),
+  "rollback must remain bounded while allowing its non-mutating authenticated reverification gate");
 assert(rollback.includes('ref: ${{ github.workflow_sha }}') &&
   rollback.includes('test "$GITHUB_SHA" = "$POLICY_SHA"') &&
   (rollback.match(/test "\$\(jq -r \.commit\.sha <<<"\$main_json"\)" = "\$POLICY_SHA"/g) ?? []).length >= 3,

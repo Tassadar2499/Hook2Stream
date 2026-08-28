@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -37,10 +38,12 @@ from typing import Any, BinaryIO, Callable
 
 STAGING_GATE = "HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-test-idempotency,egress-deny"
 PRODUCTION_GATE = "HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,egress-deny"
+ROLLBACK_GATE = "HOOK2STREAM_ROLLBACK_GATE=oauth,h2se-range,workers-state,preview-export,egress-deny"
 SOAK_SCHEMA = "hook2stream-soak-hook-result-v1"
 STATE_SCHEMA = "hook2stream-authenticated-e2e-state-v1"
 BASELINE_SCHEMA = "hook2stream-soak-baseline-v1"
 CHECKPOINT_SCHEMA = "hook2stream-authenticated-e2e-checkpoint-v1"
+ROLLBACK_STATE_SCHEMA = "hook2stream-authenticated-e2e-rollback-state-v1"
 HOST_ROOT = Path("/srv/hook2stream")
 MAX_JSON = 4 * 1024 * 1024
 MAX_EXPORT = 2 * 1024 * 1024 * 1024
@@ -48,6 +51,10 @@ MAX_EXPORT = 2 * 1024 * 1024 * 1024
 
 class GateError(RuntimeError):
     pass
+
+
+def termination_signal(signum: int, _frame: Any) -> None:
+    raise GateError(f"received termination signal {signum}; cleaning up E2E resources")
 
 
 def fail(message: str) -> None:
@@ -314,10 +321,12 @@ def safe_uuid(value: Any, label: str) -> str:
         raise GateError(f"{label} is not a UUID") from exc
 
 
-def idempotency(prefix: str, commit: str) -> str:
+def idempotency(prefix: str, commit: str, operation_id: str) -> str:
     if not re.fullmatch(r"[a-z0-9-]{1,64}", prefix):
         raise GateError("idempotency operation is invalid")
-    return f"deploy-e2e:{prefix}:{commit}"
+    if not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        raise GateError("E2E operation ID is invalid")
+    return f"deploy-e2e:{prefix}:{commit}:{operation_id}"
 
 
 def wait_json(
@@ -384,12 +393,26 @@ def verify_auth(client: ApiClient, config: dict[str, str]) -> tuple[str, str]:
     location = login.headers.get("Location", "")
     parsed = urllib.parse.urlsplit(location)
     query = urllib.parse.parse_qs(parsed.query)
+    expected_client_id = required(config, "GOOGLE_CLIENT_ID")
+    expected_redirect = (
+        required(config, "PUBLIC_ORIGIN").rstrip("/")
+        + "/api/v1/auth/callback"
+    )
+    scopes = query.get("scope", [""])
     if (
         parsed.scheme != "https"
-        or parsed.hostname != "accounts.google.com"
-        or not parsed.path.startswith("/o/oauth2/")
+        or parsed.netloc != "accounts.google.com"
+        or parsed.path != "/o/oauth2/v2/auth"
+        or query.get("client_id") != [expected_client_id]
+        or query.get("redirect_uri") != [expected_redirect]
         or query.get("response_type") != ["code"]
-        or not query.get("state")
+        or len(scopes) != 1
+        or set(scopes[0].split()) != {"openid", "email", "profile"}
+        or query.get("access_type") != ["online"]
+        or query.get("include_granted_scopes") != ["true"]
+        or query.get("prompt") != ["consent"]
+        or len(query.get("state", [])) != 1
+        or len(query["state"][0]) < 32
     ):
         raise GateError("Google OAuth login redirect is not configured safely")
     return workspace_id, expected_email
@@ -414,7 +437,12 @@ def head_and_ranges(client: ApiClient, path: str, original: Path | None = None) 
         raise GateError("multi-range rejection omitted the plaintext length")
 
 
-def upload_audio(client: ApiClient, config: dict[str, str], commit: str) -> tuple[str, str, str]:
+def upload_audio(
+    client: ApiClient,
+    config: dict[str, str],
+    commit: str,
+    operation_id: str,
+) -> tuple[str, str, str]:
     media = private_e2e_file(config, "HOOK2STREAM_E2E_MP3_FILE", 25 * 1024 * 1024 - 1, "licensed E2E MP3")
     size = media.stat().st_size
     if size < 1024 or size >= 25 * 1024 * 1024:
@@ -431,7 +459,7 @@ def upload_audio(client: ApiClient, config: dict[str, str], commit: str) -> tupl
             "confirmsContentRights": True,
             "allowsExternalAiProcessing": True,
         },
-        headers={"Idempotency-Key": idempotency("audio", commit)},
+        headers={"Idempotency-Key": idempotency("audio", commit, operation_id)},
     )
     project_id = safe_uuid(create.get("project", {}).get("id"), "project ID")
     session_id = safe_uuid(create.get("upload", {}).get("sessionId"), "upload session ID")
@@ -439,13 +467,42 @@ def upload_audio(client: ApiClient, config: dict[str, str], commit: str) -> tupl
     if create.get("upload", {}).get("partCount") != 1:
         raise GateError("bounded E2E MP3 unexpectedly reserved multiple parts")
     upload_path = f"/api/v1/uploads/{session_id}/parts/1"
-    first, _ = client.json("PUT", upload_path, {200}, data_file=media, timeout=600)
-    second, _ = client.json("PUT", upload_path, {200}, data_file=media, timeout=600)
-    if first != second or first.get("sha256") != local_hash or first.get("plaintextLength") != size:
-        raise GateError("encrypted upload retry was not idempotent")
-    resumed, _ = client.json("GET", f"/api/v1/uploads/{session_id}", {200})
-    if resumed.get("completedParts") != [first]:
-        raise GateError("durable upload receipt did not survive resume")
+    resume_response = client.request(
+        "GET", f"/api/v1/uploads/{session_id}", {200, 409}
+    )
+    if resume_response.status == 200:
+        resumed = parsed_json(resume_response)
+        completed_parts = resumed.get("completedParts")
+        if completed_parts == []:
+            first, _ = client.json(
+                "PUT", upload_path, {200}, data_file=media, timeout=600
+            )
+            second, _ = client.json(
+                "PUT", upload_path, {200}, data_file=media, timeout=600
+            )
+            if first != second:
+                raise GateError("encrypted upload retry was not idempotent")
+        elif isinstance(completed_parts, list) and len(completed_parts) == 1:
+            first = completed_parts[0]
+            second, _ = client.json(
+                "PUT", upload_path, {200}, data_file=media, timeout=600
+            )
+            if first != second:
+                raise GateError("resumed upload part differs from its durable receipt")
+        else:
+            raise GateError("durable upload session has an unexpected part set")
+        if first.get("sha256") != local_hash or first.get("plaintextLength") != size:
+            raise GateError("durable upload receipt differs from the licensed fixture")
+        resumed_again, _ = client.json(
+            "GET", f"/api/v1/uploads/{session_id}", {200}
+        )
+        if resumed_again.get("completedParts") != [first]:
+            raise GateError("durable upload receipt did not survive resume")
+    # A 409 from resume is accepted only provisionally: Completed, Aborted and
+    # Expired are intentionally indistinguishable here. The idempotent complete
+    # command below succeeds only for the exact Completed session and therefore
+    # fails closed for the other terminal states. Plaintext range verification
+    # then binds the completed object back to the local licensed fixture.
     completed, _ = client.json(
         "POST", f"/api/v1/uploads/{session_id}/complete", {202}, payload={"parts": None}
     )
@@ -486,7 +543,12 @@ def release_mutation(
     raise GateError("release mutation could not obtain a stable ETag")
 
 
-def advance_pipeline(client: ApiClient, project_id: str, commit: str) -> tuple[list[str], str]:
+def advance_pipeline(
+    client: ApiClient,
+    project_id: str,
+    commit: str,
+    operation_id: str,
+) -> tuple[list[str], str]:
     # A release-scoped retry must send byte-for-byte stable setup inputs even
     # after midnight. The API only requires an upcoming date; this far-future
     # QA date is deliberately unrelated to a customer schedule.
@@ -556,7 +618,7 @@ def advance_pipeline(client: ApiClient, project_id: str, commit: str) -> tuple[l
                 "isInstrumental": False,
                 "phrases": phrases,
             },
-            {"Idempotency-Key": idempotency("transcript", commit)},
+            {"Idempotency-Key": idempotency("transcript", commit, operation_id)},
         )
         client.json(
             "POST",
@@ -565,7 +627,7 @@ def advance_pipeline(client: ApiClient, project_id: str, commit: str) -> tuple[l
             payload={"revisionId": safe_uuid(revised.get("revisionId"), "transcript revision ID")},
             headers={
                 "If-Match": etag(revised_response),
-                "Idempotency-Key": idempotency("transcript-approval", commit),
+                "Idempotency-Key": idempotency("transcript-approval", commit, operation_id),
             },
         )
 
@@ -577,7 +639,7 @@ def advance_pipeline(client: ApiClient, project_id: str, commit: str) -> tuple[l
             artwork_path,
             {202, 409},
             payload={"prompt": "Bold geometric night sky, high contrast, no text.", "style": "editorial"},
-            headers={"Idempotency-Key": idempotency("artwork", commit)},
+            headers={"Idempotency-Key": idempotency("artwork", commit, operation_id)},
         )
         if generated.status not in {202, 409}:
             raise GateError("artwork generation was not accepted")
@@ -613,7 +675,7 @@ def advance_pipeline(client: ApiClient, project_id: str, commit: str) -> tuple[l
             },
             headers={
                 "If-Match": etag(artwork_response),
-                "Idempotency-Key": idempotency("selection", commit),
+                "Idempotency-Key": idempotency("selection", commit, operation_id),
             },
         )
         client.json(
@@ -623,7 +685,7 @@ def advance_pipeline(client: ApiClient, project_id: str, commit: str) -> tuple[l
             payload={"revisionId": pack_id},
             headers={
                 "If-Match": etag(selection_response),
-                "Idempotency-Key": idempotency("cover-approval", commit),
+                "Idempotency-Key": idempotency("cover-approval", commit, operation_id),
             },
         )
 
@@ -687,6 +749,7 @@ def staging_billing_entitlement(
     project_id: str,
     item_ids: list[str],
     commit: str,
+    operation_id: str,
 ) -> str:
     stripe_mode = required(config, "HOOK2STREAM_E2E_STRIPE_MODE")
     if stripe_mode != "test":
@@ -695,7 +758,7 @@ def staging_billing_entitlement(
     if not secret_key.startswith("sk_test_"):
         raise GateError("staging Stripe API key is not a test key")
 
-    checkout_key = idempotency("checkout", commit)
+    checkout_key = idempotency("checkout", commit, operation_id)
     payload = {
         "productCode": "release_pack",
         "projectId": project_id,
@@ -738,7 +801,9 @@ def staging_billing_entitlement(
     candidates = exact_entitlements()
     if not candidates:
         timestamp = int(time.time())
-        marker = hashlib.sha256(f"{commit}:stripe-test".encode()).hexdigest()[:32]
+        marker = hashlib.sha256(
+            f"{commit}:{operation_id}:stripe-test".encode()
+        ).hexdigest()[:32]
         event = {
             "id": f"evt_h2s_e2e_{marker}",
             "type": "checkout.session.completed",
@@ -818,6 +883,7 @@ def render_and_export(
     entitlement_id: str,
     item_ids: list[str],
     commit: str,
+    operation_id: str,
     work: Path,
 ) -> tuple[str, str, int]:
     started = time.monotonic()
@@ -826,7 +892,11 @@ def render_and_export(
         f"/api/v1/releases/{project_id}/renders",
         {202},
         payload={"entitlementId": entitlement_id, "itemIds": item_ids, "kind": "initial"},
-        headers={"Idempotency-Key": idempotency("render-initial", commit)},
+        headers={
+            "Idempotency-Key": idempotency(
+                "render-initial", commit, operation_id
+            )
+        },
         timeout=120,
     )
     batch_id = safe_uuid(batch.get("batchId"), "render batch ID")
@@ -1111,6 +1181,67 @@ def remove_soak_container(name: str, image: str, commit: str) -> None:
         raise GateError("isolated synthetic FFmpeg container cleanup failed")
 
 
+def cleanup_stale_soak_containers() -> None:
+    listed = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "--all",
+            "--filter",
+            "label=com.hook2stream.role=authenticated-e2e-soak",
+            "--format",
+            "{{.ID}}",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    ids = listed.stdout.splitlines()
+    if listed.returncode != 0 or any(
+        not re.fullmatch(r"[0-9a-f]{12,64}", value) for value in ids
+    ):
+        raise GateError("stale synthetic FFmpeg container inventory is unsafe")
+    for container_id in ids:
+        inspected = subprocess.run(
+            ["docker", "inspect", container_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        try:
+            value = json.loads(inspected.stdout)[0]
+            labels = value["Config"]["Labels"]
+            name = value["Name"].lstrip("/")
+            image = value["Config"]["Image"]
+            commit = labels["com.hook2stream.commit"]
+            trusted = (
+                inspected.returncode == 0
+                and labels.get("com.hook2stream.role")
+                == "authenticated-e2e-soak"
+                and re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+                and re.fullmatch(
+                    rf"hook2stream-e2e-soak-{commit[:12]}-[0-9a-f]{{12}}", name
+                )
+                is not None
+                and re.fullmatch(
+                    r"[a-z0-9./_-]+@sha256:[0-9a-f]{64}", image
+                )
+                is not None
+            )
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            raise GateError("stale synthetic FFmpeg container identity is unreadable") from exc
+        if not trusted:
+            raise GateError("untrusted container uses the authenticated E2E soak label")
+        # Reuse the full isolation/identity validator before destructive cleanup.
+        remove_soak_container(name, image, commit)
+
+
 def container_cpu_stat(pid: int) -> tuple[int, int]:
     try:
         entries = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii").splitlines()
@@ -1218,6 +1349,7 @@ def checkpoint(
     work_root: Path,
     environment: str,
     commit: str,
+    operation_id: str,
     phase: str,
     evidence: dict[str, Any],
 ) -> None:
@@ -1233,6 +1365,7 @@ def checkpoint(
             "schema": CHECKPOINT_SCHEMA,
             "environment": environment,
             "commit": commit,
+            "operationId": operation_id,
             "phase": phase,
             "evidence": evidence,
             "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -1261,17 +1394,32 @@ def prepare(config: dict[str, str], environment: str) -> tuple[ApiClient, Path, 
     return client, work_root, run
 
 
-def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
+def release_gate(
+    environment: str,
+    config: dict[str, str],
+    commit: str,
+    operation_id: str,
+) -> None:
     client, work_root, run = prepare(config, environment)
     try:
         workspace_id, _ = verify_auth(client, config)
-        checkpoint(work_root, environment, commit, "authenticated", {"workspaceId": workspace_id})
-
-        project_id, audio_asset_id, content_path = upload_audio(client, config, commit)
         checkpoint(
             work_root,
             environment,
             commit,
+            operation_id,
+            "authenticated",
+            {"workspaceId": workspace_id},
+        )
+
+        project_id, audio_asset_id, content_path = upload_audio(
+            client, config, commit, operation_id
+        )
+        checkpoint(
+            work_root,
+            environment,
+            commit,
+            operation_id,
             "uploaded",
             {
                 "workspaceId": workspace_id,
@@ -1280,11 +1428,14 @@ def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
                 "contentPath": content_path,
             },
         )
-        item_ids, preview_path = advance_pipeline(client, project_id, commit)
+        item_ids, preview_path = advance_pipeline(
+            client, project_id, commit, operation_id
+        )
         checkpoint(
             work_root,
             environment,
             commit,
+            operation_id,
             "pipeline",
             {
                 "workspaceId": workspace_id,
@@ -1302,6 +1453,7 @@ def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
                 work_root,
                 environment,
                 commit,
+                operation_id,
                 "verified",
                 {
                     "workspaceId": workspace_id,
@@ -1312,16 +1464,42 @@ def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
                     "itemIds": item_ids,
                 },
             )
+            atomic_state(
+                state_directory(work_root)
+                / f"{environment}-{commit}.rollback.json",
+                {
+                    "schema": ROLLBACK_STATE_SCHEMA,
+                    "environment": environment,
+                    "commit": commit,
+                    "operationId": operation_id,
+                    "projectId": project_id,
+                    "audioAssetId": audio_asset_id,
+                    "contentPath": content_path,
+                    "previewPath": preview_path,
+                    "batchId": None,
+                    "exportPath": None,
+                    "completedAt": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                },
+            )
             print(PRODUCTION_GATE)
             return
 
         entitlement_id = staging_billing_entitlement(
-            client, config, workspace_id, project_id, item_ids, commit
+            client,
+            config,
+            workspace_id,
+            project_id,
+            item_ids,
+            commit,
+            operation_id,
         )
         checkpoint(
             work_root,
             environment,
             commit,
+            operation_id,
             "entitled",
             {
                 "workspaceId": workspace_id,
@@ -1337,12 +1515,14 @@ def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
             entitlement_id,
             item_ids,
             commit,
+            operation_id,
             run,
         )
         checkpoint(
             work_root,
             environment,
             commit,
+            operation_id,
             "rendered",
             {
                 "workspaceId": workspace_id,
@@ -1359,6 +1539,7 @@ def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
                 "schema": STATE_SCHEMA,
                 "environment": environment,
                 "commit": commit,
+                "operationId": operation_id,
                 "projectId": project_id,
                 "audioAssetId": audio_asset_id,
                 "contentPath": content_path,
@@ -1369,6 +1550,24 @@ def release_gate(environment: str, config: dict[str, str], commit: str) -> None:
                 "exportPath": export_path,
                 "initialRenderSeconds": initial_render_seconds,
                 "completedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+        )
+        atomic_state(
+            state_directory(work_root) / f"{environment}-{commit}.rollback.json",
+            {
+                "schema": ROLLBACK_STATE_SCHEMA,
+                "environment": environment,
+                "commit": commit,
+                "operationId": operation_id,
+                "projectId": project_id,
+                "audioAssetId": audio_asset_id,
+                "contentPath": content_path,
+                "previewPath": preview_path,
+                "batchId": batch_id,
+                "exportPath": export_path,
+                "completedAt": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
             },
         )
         print(STAGING_GATE)
@@ -1402,12 +1601,14 @@ def load_soak_state(config: dict[str, str], environment: str, commit: str) -> di
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise GateError("E2E release state is invalid") from exc
     expected_keys = {
-        "schema", "environment", "commit", "projectId", "audioAssetId", "contentPath",
+        "schema", "environment", "commit", "operationId", "projectId", "audioAssetId", "contentPath",
         "previewPath", "entitlementId", "itemIds", "batchId", "exportPath",
         "initialRenderSeconds", "completedAt",
     }
     if not isinstance(value, dict) or set(value) != expected_keys or value.get("schema") != STATE_SCHEMA or value.get("environment") != environment or value.get("commit") != commit:
         raise GateError("E2E release state is not bound to this release")
+    if not re.fullmatch(r"[0-9a-f]{32}", str(value.get("operationId", ""))):
+        raise GateError("E2E release state has an invalid operation identity")
     if not isinstance(value.get("itemIds"), list) or len(value["itemIds"]) != 18:
         raise GateError("E2E release state does not bind 18 campaign items")
     for name in ("projectId", "audioAssetId", "entitlementId", "batchId"):
@@ -1415,6 +1616,106 @@ def load_soak_state(config: dict[str, str], environment: str, commit: str) -> di
     if not isinstance(value.get("initialRenderSeconds"), int) or value["initialRenderSeconds"] <= 0:
         raise GateError("E2E release state lacks measured initial render duration")
     return value
+
+
+def load_rollback_state(
+    config: dict[str, str], environment: str, commit: str
+) -> dict[str, Any]:
+    work_root = Path(required(config, "HOOK2STREAM_E2E_WORK_DIR"))
+    path = trusted_file(
+        str(work_root / "state" / f"{environment}-{commit}.rollback.json"),
+        {0o600},
+        128 * 1024,
+        "E2E rollback state",
+    )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GateError("E2E rollback state is invalid") from exc
+    expected = {
+        "schema",
+        "environment",
+        "commit",
+        "operationId",
+        "projectId",
+        "audioAssetId",
+        "contentPath",
+        "previewPath",
+        "batchId",
+        "exportPath",
+        "completedAt",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value.get("schema") != ROLLBACK_STATE_SCHEMA
+        or value.get("environment") != environment
+        or value.get("commit") != commit
+        or not re.fullmatch(r"[0-9a-f]{32}", str(value.get("operationId", "")))
+    ):
+        raise GateError("E2E rollback state is not bound to this successful release")
+    safe_uuid(value.get("projectId"), "rollback project ID")
+    safe_uuid(value.get("audioAssetId"), "rollback audio asset ID")
+    for name in ("contentPath", "previewPath"):
+        if not isinstance(value.get(name), str) or not value[name].startswith(
+            "/api/v1/releases/"
+        ):
+            raise GateError("E2E rollback state contains an unsafe content path")
+    if environment == "staging":
+        safe_uuid(value.get("batchId"), "rollback render batch ID")
+        if not isinstance(value.get("exportPath"), str) or not value[
+            "exportPath"
+        ].startswith("/api/v1/releases/"):
+            raise GateError("staging rollback state lacks its verified export")
+    elif value.get("batchId") is not None or value.get("exportPath") is not None:
+        raise GateError("production rollback state unexpectedly contains render evidence")
+    return value
+
+
+def rollback_gate(environment: str, config: dict[str, str], commit: str) -> None:
+    client, _, run = prepare(config, environment)
+    try:
+        workspace_id, _ = verify_auth(client, config)
+        state = load_rollback_state(config, environment, commit)
+        head_and_ranges(client, state["contentPath"])
+        head_and_ranges(client, state["previewPath"])
+        release, _ = get_release(client, state["projectId"])
+        if safe_uuid(release.get("id"), "rollback release ID") != state["projectId"]:
+            raise GateError("rollback release state belongs to another project")
+        workflow, _ = client.json(
+            "GET", f"/api/v1/releases/{state['projectId']}/workflow", {200}
+        )
+        lanes = {
+            lane.get("lane"): lane.get("state")
+            for lane in workflow.get("lanes", [])
+            if isinstance(lane, dict)
+        }
+        required_lanes = {
+            "audio",
+            "analysis",
+            "transcript",
+            "artwork",
+            "hooks",
+            "campaign",
+            "preview",
+        }
+        if any(lanes.get(lane) != "succeeded" for lane in required_lanes):
+            raise GateError("rollback workflow evidence is no longer successful")
+        if environment == "staging":
+            batch, _ = client.json(
+                "GET",
+                f"/api/v1/releases/{state['projectId']}/renders/{state['batchId']}",
+                {200},
+            )
+            if batch.get("state") != "succeeded" or len(batch.get("items", [])) != 18:
+                raise GateError("rollback render evidence no longer contains 18 successes")
+            head_and_ranges(client, state["exportPath"])
+        verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"))
+        if not workspace_id:
+            raise GateError("rollback account workspace is unavailable")
+        print(ROLLBACK_GATE)
+    finally:
+        shutil.rmtree(run, ignore_errors=True)
 
 
 def load_baseline(config: dict[str, str]) -> dict[str, Any]:
@@ -1476,6 +1777,7 @@ def soak_gate(environment: str, config: dict[str, str], commit: str) -> None:
         if not render_running or render_oom:
             raise GateError("render worker is unhealthy before soak")
         soak_image = docker_container_image(render_container)
+        cleanup_stale_soak_containers()
         soak_name = create_soak_container(soak_image, commit)
         running, oom, _, pid = soak_container_state(soak_name, soak_image, commit)
         if running or oom or pid != 0:
@@ -1601,13 +1903,18 @@ def soak_gate(environment: str, config: dict[str, str], commit: str) -> None:
 
 
 def main(argv: list[str]) -> None:
-    if len(argv) not in {4, 5} or (len(argv) == 5 and argv[4] != "soak-60m"):
-        fail("usage: authenticated-e2e.sh staging|production ENV_FILE COMMIT_SHA [soak-60m]")
+    if len(argv) != 5:
+        fail(
+            "usage: authenticated-e2e.sh staging|production ENV_FILE COMMIT_SHA "
+            "OPERATION_ID|rollback-verify|soak-60m"
+        )
     environment, env_path, commit = argv[1:4]
     if environment not in {"staging", "production"}:
         fail("invalid environment")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         fail("invalid commit")
+    for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(handled_signal, termination_signal)
     try:
         environment_path = trusted_file(
             env_path, {0o600}, 4 * 1024 * 1024, "release environment file"
@@ -1619,10 +1926,15 @@ def main(argv: list[str]) -> None:
         config = parse_env_file(environment_path)
         if config.get("DEPLOYMENT_ENVIRONMENT") != environment:
             raise GateError("environment file does not match the requested environment")
-        if len(argv) == 5:
+        if argv[4] == "soak-60m":
             soak_gate(environment, config, commit)
+        elif argv[4] == "rollback-verify":
+            rollback_gate(environment, config, commit)
         else:
-            release_gate(environment, config, commit)
+            operation_id = argv[4]
+            if not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+                raise GateError("E2E operation ID must be 32 lowercase hexadecimal characters")
+            release_gate(environment, config, commit, operation_id)
     except GateError as exc:
         fail(str(exc))
 

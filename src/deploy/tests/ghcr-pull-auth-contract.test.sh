@@ -240,7 +240,9 @@ grep -Fq 'deployment_validate_ghcr_pull_auth' "$deploy" \
     || fail_test "forward deploy does not validate GHCR auth before pull"
 grep -Fq 'docker --config "$DOCKER_CONFIG" image pull' "$rollback" \
     || fail_test "rollback pull does not select the reviewed Docker config"
-pull_line=$(grep -n 'docker --config "$DOCKER_CONFIG" image pull' "$rollback" | cut -d: -f1)
+[ "$(grep -Fc 'docker --config "$DOCKER_CONFIG" image pull' "$rollback")" -eq 2 ] \
+    || fail_test "rollback must authenticate and pre-pull both target and compensation images"
+pull_line=$(grep -n 'docker --config "$DOCKER_CONFIG" image pull' "$rollback" | cut -d: -f1 | tail -n 1)
 publish_line=$(grep -n 'mv -f "$active_environment_tmp" "$active_environment_file"' "$rollback" | cut -d: -f1)
 [ -n "$pull_line" ] && [ -n "$publish_line" ] && [ "$pull_line" -lt "$publish_line" ] \
     || fail_test "rollback publishes its active environment before authenticated pulls finish"

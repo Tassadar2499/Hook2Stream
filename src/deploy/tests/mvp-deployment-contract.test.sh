@@ -100,6 +100,47 @@ grep -Fq 'forced-command.lock' "$wrapper" && grep -Fq 'flock -n 8' "$wrapper" \
   || fail "outer forced-command concurrency lock is missing"
 grep -Fq 'exactly one DEPLOYMENT_ENVIRONMENT' "$wrapper" \
   || fail "production approval environment selection is not duplicate-safe"
+for transactional_contract in \
+  'first deployment requires explicit prepare followed by operator OAuth bootstrap and finalize' \
+  'transactionMode:$transactionMode' \
+  'finalize-transaction:immediate-deploy' \
+  'publish_compensated_state' \
+  'recovery-required.json' \
+  'public Caddy could not be proven stopped' \
+  'rollback-verify' \
+  'recover_failed_rollback' \
+  'rollout_recovery_interrupted' \
+  'runtime-ready-publication-failed' \
+  'compensation_interrupted' \
+  'rollback_recovery_interrupted' \
+  'bounded-e2e-reverification' \
+  'rollback is forbidden while a forward deployment is pending'; do
+  grep -Fq "$transactional_contract" "$wrapper" \
+    || fail "forced command omits transactional boundary: $transactional_contract"
+done
+grep -Fq 'docker stop --time 10 "$recovery_container"' "$wrapper" \
+  && grep -Fq 'docker kill "$recovery_container"' "$wrapper" \
+  || fail "recovery-required path does not fail closed by stopping exact owned Caddy"
+grep -Fq '"$environment" "$active_rollback_env" "$identifier" rollback-verify' "$wrapper" \
+  || fail "rollback does not invoke the mandatory fourth-argument bounded gate"
+if grep -Fq '"$environment" "$active_rollback_env" "$identifier"' "$wrapper" \
+   && ! grep -Fq '"$environment" "$active_rollback_env" "$identifier" rollback-verify' "$wrapper"; then
+  fail "rollback retained the obsolete three-argument authenticated hook"
+fi
+grep -Fq 'infrastructure_ledger=$HOOK2STREAM_RELEASE_STATE_DIR/infrastructure' "$wrapper" \
+  && grep -Fq 'active compensated infrastructure ledger is incomplete or unsafe' "$wrapper" \
+  && grep -Fq 'same-SHA compensated infrastructure ledger is stale or unsafe' "$wrapper" \
+  && grep -Fq '"$HOOK2STREAM_RELEASE_STATE_DIR/infrastructure/$commit.env"' "$wrapper" \
+  && grep -Fq 'install -m 0600 "$compensated_active_env"' "$wrapper" \
+  || fail "rollback cannot resolve the exact compensated infrastructure ledger"
+for rollback_transaction in \
+  'rollback_exit()' \
+  'restore_application()' \
+  'mutation_started=true' \
+  'mv -f "$active_environment_tmp" "$active_environment_file"'; do
+  grep -Fq "$rollback_transaction" "$rollback" \
+    || fail "application rollback omits reversible transaction boundary: $rollback_transaction"
+done
 for soak_contract in \
   'soak accepts exactly one candidate ID' \
   'soak is allowed only on staging' \

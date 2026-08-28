@@ -46,14 +46,9 @@ sets Docker's data-root to `/srv/hook2stream/docker`, creates the encrypted
 release/config/log/scratch layout, and creates and activates a fully allocated
 4 GiB swap file below the encrypted mount. It does not start Docker.
 
-After provisioning secrets and the reviewed host policies, validate and then
-start Docker explicitly:
-
-```sh
-sudo ./scripts/validate-host.sh app staging   # staging host only
-sudo ./scripts/validate-host.sh app production # production host only
-sudo systemctl start docker.service
-```
+After provisioning secrets and the reviewed host policies, install the
+root-owned release control plane below before starting Docker or validating the
+host. Do not run a checkout-local validator as root.
 
 ## Installed release control plane and GHCR identity
 
@@ -62,6 +57,8 @@ never run its rollback program from a release candidate directory:
 
 ```sh
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/hook2stream/lib
+sudo install -o root -g root -m 0555 scripts/validate-host.sh \
+  /usr/local/libexec/hook2stream/validate-host.sh
 sudo install -o root -g root -m 0555 scripts/deploy-forced-command.sh \
   /usr/local/libexec/hook2stream/deploy-forced-command.sh
 sudo install -o root -g root -m 0555 scripts/rollback-application.sh \
@@ -70,8 +67,21 @@ sudo install -o root -g root -m 0555 scripts/validate-candidate.sh \
   /usr/local/libexec/hook2stream/validate-candidate.sh
 sudo install -o root -g root -m 0555 scripts/lib/forced-command-trust.sh \
   /usr/local/libexec/hook2stream/lib/forced-command-trust.sh
+sudo install -o root -g root -m 0555 scripts/lib/host-validation-common.sh \
+  /usr/local/libexec/hook2stream/lib/host-validation-common.sh
 sudo install -o root -g root -m 0555 scripts/deploy-forced-launcher.sh \
   /usr/local/sbin/hook2stream-deploy-launcher
+```
+
+Run acceptance from a root shell through the installed root-owned copy; never
+source validator libraries from an operator-writable checkout. Start the
+mount-guarded Docker daemon first because validation inspects its root and
+socket:
+
+```sh
+systemctl start docker.service
+/usr/local/libexec/hook2stream/validate-host.sh app staging
+/usr/local/libexec/hook2stream/validate-host.sh app production
 ```
 
 The launcher and host validator require every installed file above, including
@@ -121,6 +131,14 @@ non-symlink `root:root` files with mode `0400` or `0600`:
 - a licensed MP3 fixture between 1 KiB and 25 MiB;
 - on staging, a reviewed same-SKU soak baseline JSON.
 
+The expected-email, MP3, and staging baseline files can and must be provisioned
+before the first release. The OAuth cookie jar is the deliberate cold-bootstrap
+exception: it cannot be minted until the application origin is running. On a
+new host, install it only during the `prepare-pending` operator handoff described
+below. On an established host, refresh it before an ordinary deployment if it
+will expire during the gate. Never create a dummy cookie file merely to satisfy
+a path check.
+
 The hook reads their paths from the matching environment file. It checks the
 OAuth cookie against `/api/v1/auth/session`, refreshes CSRF only in memory, and
 never places Cookie, CSRF, Bearer, Stripe or media-secret values in argv,
@@ -157,18 +175,83 @@ immutable digest's staging receipt supplies Stripe test, 18-render/ZIP and soak
 evidence. Controlled live payment, render/download and refund remain explicit
 post-deploy operator procedures.
 
+## First release and normal deployment transactions
+
+Use the workflow `deployment_phase=prepare-pending` exactly once on a cold host
+with no `/srv/hook2stream/release-state/last-successful.env`. The forced command
+accepts `prepare <candidate-id>`, brings up the candidate runtime, and writes
+the root-only `release-state/pending-deploy.json`. The returned pending receipt
+is evidence only that this exact runtime is ready for operator onboarding; it is
+not a successful deployment receipt and cannot authorize soak or promotion.
+`prepare` is rejected as soon as a successful release exists.
+
+While that exact pending runtime remains active, the operator must:
+
+1. complete Google OAuth with the dedicated pre-invited QA account at the
+   environment's public origin;
+2. verify or create the intended QA workspace without enabling public signup;
+3. export the short-lived Mozilla/Netscape cookie jar without printing it, and
+   install it atomically at the configured path as a non-symlink root-owned
+   `0400` or `0600` file; and
+4. dispatch the same source run and full candidate with
+   `deployment_phase=finalize-pending`.
+
+The resulting `finalize <candidate-id>` command does not accept new candidate
+bytes. It revalidates the persisted bundle, environment file, running image
+digests, production approval material where applicable, and the original
+32-hex E2E operation identity before authenticated E2E. If cold E2E fails, fix
+only the onboarding/input defect and retry `finalize-pending` for that exact
+candidate. Selecting another candidate while one is pending is intentionally
+rejected.
+
+After the first release, always use the default
+`deployment_phase=deploy-and-finalize`. The host `deploy <candidate-id>` keeps
+candidate install, runtime transition, authenticated E2E, digest verification,
+and successful-state publication inside one `flock`-serialized transaction;
+there is no operator OAuth pause. The operation ID remains stable for exact
+retries of that full artifact but differs for a new run/attempt even when its
+commit SHA is identical. The pending marker also binds the environment,
+previous successful SHA, release-images, bundle and derived environment hashes,
+and all production staging-receipt authority hashes, so a drifted replay fails
+closed. If SSH output is lost after success, an exact retry may return the
+stored result only after rechecking live health, the active infrastructure
+ledger, successful environment, and running digests.
+
+For a failed normal deployment, the control plane restores the previous
+application images when it can prove a protocol-v2 target. Database migrations
+are never reversed, and candidate infrastructure images remain active; the
+ledger is atomically rewritten to describe that candidate infrastructure plus
+the restored application release. A compensation interruption, failed digest
+check, or failed ledger publication writes
+`/srv/hook2stream/release-state/recovery-required.json` and stops the owned
+Caddy container when possible. The existence of that root-owned marker blocks
+all automated deploy, finalize, soak, and rollback commands. Inspect the marker,
+container digests, database, `last-successful.env`, and
+`active-infrastructure-release.json`; reconcile them through the provider
+console or verified operator path before manually clearing the marker. Do not
+delete it simply to make automation continue.
+
+Application rollback uses the installed root-owned orchestrator and the active
+infrastructure bundle, never code from the target candidate. After switching
+the app images it runs the bounded, non-mutating `rollback-verify` gate, which
+checks the exact OAuth account, H2SE single-range reads, worker state,
+preview/export reads, and denied egress without creating uploads, billing
+events, renders, or migrations. Failure or interruption restores the original
+application release; inability to prove that reversal enters the same
+recovery-required/closed-ingress state.
+
 ## Every reboot
 
 Docker is guarded and cannot start while `/srv/hook2stream` is absent. Use the
 verified operator access path or the provider VNC recovery console, then run:
 
 ```sh
-sudo ./scripts/bootstrap-encrypted-host.sh unlock app staging
+./scripts/bootstrap-encrypted-host.sh unlock app staging
 # or, on the production host only:
-sudo ./scripts/bootstrap-encrypted-host.sh unlock app production
+./scripts/bootstrap-encrypted-host.sh unlock app production
 
-sudo ./scripts/validate-host.sh app staging   # choose the matching environment
-sudo systemctl start docker.service
+systemctl start docker.service
+/usr/local/libexec/hook2stream/validate-host.sh app staging   # choose the matching environment
 ```
 
 `unlock` idempotently reuses the one loop device already attached to the exact

@@ -36,6 +36,16 @@ require_minimum_free_percent() {
     [ $((filesystem_available_kib * 100 / filesystem_total_kib)) -ge 20 ] \
         || fail "$filesystem_label has less than 20 percent free space"
 }
+read_unique_environment_value() {
+    environment_file=$1
+    environment_name=$2
+    environment_count=$(awk -F= -v name="$environment_name" \
+        '$1 == name { count++ } END { print count + 0 }' "$environment_file")
+    [ "$environment_count" -eq 1 ] \
+        || fail "$environment_file must contain exactly one $environment_name"
+    awk -F= -v name="$environment_name" \
+        '$1 == name { print substr($0,index($0,"=")+1) }' "$environment_file"
+}
 
 role=${1:-}
 environment=${2:-}
@@ -43,7 +53,11 @@ hook2stream_host_profile "$role" "$environment" \
     || fail "usage: validate-host.sh app staging|production"
 
 [ "$#" -eq 2 ] || fail "usage: validate-host.sh app staging|production"
-[ "$(id -u)" -eq 0 ] || fail "run through sudo"
+[ "$(id -u)" -eq 0 ] || fail "run the validator directly as root"
+case "${SUDO_USER:-}" in
+    ''|hook2stream-operator) ;;
+    *) fail "SUDO_USER must be unset or hook2stream-operator" ;;
+esac
 [ -r /etc/os-release ] || fail "/etc/os-release is not readable"
 . /etc/os-release
 [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = 24.04 ] \
@@ -273,9 +287,7 @@ done
 hook2stream_no_extended_acl "$secrets_dir" \
     || fail "secret directory must not grant access through POSIX ACLs"
 
-operator_user=${SUDO_USER:-}
-[ "$operator_user" = hook2stream-operator ] \
-    || fail "run the validator through sudo from hook2stream-operator"
+operator_user=hook2stream-operator
 deploy_user=hook2stream-deploy
 docker_group=$(getent group docker) || fail "docker group is missing"
 docker_gid=$(printf '%s\n' "$docker_group" | awk -F: 'NF == 4 {print $3}')
@@ -404,9 +416,11 @@ require_trusted_file /usr/local/sbin/hook2stream-deploy-launcher 555 "app deploy
 require_trusted_directory /usr/local/libexec/hook2stream 755 "app deploy gate directory"
 require_trusted_directory /usr/local/libexec/hook2stream/lib 755 "app deploy gate library directory"
 for trusted_gate in \
+    /usr/local/libexec/hook2stream/validate-host.sh \
     /usr/local/libexec/hook2stream/deploy-forced-command.sh \
     /usr/local/libexec/hook2stream/rollback-application.sh \
     /usr/local/libexec/hook2stream/validate-candidate.sh \
+    /usr/local/libexec/hook2stream/lib/host-validation-common.sh \
     /usr/local/libexec/hook2stream/lib/forced-command-trust.sh; do
     require_trusted_file "$trusted_gate" 555 "app deploy gate program"
 done
@@ -436,13 +450,53 @@ if [ -e "$active_infrastructure" ] || [ -L "$active_infrastructure" ]; then
     )' "$active_infrastructure") || fail "active infrastructure marker is not rollback protocol v2"
     active_infrastructure_release=$(printf '%s' "$active_infrastructure_state" | jq -r '.releaseSha')
     active_infrastructure_bundle=$(printf '%s' "$active_infrastructure_state" | jq -r '.deployBundleSha256')
+    infrastructure_ledger=/srv/hook2stream/release-state/infrastructure
+    ledger_capability=$infrastructure_ledger/$active_infrastructure_release.capabilities.json
+    ledger_environment=$infrastructure_ledger/$active_infrastructure_release.env
+    successful_infrastructure_capability=/srv/hook2stream/release-state/successful/$active_infrastructure_release.capabilities.json
+    successful_infrastructure_environment=/srv/hook2stream/release-state/successful/$active_infrastructure_release.env
+    if [ "$current_release" = "$active_infrastructure_release" ]; then
+        active_infrastructure_capability=$successful_infrastructure_capability
+        active_infrastructure_environment=$successful_infrastructure_environment
+        if [ -e "$ledger_capability" ] || [ -L "$ledger_capability" ] || \
+           [ -e "$ledger_environment" ] || [ -L "$ledger_environment" ]; then
+            require_trusted_directory "$infrastructure_ledger" 700 \
+                "compensated infrastructure ledger"
+            require_trusted_file "$ledger_capability" 600 \
+                "compensated infrastructure capability"
+            require_trusted_file "$ledger_environment" 600 \
+                "compensated infrastructure environment"
+            require_trusted_file "$successful_infrastructure_capability" 600 \
+                "successful infrastructure capability"
+            require_trusted_file "$successful_infrastructure_environment" 600 \
+                "successful infrastructure environment"
+            cmp -s "$ledger_capability" "$successful_infrastructure_capability" \
+                && cmp -s "$ledger_environment" "$successful_infrastructure_environment" \
+                || fail "same-SHA compensated infrastructure ledger is stale or unsafe"
+        fi
+    else
+        require_trusted_directory "$infrastructure_ledger" 700 \
+            "compensated infrastructure ledger"
+        require_trusted_file "$ledger_capability" 600 \
+            "compensated infrastructure capability"
+        require_trusted_file "$ledger_environment" 600 \
+            "compensated infrastructure environment"
+        active_infrastructure_capability=$ledger_capability
+        active_infrastructure_environment=$ledger_environment
+    fi
     hook2stream_validate_rollback_capability \
-        "/srv/hook2stream/release-state/successful/$active_infrastructure_release.capabilities.json" \
+        "$active_infrastructure_capability" \
         "$active_infrastructure_release" "$rollback_protocol" 0:0 \
         || fail "active infrastructure release is not rollback protocol v2 capable"
-    require_trusted_file \
-        "/srv/hook2stream/release-state/successful/$active_infrastructure_release.env" 600 \
+    require_trusted_file "$active_infrastructure_environment" 600 \
         "active infrastructure release environment"
+    for infrastructure_variable in \
+        BOOTSTRAPPER_IMAGE POSTGRES_BACKUP_IMAGE CADDY_IMAGE POSTGRES_IMAGE \
+        PGBOUNCER_IMAGE EGRESS_PROXY_IMAGE; do
+        [ "$(read_unique_environment_value "$last_successful" "$infrastructure_variable")" = \
+          "$(read_unique_environment_value "$active_infrastructure_environment" "$infrastructure_variable")" ] \
+            || fail "$infrastructure_variable differs from the active infrastructure release marker"
+    done
     active_infrastructure_dir=/srv/hook2stream/releases/$active_infrastructure_release
     require_trusted_directory "$active_infrastructure_dir" 700 "active infrastructure release directory"
     require_trusted_file "$active_infrastructure_dir/.deploy-bundle.sha256" 600 \

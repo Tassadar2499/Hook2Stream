@@ -101,7 +101,8 @@ target_api_image=$(read_unique_environment_value "$target_environment_file" API_
 target_worker_image=$(read_unique_environment_value "$target_environment_file" WORKER_IMAGE)
 target_web_image=$(read_unique_environment_value "$target_environment_file" WEB_IMAGE)
 active_environment_tmp=${active_environment_file}.tmp.$$
-trap 'rm -f "$active_environment_tmp"' EXIT HUP INT TERM
+trap 'rm -f "$active_environment_tmp"' EXIT
+trap 'exit 130' HUP INT TERM
 awk -F= \
     -v api_image="$target_api_image" \
     -v worker_image="$target_worker_image" \
@@ -186,17 +187,66 @@ current_stage=application-image-pull
 for rollback_variable in $application_variables; do
     docker --config "$DOCKER_CONFIG" image pull "$(read_env_value "$rollback_variable")"
 done
+for rollback_variable in $application_variables; do
+    docker --config "$DOCKER_CONFIG" image pull \
+        "$(read_unique_environment_value "$current_environment_file" "$rollback_variable")"
+done
 
-# Publish the selected environment only after every target application digest
-# has been authenticated and pulled. An auth/registry failure leaves any
-# existing active rollback environment untouched.
-mv -f "$active_environment_tmp" "$active_environment_file"
-trap - EXIT HUP INT TERM
-HOOK2STREAM_ENV_FILE=$active_environment_file
-environment_file=$active_environment_file
+mutation_started=false
+rollback_child_environment=$active_environment_tmp
+restore_application() {
+    restore_status=0
+    HOOK2STREAM_ENV_FILE=$current_environment_file
+    environment_file=$current_environment_file
+    export HOOK2STREAM_ENV_FILE
+    for restore_service in \
+        worker-media worker-analysis worker-render worker-export worker-control api web; do
+        compose up -d --no-deps "$restore_service" >/dev/null 2>&1 || restore_status=1
+        wait_for_service "$restore_service" >/dev/null 2>&1 || restore_status=1
+    done
+    for restore_mapping in \
+        'API_IMAGE:api' \
+        'WORKER_IMAGE:worker-media' \
+        'WORKER_IMAGE:worker-analysis' \
+        'WORKER_IMAGE:worker-control' \
+        'WORKER_IMAGE:worker-render' \
+        'WORKER_IMAGE:worker-export' \
+        'WEB_IMAGE:web'; do
+        verify_running_image "${restore_mapping%%:*}" "${restore_mapping#*:}" \
+            >/dev/null 2>&1 || restore_status=1
+    done
+    return "$restore_status"
+}
+rollback_exit() {
+    rollback_status=$?
+    trap - EXIT
+    trap - HUP
+    trap - INT
+    trap - TERM
+    if [ "$mutation_started" = true ]; then
+        set +e
+        restore_application
+        restore_status=$?
+        set -e
+        if [ "$restore_status" -ne 0 ]; then
+            rm -f "$active_environment_tmp"
+            exit 71
+        fi
+    fi
+    rm -f "$active_environment_tmp"
+    exit "$rollback_status"
+}
+trap rollback_exit EXIT
+
+# The selected environment remains a private temporary transaction input until
+# every application container and public smoke probe succeeds. A signal or any
+# failure after the first mutation restores all previous application digests.
+HOOK2STREAM_ENV_FILE=$rollback_child_environment
+environment_file=$rollback_child_environment
 export HOOK2STREAM_ENV_FILE
 
 current_stage=leaf-workers
+mutation_started=true
 compose up -d --no-deps worker-media worker-analysis worker-render worker-export
 for rollback_service in worker-media worker-analysis worker-render worker-export; do
     wait_for_service "$rollback_service" || fail "$rollback_service did not become healthy"
@@ -243,6 +293,13 @@ for rollback_mapping in \
     'EGRESS_PROXY_IMAGE:egress-backup'; do
     verify_running_image "${rollback_mapping%%:*}" "${rollback_mapping#*:}"
 done
+
+mutation_started=false
+mv -f "$active_environment_tmp" "$active_environment_file"
+trap - EXIT
+trap - HUP
+trap - INT
+trap - TERM
 
 printf '%s\n' \
     "rollback-application: application images are healthy at ${target_release_sha}" \

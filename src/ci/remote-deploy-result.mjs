@@ -10,11 +10,11 @@ function fail(message) {
 }
 
 function usage() {
-  fail("usage: remote-deploy-result.mjs validate --candidate DIR --result FILE --environment staging|production --minimum-release-sha SHA\n       remote-deploy-result.mjs validate-rollback --result FILE --environment staging|production --release-sha SHA --storage-format H2SEv1 --minimum-release-sha SHA");
+  fail("usage: remote-deploy-result.mjs validate-pending --candidate DIR --result FILE --environment staging|production\n       remote-deploy-result.mjs validate --candidate DIR --result FILE --environment staging|production --minimum-release-sha SHA\n       remote-deploy-result.mjs validate-rollback --result FILE --environment staging|production --release-sha SHA --storage-format H2SEv1 --minimum-release-sha SHA");
 }
 
 const command = process.argv[2];
-if (!["validate", "validate-rollback"].includes(command)) usage();
+if (!["validate-pending", "validate", "validate-rollback"].includes(command)) usage();
 const args = {};
 for (let i = 3; i < process.argv.length; i += 2) {
   const key = process.argv[i];
@@ -42,6 +42,40 @@ function digestOnlyImages(value, expectedKeys) {
   return exactKeys(value, expectedKeys) && expectedKeys.every((key) =>
     typeof value[key] === "string" && /^[^\s@]+@sha256:[0-9a-f]{64}$/.test(value[key]));
 }
+function validatePending() {
+  if (!args.candidate || !args.result || !["staging", "production"].includes(args.environment)) usage();
+  const candidate = resolve(args.candidate);
+  const metadata = readJson(join(candidate, "release-metadata.json"), "release metadata");
+  const result = readJson(resolve(args.result), "pending deployment result");
+  const expectedKeys = [
+    "schemaVersion", "kind", "phase", "environment", "candidateArtifact", "commitSha",
+    "previousSuccessfulSha", "releaseImagesSha256", "deployBundleSha256",
+    "releaseEnvironmentSha256", "stagingReceiptSha256", "stagingSignatureSha256",
+    "stagingAllowedSignersSha256", "actualImages", "e2eOperationId", "transactionMode", "updatedAt",
+  ];
+  if (!exactKeys(result, expectedKeys) || result.schemaVersion !== 1 ||
+      result.kind !== "hook2stream-pending-deploy" || result.phase !== "runtime-ready" ||
+      result.transactionMode !== "cold-prepare" ||
+      result.environment !== args.environment || result.candidateArtifact !== metadata.artifactName ||
+      result.commitSha !== metadata.commitSha ||
+      result.previousSuccessfulSha !== null ||
+      result.releaseImagesSha256 !== sha256(join(candidate, "release-images.env")) ||
+      result.deployBundleSha256 !== sha256(join(candidate, "deploy-bundle.tar.gz")) ||
+      !/^[0-9a-f]{64}$/.test(result.releaseEnvironmentSha256 ?? "") ||
+      !(args.environment === "staging"
+        ? result.stagingReceiptSha256 === null && result.stagingSignatureSha256 === null &&
+          result.stagingAllowedSignersSha256 === null
+        : /^[0-9a-f]{64}$/.test(result.stagingReceiptSha256 ?? "") &&
+          /^[0-9a-f]{64}$/.test(result.stagingSignatureSha256 ?? "") &&
+          /^[0-9a-f]{64}$/.test(result.stagingAllowedSignersSha256 ?? "")) ||
+      !sameImages(result.actualImages, metadata.images) ||
+      !/^[0-9a-f]{32}$/.test(result.e2eOperationId ?? "") ||
+      typeof result.updatedAt !== "string" ||
+      !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/.test(result.updatedAt) ||
+      Number.isNaN(Date.parse(result.updatedAt)) || Date.parse(result.updatedAt) > Date.now() + 60_000) {
+    fail("pending result does not bind the requested runtime-ready candidate");
+  }
+}
 function validateDeploy() {
   if (!args.candidate || !args.result || !["staging", "production"].includes(args.environment) ||
       !/^[0-9a-f]{40}$/.test(args["minimum-release-sha"] ?? "")) usage();
@@ -51,12 +85,13 @@ function validateDeploy() {
   const checks = ["pre-migration-backup", "migration", "smoke", "e2e", "digest-verification"];
   const expectedKeys = [
     "schemaVersion", "kind", "environment", "result", "candidateArtifact", "commitSha",
-    "releaseImagesSha256", "deployBundleSha256", "actualImages", "minimumRollbackReleaseSha", "checks",
+    "e2eOperationId", "releaseImagesSha256", "deployBundleSha256", "actualImages", "minimumRollbackReleaseSha", "checks",
   ];
   if (!exactKeys(result, expectedKeys) ||
       result.schemaVersion !== 1 || result.kind !== "hook2stream-remote-deploy-result" ||
       result.environment !== args.environment || result.result !== "success" ||
       result.candidateArtifact !== metadata.artifactName || result.commitSha !== metadata.commitSha ||
+      !/^[0-9a-f]{32}$/.test(result.e2eOperationId ?? "") ||
       result.minimumRollbackReleaseSha !== args["minimum-release-sha"] ||
       result.releaseImagesSha256 !== sha256(join(candidate, "release-images.env")) ||
       result.deployBundleSha256 !== sha256(join(candidate, "deploy-bundle.tar.gz")) ||
@@ -79,7 +114,7 @@ function validateRollback() {
     "infrastructure-unchanged",
     "no-migrations",
     "smoke",
-    "e2e",
+    "bounded-e2e-reverification",
     "digest-verification",
   ];
   const runningImageKeys = [
@@ -102,5 +137,6 @@ function validateRollback() {
   }
 }
 
-if (command === "validate") validateDeploy();
+if (command === "validate-pending") validatePending();
+else if (command === "validate") validateDeploy();
 else validateRollback();

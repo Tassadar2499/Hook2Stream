@@ -218,12 +218,27 @@ validator also requires the exact two-line `/etc/sudoers.d/hook2stream-deploy`
 grant from `src/deploy/host/sudoers.example`; extra keys, options, or sudo rules
 fail validation. Operator, forced-command deploy, and staging-receipt trust
 roles must all use different ED25519 keys; reusing the deploy
-key for the sudo-capable operator account is a release-blocking privilege
-escalation. The private ED25519 host key must be a non-symlink `root:root 0600`
+key for the password-locked operator account is a release-blocking privilege
+escalation. The operator account has no sudo grant; host acceptance runs only
+from a root shell through the installed root-owned validator. The private
+ED25519 host key must be a non-symlink `root:root 0600`
 file without extended ACLs; its `root:root 0644` public key must match, and both
-must be distinct from every user/receipt authority. The SSH
-client command is exactly `deploy <candidate-id>`, staging-only
-`soak <candidate-id>`, or `rollback <40-character-sha> H2SEv1`.
+must be distinct from every user/receipt authority. The SSH client command is
+exactly cold-bootstrap-only `prepare <candidate-id>`, `finalize <candidate-id>`
+for that same prepared candidate, normal transactional
+`deploy <candidate-id>`, staging-only `soak <candidate-id>`, or
+`rollback <40-character-sha> H2SEv1`.
+
+`prepare` is accepted only before any successful release exists. It publishes
+only a root-owned runtime-ready pending record so the operator can complete the
+invited OAuth workspace/session bootstrap; it never emits a successful receipt.
+`finalize` reuses the host-generated operation ID bound to that pending record
+and publishes success only after authenticated E2E and exact running-digest
+verification. Every later `deploy` performs rollout and finalization inside one
+forced-command transaction. A failed or interrupted upgrade/rollback restores
+the previous application digests when that reversal can be proven. Otherwise
+the host writes `recovery-required.json`, stops its owned public Caddy, and
+blocks all automated operations until explicit operator reconciliation.
 
 Deploy receives one uncompressed tar stream. It contains `candidate/` with the
 four immutable files; production also carries

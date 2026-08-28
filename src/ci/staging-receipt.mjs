@@ -93,12 +93,13 @@ function validateRemoteResult(metadata, hashes, remoteResult, minimumReleaseSha)
   if (!SHA_RE.test(minimumReleaseSha ?? "")) fail("minimum release SHA must be exactly 40 lowercase hexadecimal characters");
   if (!exactKeys(remoteResult, [
     "schemaVersion", "kind", "environment", "result", "candidateArtifact", "commitSha",
-    "releaseImagesSha256", "deployBundleSha256", "actualImages", "minimumRollbackReleaseSha",
+    "e2eOperationId", "releaseImagesSha256", "deployBundleSha256", "actualImages", "minimumRollbackReleaseSha",
     "checks",
   ]) ||
       remoteResult.schemaVersion !== 1 || remoteResult.kind !== "hook2stream-remote-deploy-result" ||
       remoteResult.environment !== "staging" || remoteResult.result !== "success" ||
       remoteResult.candidateArtifact !== metadata.artifactName || remoteResult.commitSha !== metadata.commitSha ||
+      !/^[0-9a-f]{32}$/.test(remoteResult.e2eOperationId ?? "") ||
       remoteResult.minimumRollbackReleaseSha !== minimumReleaseSha ||
       remoteResult.releaseImagesSha256 !== hashes.releaseImagesSha256 ||
       remoteResult.deployBundleSha256 !== hashes.deployBundleSha256 ||

@@ -30,14 +30,14 @@ done
 alpine_digest='sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b'
 go_digest='sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc'
 dotnet_sdk_digest='sha256:72dd743782f2ae7e5476fd64f6a460045e3998dc862218b80e6944cba79a01b0'
-dotnet_runtime_digest='sha256:1fa23fc4872d95fd71c2833ebe65d7e84a43b2d51a31d119516852f13d9505a7'
+dotnet_runtime_digest='sha256:1dcd9841b075d1d1013caa170b86ae58b8a8a563de9a3e319fd46a45e7ecc130'
 node_digest='sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf'
 postgres_digest='sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73'
 
 for dotnet_dockerfile in "$api" "$worker" "$bootstrapper"; do
     grep -Fq "ARG DOTNET_SDK_DIGEST=$dotnet_sdk_digest" "$dotnet_dockerfile" \
         && grep -Fq 'FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_SDK_VERSION}@${DOTNET_SDK_DIGEST} AS build' "$dotnet_dockerfile" \
-        && grep -Fq "mcr.microsoft.com/dotnet/aspnet:10.0@$dotnet_runtime_digest" "$dotnet_dockerfile" \
+        && grep -Fq "mcr.microsoft.com/dotnet/aspnet:10.0.11@$dotnet_runtime_digest" "$dotnet_dockerfile" \
         || fail ".NET build/runtime bases are not digest-pinned: $dotnet_dockerfile"
 done
 grep -Fq "docker.io/library/node:24-alpine@$node_digest" "$web" \

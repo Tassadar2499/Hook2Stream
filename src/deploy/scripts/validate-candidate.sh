@@ -111,12 +111,13 @@ if [ -n "$approval_dir" ]; then
       (.stagingWorkflowRunId | type == "number" and . > 0 and floor == .) and
       (.stagingWorkflowRunAttempt | type == "number" and . > 0 and floor == .) and
       (.policySha | type == "string" and test("^[0-9a-f]{40}$")) and
-      (.remoteResult | keys | sort) == ["actualImages","candidateArtifact","checks","commitSha","deployBundleSha256","environment","kind","minimumRollbackReleaseSha","releaseImagesSha256","result","schemaVersion"] and
+      (.remoteResult | keys | sort) == ["actualImages","candidateArtifact","checks","commitSha","deployBundleSha256","e2eOperationId","environment","kind","minimumRollbackReleaseSha","releaseImagesSha256","result","schemaVersion"] and
       .hashes.releaseImagesSha256 == $images and .hashes.deployBundleSha256 == $bundle and
       .remoteResult.kind == "hook2stream-remote-deploy-result" and
       .remoteResult.environment == "staging" and .remoteResult.result == "success" and
       .remoteResult.candidateArtifact == $artifact and
       .remoteResult.commitSha == $commit and .remoteResult.minimumRollbackReleaseSha == $minimum and
+      (.remoteResult.e2eOperationId | type == "string" and test("^[0-9a-f]{32}$")) and
       .remoteResult.actualImages == $expectedImages and
       .remoteResult.checks == ["pre-migration-backup","migration","smoke","e2e","digest-verification"] and
       (.soakResult | keys | sort) == ["candidateArtifact","checks","commitSha","completedAt","elapsedSeconds","environment","hookResult","kind","result","schemaVersion","startedAt","workerRenderHealthy","workerRenderInstances","workerRenderOomKilled"] and

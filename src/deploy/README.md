@@ -171,8 +171,8 @@ VNC at the boot prompt must be proved by the live provider probe before relying
 on it. Finally validate:
 
 ```sh
-sudo ./scripts/validate-host.sh app staging
-sudo ./scripts/validate-host.sh app production
+/usr/local/libexec/hook2stream/validate-host.sh app staging
+/usr/local/libexec/hook2stream/validate-host.sh app production
 ```
 
 Run only the command matching that host. The validator proves the exact
@@ -237,13 +237,16 @@ socket.
 
 Install `host/authenticated-e2e.sh` unchanged as the root-owned mode `0500`
 path configured by `HOOK2STREAM_AUTHENTICATED_E2E_HOOK`. Provision its
-environment-specific OAuth session, expected-email, licensed MP3 and staging
-soak baseline inputs under `/srv/hook2stream/e2e` as documented in
-[`host/README.md`](host/README.md). The script calls the public API and fails
-closed. Staging performs upload/OpenRouter/test-billing/render; production
-performs deterministic upload/OpenRouter/preview but no live billing or final
-render. Printing either capability line without its environment-specific
-checks is not an installation option.
+environment-specific expected-email, licensed MP3 and staging soak baseline
+inputs under `/srv/hook2stream/e2e` as documented in
+[`host/README.md`](host/README.md). On a cold host, install the OAuth session
+only after `prepare-pending` has made the public origin available; established
+hosts must have a valid session before `deploy-and-finalize`. The script calls
+the public API and fails closed. Staging performs
+upload/OpenRouter/test-billing/render; production performs deterministic
+upload/OpenRouter/preview but no live billing or final render. Printing either
+capability line without its environment-specific checks is not an installation
+option.
 Production installs the staging-receipt allowed-signers file with exactly one
 named ED25519 authority; additional or wildcard records are rejected. An
 accepted promotion carries and verifies the signed staging receipt before
@@ -277,6 +280,49 @@ The forced command rejects
 archive traversal, links, special files, unknown images, tags, checksum/schema
 or receipt mismatch; host `flock` is the second concurrency lock.
 
+The staging and production workflows expose three explicit deployment phases:
+
+- `prepare-pending` is permitted only for the first, cold database bootstrap,
+  when no `last-successful.env` exists. It starts the candidate runtime through
+  the host `prepare` transaction and returns a pending receipt, but does not
+  declare the release successful, run the soak, or make it promotable. The
+  operator then completes invite-only OAuth onboarding against that running
+  origin, creates the QA workspace, and installs the resulting cookie jar as a
+  root-owned private E2E input.
+- `finalize-pending` sends only `finalize <candidate-id>`. It must name the exact
+  prepared candidate and reuses its persisted E2E operation identity; it
+  revalidates the running digests and all bound evidence before authenticated
+  E2E and successful-state publication. A cold authenticated-E2E failure leaves
+  that exact pending transaction available for a corrected retry.
+- `deploy-and-finalize` is the normal path after any successful release exists.
+  The host `deploy` command performs runtime deployment, authenticated E2E,
+  digest verification, and state publication as one locked host transaction.
+  It must not be split into an operator handoff, and it is rejected for the
+  first cold deployment.
+
+`release-state/pending-deploy.json` binds more than the commit SHA: it records
+the full `release-candidate-<sha>-<run_id>-<attempt>` artifact name, environment,
+previous successful SHA, release-images, bundle and derived environment hashes,
+the 32-hex E2E operation ID, and, in production, the receipt, signature and
+allowed-signer hashes. Only an exact replay may reuse it; a different artifact,
+same-SHA attempt, changed approval, or other drift is rejected. The operation
+ID remains stable within that transaction and makes its mutating E2E requests
+idempotent, while a later candidate attempt receives a new ID. A successful
+remote result is stored per full candidate and may be re-emitted after lost SSH
+output only after the host revalidates the successful environment, active
+infrastructure marker, live health, and actual running digests.
+
+If normal deployment or finalization fails after a previous release existed,
+the gate compensates by restoring that previous application image set. It does
+not down-migrate the database or restore old infrastructure images: the
+candidate infrastructure bundle remains the active infrastructure ledger, and
+the published state records that coherent combination. Compensation is itself
+signal-safe. If application restoration, digest verification, or state
+publication cannot be proven, the gate writes root-owned
+`release-state/recovery-required.json`, stops public Caddy ingress where it can
+prove ownership, and blocks every automated deploy, finalize, soak, and
+rollback until an operator reconciles runtime and ledger state manually.
+
 Before the first candidate, finish the deploy-key, host trust, MagicDNS,
 rollback-marker, integration callback, and DNS handoff in
 [`DEPLOYMENT.md`](../../.github/DEPLOYMENT.md). The host and matching GitHub
@@ -286,8 +332,13 @@ MagicDNS names.
 
 Rollback is application-only. It changes API, workers, and web to a previously
 successful H2SE-compatible target, preserves bootstrap and infrastructure
-digests, and runs no migration. Incompatible schema rollback requires a forward
-fix or separately approved write-stop/restore.
+digests, and runs no migration. Before committing rollback state, the host runs
+the bounded, non-mutating `rollback-verify` authenticated gate for OAuth,
+H2SE Range reads, worker state, preview/export reads, and denied egress. A gate,
+digest, or signal failure reverses the application to the original release; if
+that reversal cannot be proved, the same recovery-required marker and ingress
+shutdown boundary apply. Incompatible schema rollback requires a forward fix
+or separately approved write-stop/restore.
 
 ## Local and CI MinIO
 

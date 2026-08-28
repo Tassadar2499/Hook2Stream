@@ -33,7 +33,9 @@ jobs:
   rollback:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The host transaction may use the full bounded health window for each app
+    # service and repeat it while compensating a failed rollback.
+    timeout-minutes: 180
     environment: ${{ inputs.environment }}
     concurrency:
       group: hook2stream-${{ inputs.environment }}

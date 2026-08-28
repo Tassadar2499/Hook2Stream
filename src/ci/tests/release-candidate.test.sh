@@ -134,11 +134,12 @@ if node "$ci_dir/release-candidate.mjs" validate \
 fi
 
 receipt="$scratch/staging-receipt.json"
-node - "$candidate" "$scratch/remote-result.json" <<'JS'
+e2e_operation_id=0123456789abcdef0123456789abcdef
+node - "$candidate" "$scratch/remote-result.json" "$e2e_operation_id" <<'JS'
 const fs = require("fs");
 const crypto = require("crypto");
 const path = require("path");
-const [candidate, output] = process.argv.slice(2);
+const [candidate, output, e2eOperationId] = process.argv.slice(2);
 const metadata = JSON.parse(fs.readFileSync(path.join(candidate, "release-metadata.json")));
 const digest = (name) => crypto.createHash("sha256").update(fs.readFileSync(path.join(candidate, name))).digest("hex");
 fs.writeFileSync(output, JSON.stringify({
@@ -148,6 +149,7 @@ fs.writeFileSync(output, JSON.stringify({
   result: "success",
   candidateArtifact: metadata.artifactName,
   commitSha: metadata.commitSha,
+  e2eOperationId,
   minimumRollbackReleaseSha: metadata.commitSha,
   releaseImagesSha256: digest("release-images.env"),
   deployBundleSha256: digest("deploy-bundle.tar.gz"),
@@ -160,6 +162,81 @@ node "$ci_dir/remote-deploy-result.mjs" validate \
   --result "$scratch/remote-result.json" \
   --environment staging \
   --minimum-release-sha "$sha"
+node - "$candidate" "$scratch/pending-result.json" "$e2e_operation_id" <<'JS'
+const fs = require("fs");
+const crypto = require("crypto");
+const path = require("path");
+const [candidate, output, e2eOperationId] = process.argv.slice(2);
+const metadata = JSON.parse(fs.readFileSync(path.join(candidate, "release-metadata.json")));
+const digest = (name) => crypto.createHash("sha256").update(fs.readFileSync(path.join(candidate, name))).digest("hex");
+fs.writeFileSync(output, `${JSON.stringify({
+  schemaVersion: 1,
+  kind: "hook2stream-pending-deploy",
+  phase: "runtime-ready",
+  transactionMode: "cold-prepare",
+  environment: "staging",
+  candidateArtifact: metadata.artifactName,
+  commitSha: metadata.commitSha,
+  previousSuccessfulSha: null,
+  releaseImagesSha256: digest("release-images.env"),
+  deployBundleSha256: digest("deploy-bundle.tar.gz"),
+  releaseEnvironmentSha256: "1".repeat(64),
+  stagingReceiptSha256: null,
+  stagingSignatureSha256: null,
+  stagingAllowedSignersSha256: null,
+  actualImages: metadata.images,
+  e2eOperationId,
+  updatedAt: "2026-08-28T00:00:00Z",
+})}\n`);
+JS
+node "$ci_dir/remote-deploy-result.mjs" validate-pending \
+  --candidate "$candidate" \
+  --result "$scratch/pending-result.json" \
+  --environment staging
+for pending_mutation in warm-previous wrong-mode; do
+  node - "$scratch/pending-result.json" "$scratch/pending-$pending_mutation.json" "$pending_mutation" <<'JS'
+const fs = require("fs");
+const [source, output, mutation] = process.argv.slice(2);
+const result = JSON.parse(fs.readFileSync(source, "utf8"));
+if (mutation === "warm-previous") result.previousSuccessfulSha = "a".repeat(40);
+else result.transactionMode = "immediate-deploy";
+fs.writeFileSync(output, `${JSON.stringify(result)}\n`);
+JS
+  if node "$ci_dir/remote-deploy-result.mjs" validate-pending \
+    --candidate "$candidate" \
+    --result "$scratch/pending-$pending_mutation.json" \
+    --environment staging >/dev/null 2>&1; then
+    echo "cold prepare receipt accepted invalid state: $pending_mutation" >&2
+    exit 1
+  fi
+done
+if node "$ci_dir/remote-deploy-result.mjs" validate \
+  --candidate "$candidate" \
+  --result "$scratch/pending-result.json" \
+  --environment staging \
+  --minimum-release-sha "$sha" >/dev/null 2>&1; then
+  echo "pending receipt unexpectedly validated as a successful deployment" >&2
+  exit 1
+fi
+for invalid_operation_id in \
+  0123456789abcdef0123456789abcde \
+  0123456789abcdef0123456789abcdef0 \
+  0123456789abcdef0123456789abcdeG \
+  0123456789ABCDEF0123456789ABCDEF; do
+  node - "$scratch/pending-result.json" "$scratch/pending-invalid-operation.json" "$invalid_operation_id" <<'JS'
+const fs = require("fs");
+const [source, output, operationId] = process.argv.slice(2);
+const result = JSON.parse(fs.readFileSync(source, "utf8"));
+result.e2eOperationId = operationId;
+fs.writeFileSync(output, `${JSON.stringify(result)}\n`);
+JS
+  if node "$ci_dir/remote-deploy-result.mjs" validate-pending \
+    --candidate "$candidate" --result "$scratch/pending-invalid-operation.json" \
+    --environment staging >/dev/null 2>&1; then
+    echo "pending receipt accepted invalid operation ID: $invalid_operation_id" >&2
+    exit 1
+  fi
+done
 node - "$scratch/remote-result.json" "$scratch/remote-result-provider-evidence.json" <<'JS'
 const fs = require("fs");
 const [source, output] = process.argv.slice(2);
@@ -212,6 +289,18 @@ node "$ci_dir/staging-receipt.mjs" validate-soak \
   --remote-result "$scratch/remote-result.json" \
   --soak-result "$scratch/remote-soak-result.json" \
   --minimum-release-sha "$sha"
+if node "$ci_dir/staging-receipt.mjs" create \
+  --candidate "$candidate" \
+  --remote-result "$scratch/pending-result.json" \
+  --soak-result "$scratch/remote-soak-result.json" \
+  --output "$scratch/pending-staging-receipt.json" \
+  --staging-run-id 200 \
+  --staging-run-attempt 1 \
+  --policy-sha "$sha" \
+  --minimum-release-sha "$sha" >/dev/null 2>&1; then
+  echo "pending receipt unexpectedly became a successful staging receipt" >&2
+  exit 1
+fi
 node - "$scratch/remote-soak-result.json" "$scratch/remote-soak-failed-network.json" <<'JS'
 const fs = require("fs");
 const [source, output] = process.argv.slice(2);
@@ -242,7 +331,7 @@ fs.writeFileSync(output, `${JSON.stringify({
   minimumRollbackReleaseSha: sha,
   actualRunningImages,
   preservedBootstrapImage,
-  checks: ["target-recorded-success", "storage-format-compatible", "application-images-only", "infrastructure-unchanged", "no-migrations", "smoke", "e2e", "digest-verification"],
+  checks: ["target-recorded-success", "storage-format-compatible", "application-images-only", "infrastructure-unchanged", "no-migrations", "smoke", "bounded-e2e-reverification", "digest-verification"],
 })}\n`);
 JS
 node "$ci_dir/remote-deploy-result.mjs" validate-rollback \
@@ -287,6 +376,29 @@ node "$ci_dir/staging-receipt.mjs" validate \
   --staging-run-attempt 1 \
   --policy-sha "$sha" \
   --minimum-release-sha "$sha"
+node - "$receipt" "$e2e_operation_id" <<'JS'
+const fs = require("fs");
+const [receiptPath, expectedOperationId] = process.argv.slice(2);
+const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+if (receipt.remoteResult?.e2eOperationId !== expectedOperationId) {
+  throw new Error("staging receipt did not preserve the exact E2E operation ID");
+}
+JS
+node - "$scratch/remote-result.json" "$scratch/remote-invalid-operation.json" <<'JS'
+const fs = require("fs");
+const [source, output] = process.argv.slice(2);
+const result = JSON.parse(fs.readFileSync(source, "utf8"));
+result.e2eOperationId = "0".repeat(31);
+fs.writeFileSync(output, `${JSON.stringify(result)}\n`);
+JS
+if node "$ci_dir/remote-deploy-result.mjs" validate \
+  --candidate "$candidate" \
+  --result "$scratch/remote-invalid-operation.json" \
+  --environment staging \
+  --minimum-release-sha "$sha" >/dev/null 2>&1; then
+  echo "successful receipt accepted a non-32-hex operation ID" >&2
+  exit 1
+fi
 
 cp -a "$candidate" "$scratch/tampered"
 printf '\nTAMPERED\n' >> "$scratch/tampered/release-images.env"
@@ -322,5 +434,18 @@ if node "$ci_dir/staging-receipt.mjs" validate \
   echo "receipt for a different candidate unexpectedly validated" >&2
   exit 1
 fi
+
+for bound_file in release-images.env deploy-bundle.tar.gz SHA256SUMS; do
+  mismatch="$scratch/mismatched-${bound_file//[^a-zA-Z0-9]/-}"
+  cp -a "$candidate" "$mismatch"
+  printf '\nreceipt-binding-mutation\n' >> "$mismatch/$bound_file"
+  if node "$ci_dir/staging-receipt.mjs" validate \
+    --candidate "$mismatch" \
+    --receipt "$receipt" \
+    --minimum-release-sha "$sha" >/dev/null 2>&1; then
+    echo "receipt ignored mutation of candidate artifact $bound_file" >&2
+    exit 1
+  fi
+done
 
 echo "release candidate and staging receipt contract tests passed"

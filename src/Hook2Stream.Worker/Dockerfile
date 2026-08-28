@@ -10,7 +10,7 @@ RUN dotnet publish src/Hook2Stream.Worker/Hook2Stream.Worker.csproj \
     --output /app/publish \
     /p:UseAppHost=false
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1fa23fc4872d95fd71c2833ebe65d7e84a43b2d51a31d119516852f13d9505a7 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11@sha256:1dcd9841b075d1d1013caa170b86ae58b8a8a563de9a3e319fd46a45e7ecc130 AS runtime
 USER root
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ffmpeg ca-certificates curl \

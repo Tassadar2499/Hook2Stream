@@ -11,7 +11,7 @@ RUN dotnet publish src/Hook2Stream.Api/Hook2Stream.Api.csproj \
     /p:UseAppHost=false \
     /p:OpenApiGenerateDocumentsOnBuild=false
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:1fa23fc4872d95fd71c2833ebe65d7e84a43b2d51a31d119516852f13d9505a7 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11@sha256:1dcd9841b075d1d1013caa170b86ae58b8a8a563de9a3e319fd46a45e7ecc130 AS runtime
 WORKDIR /app
 COPY --from=build /app/publish .
 ENV ASPNETCORE_HTTP_PORTS=8080

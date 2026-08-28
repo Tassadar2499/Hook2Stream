@@ -1,5 +1,5 @@
 name: Stage candidate
-run-name: Stage CI run ${{ inputs.source_ci_run_id }}
+run-name: Stage CI run ${{ inputs.source_ci_run_id }} (${{ inputs.deployment_phase }})
 
 on:
   workflow_dispatch:
@@ -8,6 +8,15 @@ on:
         description: Successful protected-main CI run ID whose immutable candidate will be staged
         required: true
         type: string
+      deployment_phase:
+        description: Create/update the pending runtime, or finalize an already pending cold-DB bootstrap
+        required: true
+        default: deploy-and-finalize
+        type: choice
+        options:
+          - prepare-pending
+          - deploy-and-finalize
+          - finalize-pending
 
 permissions:
   contents: read
@@ -144,7 +153,10 @@ jobs:
   deploy-staging:
     needs: verify-source
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # The sequential authenticated gate can consume roughly 205 minutes of its
+    # internal bounds before the separately bounded soak. Use the hosted-runner
+    # maximum so rollout, compensation, and receipt handling retain headroom.
+    timeout-minutes: 360
     environment: staging
     permissions:
       actions: read
@@ -209,6 +221,7 @@ jobs:
           esac
 
       - name: Validate staging receipt authority before deployment
+        if: inputs.deployment_phase != 'prepare-pending'
         shell: bash
         env:
           STAGING_RECEIPT_SIGNING_KEY: ${{ secrets.STAGING_RECEIPT_SIGNING_KEY }}
@@ -279,17 +292,20 @@ jobs:
           awk '{ print $2, $3 }' "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
             > "$RUNNER_TEMP/hook2stream-ssh/staging-host-key.pub"
           . src/deploy/scripts/lib/forced-command-trust.sh
-          for independent_staging_key in \
-            "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
-            "$RUNNER_TEMP/hook2stream-ssh/staging-host-key.pub"; do
-            independent_staging_fingerprint="$(ssh-keygen -lf \
-              "$independent_staging_key" -E sha256 | awk '{ print $2 }')"
-            hook2stream_validate_distinct_ed25519_fingerprints \
-              "$STAGING_RECEIPT_SIGNING_FINGERPRINT" "$independent_staging_fingerprint" \
-              || { echo "staging receipt signer must differ from deploy and host keys" >&2; exit 1; }
-          done
+          if test "${{ inputs.deployment_phase }}" != prepare-pending; then
+            for independent_staging_key in \
+              "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
+              "$RUNNER_TEMP/hook2stream-ssh/staging-host-key.pub"; do
+              independent_staging_fingerprint="$(ssh-keygen -lf \
+                "$independent_staging_key" -E sha256 | awk '{ print $2 }')"
+              hook2stream_validate_distinct_ed25519_fingerprints \
+                "$STAGING_RECEIPT_SIGNING_FINGERPRINT" "$independent_staging_fingerprint" \
+                || { echo "staging receipt signer must differ from deploy and host keys" >&2; exit 1; }
+            done
+          fi
 
-      - name: Deploy candidate through forced SSH and run host smoke/E2E
+      - name: Deploy candidate to a pending runtime through forced SSH
+        if: inputs.deployment_phase != 'finalize-pending'
         shell: bash
         run: |
           set -euo pipefail
@@ -299,6 +315,11 @@ jobs:
           test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
           mkdir -p transfer/candidate
           cp -a release-candidate/. transfer/candidate/
+          if test "${{ inputs.deployment_phase }}" = prepare-pending; then
+            host_operation=prepare
+          else
+            host_operation=deploy
+          fi
           tar -C transfer -cf - . | ssh \
             -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
             -o BatchMode=yes \
@@ -306,8 +327,58 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "deploy $CANDIDATE_NAME" > "$RUNNER_TEMP/deploy-output.log" 2>&1
-          encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log" | tail -n 1)"
+            "$host_operation $CANDIDATE_NAME" > "$RUNNER_TEMP/deploy-output.log" 2>&1
+          if test "$host_operation" = prepare; then
+            test "$(grep -c '^HOOK2STREAM_PENDING_RECEIPT=' "$RUNNER_TEMP/deploy-output.log")" -eq 1
+            encoded_result="$(sed -n 's/^HOOK2STREAM_PENDING_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log")"
+            test -n "$encoded_result"
+            printf '%s' "$encoded_result" | base64 --decode > pending-result.json
+            node src/ci/remote-deploy-result.mjs validate-pending \
+              --candidate release-candidate \
+              --result pending-result.json \
+              --environment staging
+          else
+            test "$(grep -c '^HOOK2STREAM_REMOTE_RECEIPT=' "$RUNNER_TEMP/deploy-output.log")" -eq 1
+            encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log")"
+            test -n "$encoded_result"
+            printf '%s' "$encoded_result" | base64 --decode > remote-result.json
+            node src/ci/remote-deploy-result.mjs validate \
+              --candidate release-candidate \
+              --result remote-result.json \
+              --environment staging \
+              --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
+          fi
+
+      - name: Record cold-DB bootstrap handoff
+        if: inputs.deployment_phase == 'prepare-pending'
+        shell: bash
+        run: |
+          {
+            echo "### Pending staging deployment"
+            echo
+            echo "The candidate is running but is not successful or promotable."
+            echo "Provision the invited OAuth QA session/workspace, install the root-only cookie jar, then rerun with deployment_phase=finalize-pending."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Finalize pending candidate with authenticated E2E
+        if: inputs.deployment_phase == 'finalize-pending'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          ssh \
+            -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "finalize $CANDIDATE_NAME" </dev/null > "$RUNNER_TEMP/finalize-output.log" 2>&1
+          test "$(grep -c '^HOOK2STREAM_REMOTE_RECEIPT=' "$RUNNER_TEMP/finalize-output.log")" -eq 1
+          encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/finalize-output.log")"
           test -n "$encoded_result"
           printf '%s' "$encoded_result" | base64 --decode > remote-result.json
           node src/ci/remote-deploy-result.mjs validate \
@@ -317,6 +388,7 @@ jobs:
             --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
 
       - name: Run trusted 60-minute render and network soak
+        if: inputs.deployment_phase != 'prepare-pending'
         shell: bash
         timeout-minutes: 70
         run: |
@@ -347,6 +419,7 @@ jobs:
           echo "Trusted sustained render/network soak passed" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create successful staging receipt
+        if: inputs.deployment_phase != 'prepare-pending'
         shell: bash
         run: |
           set -euo pipefail
@@ -364,6 +437,7 @@ jobs:
             --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
 
       - name: Sign staging receipt for production host verification
+        if: inputs.deployment_phase != 'prepare-pending'
         shell: bash
         env:
           STAGING_RECEIPT_SIGNING_KEY: ${{ secrets.STAGING_RECEIPT_SIGNING_KEY }}
@@ -399,6 +473,7 @@ jobs:
             < staging-receipt.json
 
       - name: Attest staging receipt
+        if: inputs.deployment_phase != 'prepare-pending'
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: |
@@ -406,6 +481,7 @@ jobs:
             staging-receipt.sig
 
       - name: Upload staging receipt
+        if: inputs.deployment_phase != 'prepare-pending'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: staging-receipt-${{ github.run_id }}-${{ github.run_attempt }}
