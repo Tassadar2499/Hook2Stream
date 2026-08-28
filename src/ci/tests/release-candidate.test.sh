@@ -32,7 +32,7 @@ for key in API_IMAGE WORKER_IMAGE BOOTSTRAPPER_IMAGE WEB_IMAGE POSTGRES_BACKUP_I
   printf '%s=%s\n' "$key" "${image}@sha256:${digest}" > "$fragments/${index}.env"
 done
 
-node "$ci_dir/release-candidate.mjs" create \
+GITHUB_REPOSITORY_OWNER=ambient-owner node "$ci_dir/release-candidate.mjs" create \
   --output "$candidate" \
   --fragments "$fragments" \
   --deploy-dir "$source_root/deploy" \
@@ -41,7 +41,7 @@ node "$ci_dir/release-candidate.mjs" create \
   --run-id "$run_id" \
   --run-attempt "$run_attempt"
 
-node "$ci_dir/release-candidate.mjs" validate \
+GITHUB_REPOSITORY_OWNER=ambient-owner node "$ci_dir/release-candidate.mjs" validate \
   --candidate "$candidate" \
   --repository "$repository" \
   --sha "$sha" \

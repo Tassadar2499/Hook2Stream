@@ -122,8 +122,6 @@ function validateImages(path, expectedSha) {
   for (const key of IMAGE_KEYS) {
     if (!DIGEST_IMAGE_RE.test(values.get(key))) fail(`${key} is not a digest-only image reference`);
   }
-  const owner = process.env.GITHUB_REPOSITORY_OWNER?.toLowerCase();
-  if (owner) validateImageRepositories(Object.fromEntries(IMAGE_KEYS.map((key) => [key, values.get(key)])), owner);
   return Object.fromEntries(IMAGE_KEYS.map((key) => [key, values.get(key)]));
 }
 
