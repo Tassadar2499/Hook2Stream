@@ -61,6 +61,9 @@ public sealed class AppHostTopologyTests
         Assert.Equal("Local", apiEnvironment["Auth__Mode"]);
         Assert.Equal(childEnvironment, bootstrapperEnvironment["DOTNET_ENVIRONMENT"]);
         Assert.Equal(childEnvironment, apiEnvironment["DOTNET_ENVIRONMENT"]);
+        Assert.Equal("Manage", bootstrapperEnvironment["Storage__ProvisioningMode"]);
+        Assert.DoesNotContain("Storage__PublicServiceUrl", bootstrapperEnvironment.Keys);
+        Assert.DoesNotContain("Storage__PublicServiceUrl", apiEnvironment.Keys);
         Assert.Equal("false", bootstrapperEnvironment["Storage__ConfigureBucketCors"]);
         Assert.Equal("true", bootstrapperEnvironment["Storage__ConfigureBucketLifecycle"]);
         Assert.Equal(
@@ -86,6 +89,7 @@ public sealed class AppHostTopologyTests
             var workerEnvironment = workerConfiguration.EnvironmentVariables.ToDictionary();
             Assert.Equal(childEnvironment, workerEnvironment["DOTNET_ENVIRONMENT"]);
             Assert.Equal(capability, workerEnvironment["Worker__Capabilities__0"]);
+            Assert.DoesNotContain("Storage__PublicServiceUrl", workerEnvironment.Keys);
         }
 
         var postgresVolume = GetDataVolume(resources["postgres"]);

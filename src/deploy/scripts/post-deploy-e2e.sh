@@ -2,8 +2,9 @@
 set -eu
 
 fail() { printf '%s\n' "post-deploy E2E: $*" >&2; exit 1; }
-[ "$#" -eq 3 ] || fail "usage: post-deploy-e2e.sh staging|production ENV_FILE COMMIT_SHA"
-environment=$1; environment_file=$2; commit=$3
+[ "$#" -eq 3 ] || { [ "$#" -eq 4 ] && [ "$4" = soak-60m ]; } \
+    || fail "usage: post-deploy-e2e.sh staging|production ENV_FILE COMMIT_SHA [soak-60m]"
+environment=$1; environment_file=$2; commit=$3; mode=${4:-release-gate}
 : "${HOOK2STREAM_AUTHENTICATED_E2E_HOOK:?HOOK2STREAM_AUTHENTICATED_E2E_HOOK is required}"
 case "$environment" in staging|production) ;; *) fail "invalid environment" ;; esac
 case "$commit" in *[!0-9a-f]*|'') fail "invalid commit" ;; esac
@@ -18,8 +19,33 @@ for tool in curl jq mktemp; do command -v "$tool" >/dev/null 2>&1 || fail "$tool
 origin=$(awk -F= '$1 == "PUBLIC_ORIGIN" {print substr($0,index($0,"=")+1)}' "$environment_file")
 case "$environment:$origin" in staging:https://staging.hook2stream.com|production:https://hook2stream.com) ;; *) fail "public origin does not match environment" ;; esac
 temporary_dir=$(mktemp -d)
-trap 'rm -rf "$temporary_dir"' EXIT HUP INT TERM
+trap 'rm -rf "$temporary_dir"' EXIT
+trap 'exit 130' HUP INT TERM
 chmod 0700 "$temporary_dir"
+
+if [ "$mode" = soak-60m ]; then
+    [ "$environment" = staging ] || fail "the sustained soak is staging-only"
+    if ! "$HOOK2STREAM_AUTHENTICATED_E2E_HOOK" \
+        "$environment" "$environment_file" "$commit" soak-60m \
+        >"$temporary_dir/soak.stdout" 2>"$temporary_dir/soak.stderr"; then
+        fail "authenticated render/network soak failed"
+    fi
+    [ "$(wc -c < "$temporary_dir/soak.stdout")" -le 8192 ] \
+        && [ "$(wc -l < "$temporary_dir/soak.stdout")" -eq 1 ] \
+        && [ "$(tail -c 1 "$temporary_dir/soak.stdout" | od -An -tu1 | tr -d ' ')" = 10 ] \
+        || fail "authenticated soak output must be one bounded newline-terminated JSON line"
+    jq -e '
+      (keys | sort) == ["completedRenderCount","cpuThrottled","maxConcurrentRenderJobs","networkChecks","networkFailures","oomKilled","renderActiveSeconds","schema"] and
+      .schema == "hook2stream-soak-hook-result-v1" and
+      (.completedRenderCount | type == "number" and floor == . and . > 0) and
+      (.renderActiveSeconds | type == "number" and floor == . and . >= 3300) and
+      .maxConcurrentRenderJobs == 1 and
+      (.networkChecks | type == "number" and floor == . and . >= 60) and
+      .networkFailures == 0 and .cpuThrottled == false and .oomKilled == false
+    ' "$temporary_dir/soak.stdout" >/dev/null || fail "authenticated soak result is invalid"
+    cat "$temporary_dir/soak.stdout"
+    exit 0
+fi
 
 request() {
     name=$1; path=$2

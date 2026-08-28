@@ -86,7 +86,6 @@ internal sealed class ProductionProxyApiFactory(IPAddress remoteAddress)
         builder.UseSetting("Google:PublicApiBaseUrl", "https://app.example.test");
         builder.UseSetting("Google:PublicWebReturnBaseUrl", "https://app.example.test");
         builder.UseSetting("Storage:ServiceUrl", "https://s3.example.test");
-        builder.UseSetting("Storage:PublicServiceUrl", "https://s3.example.test");
         builder.UseSetting("Storage:CredentialMode", "Static");
         builder.UseSetting("Storage:AccessKey", "test-access-key");
         builder.UseSetting("Storage:SecretKey", "test-secret-key");

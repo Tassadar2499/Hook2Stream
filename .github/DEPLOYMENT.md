@@ -1,141 +1,338 @@
 # Hook2Stream release workflow setup
 
-The workflows are fail-closed until the GitHub and host controls below exist. No application or infrastructure secret is included in a release candidate.
+The workflows are fail-closed until the repository, GitHub Environments,
+Tailscale identities, Servers.Guru app hosts, and Storj storage contract below
+exist.
+Release candidates contain no application, provider, or infrastructure secret.
 
 ## Repository controls
 
-Protect `main`: require the `CI` workflow checks, require pull requests and approval, dismiss stale approvals, require conversation resolution, block force pushes and deletion, and do not permit bypass. Configure every deployment Environment (`staging`, `production`, `storage-staging`, and `storage-production`) to allow only the protected `main` branch and no tags. The production environments must require two reviewers and prevent self-review; lack of either the branch restriction or reviewer protection blocks live payments.
+Protect `main`: require pull requests, the complete `CI` check set, approval,
+stale-approval dismissal, conversation resolution, and block force pushes,
+deletion, and bypass. Deployment Environments are only:
 
-## GitHub Pages landing
+- `staging`, restricted to protected `main`;
+- `production`, restricted to protected `main`, with two reviewers and
+  self-review disabled;
+- `github-pages`, restricted to protected `main`.
 
-The static public landing in `site/` is intentionally separate from the
-standalone/dynamic Next.js application. It owns only
-`www.hook2stream.com`; the production application stays at the apex and
-staging stays at `staging.hook2stream.com`. Caddy must never claim or redirect
-`www`.
+Delete legacy `storage-staging` and `storage-production` Environments only after
+confirming no workflow or secret consumer remains. Production MinIO/storage
+workflows, candidate receipts, deploy keys, and Tailscale tags do not belong to
+this architecture. Lack of production reviewer protection blocks live Stripe
+payments but does not block staging.
 
-For the first publication, do not merge merely to enable Pages: every push to
-`main` also starts the application CI and automatic staging deployment. First
-confirm that the repository visibility and the owner's GitHub plan permit Pages,
-then use this order:
+## Application deployment Environments
 
-1. verify `hook2stream.com` in the GitHub account with the provided Cloudflare
-   DNS TXT challenge, wait for verification, and keep that TXT record
-   permanently;
-2. publish the exact contents of `site/` on a dedicated `gh-pages` branch;
-3. configure Settings → Pages to publish from the `gh-pages` branch root;
-4. set `www.hook2stream.com` as the repository Pages custom domain;
-5. create the DNS-only `CNAME www` to `Tassadar2499.github.io`;
-6. use
-   `dig @1.1.1.1 +short TXT _github-pages-challenge-Tassadar2499.hook2stream.com`
-   and `dig @1.1.1.1 +short CNAME www.hook2stream.com` to verify both records
-   through a public resolver;
-7. wait for the Pages certificate and enable "Enforce HTTPS".
+Create `staging` and `production`. Keep these values distinct between the two
+Environments:
 
-Once the application bootstrap is ready and this change is merged through the
-protected `main` branch, switch the Pages publishing source to GitHub Actions.
-The manual-only `Pages` workflow validates the domain/Caddy contract and
-publishes `site/`; it rejects non-main dispatches and never triggers on push.
-Protect the `github-pages` Environment so only protected `main` can deploy.
-Leave "Enforce HTTPS" enabled. A checked-in `CNAME` file alone does not create
-the repository custom-domain setting. Smoke-test `/`, `/styles.css`, and a
-nested missing URL such as `/nested/missing` after every Pages publication; the
-last request must render the styled custom 404 without requesting
-`/nested/styles.css`.
+- `DEPLOY_HOST`: the full MagicDNS name
+  `h2s-app-staging.<tailnet>.ts.net` or
+  `h2s-app-production.<tailnet>.ts.net`; never use a public Servers.Guru IPv4;
+- `DEPLOY_SSH_PRIVATE_KEY`: its ED25519 deploy key;
+- `DEPLOY_SSH_KNOWN_HOSTS`: the exact pinned ED25519 record for that
+  environment's `DEPLOY_HOST`;
+- `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE`: environment-specific Tailscale
+  workload-identity federation values. Despite the action input name,
+  `TS_OAUTH_CLIENT_ID` is the federated identity client ID, not a reusable
+  OAuth client credential; neither Environment stores an OAuth secret or auth
+  key.
 
-Create GitHub Environments named `staging` and `production`. Each environment has its own values for:
+Set `MIN_ROLLBACK_RELEASE_SHA` to the same full H2SE-capable baseline SHA in
+both Environments for one rollout, and mirror that exact value in both
+root-owned host wrapper configurations. Staging signs the host-observed value;
+production rejects a different baseline, a placeholder, or a candidate that is
+not that commit or its descendant.
 
-- `DEPLOY_HOST` secret: Tailscale DNS name or IP of that environment's host.
-- `DEPLOY_SSH_PRIVATE_KEY` secret: environment-specific ED25519 deploy key.
-- `DEPLOY_SSH_KNOWN_HOSTS` secret: pinned ED25519 host-key record for `DEPLOY_HOST`.
-- `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE` secrets: Tailscale workload-identity federation values.
-- `MIN_ROLLBACK_RELEASE_SHA` variable: full SHA of the release that activates the encrypted-storage rollback floor. Configure the same value in the host wrapper environment.
-
-The staging environment also has `STAGING_RECEIPT_SIGNING_KEY`, a dedicated ED25519 private key used only to sign successful staging receipts. Add the corresponding public key as the repository variable `STAGING_RECEIPT_ALLOWED_SIGNERS`, in OpenSSH allowed-signers format:
+Staging also supplies `STAGING_RECEIPT_SIGNING_KEY`, a dedicated ED25519 private
+key used only for successful staging receipts. Store the corresponding public
+key as repository variable `STAGING_RECEIPT_ALLOWED_SIGNERS` in OpenSSH
+allowed-signers form. The value must contain exactly this one non-comment
+ED25519 record; extra, wildcard, stale, and non-ED25519 authorities fail both
+pre-approval and post-approval validation:
 
 ```text
 hook2stream-staging ssh-ed25519 AAAA...
 ```
 
-The Tailscale identities need writable `auth_keys` federation and must be restricted by ACL to:
+GitHub-hosted runners use OIDC workload federation and ephemeral Tailscale
+nodes. Create two separate Tailscale OpenID Connect trust credentials with
+issuer `https://token.actions.githubusercontent.com`. Give each credential
+only the writable `auth_keys` scope and exactly its one requested tag. The
+current GitHub default-subject configuration is name-based, so use these exact
+subjects:
 
-- `tag:hook2stream-ci-staging` to the staging host on TCP 22 only.
-- `tag:hook2stream-ci-production` to the production host on TCP 22 only.
+```text
+repo:Tassadar2499/Hook2Stream:environment:staging
+repo:Tassadar2499/Hook2Stream:environment:production
+```
 
-Do not configure a Tailscale OAuth secret: these workflows deliberately use GitHub OIDC federation and ephemeral tagged nodes.
+The repository was created before GitHub's immutable-subject default and is
+currently configured with `use_immutable_subject=false`. If that repository
+setting is enabled later, or GitHub moves the repository to immutable subjects
+after a rename or transfer, replace both Tailscale trust subjects atomically
+with the corresponding immutable forms; do not leave a name-based and
+immutable credential active at the same time:
 
-## Storage workflow controls
+```text
+repo:Tassadar2499@34176883/Hook2Stream@1295804906:environment:staging
+repo:Tassadar2499@34176883/Hook2Stream@1295804906:environment:production
+```
 
-Create two additional protected GitHub Environments: `storage-staging` and
-`storage-production`. Keep their deploy keys, host keys, Tailscale workload
-identities, receipt keys, and variables distinct from the app environments.
-Each storage Environment supplies:
+Use the generated client ID and audience only in the matching GitHub
+Environment. `tag:hook2stream-ci-staging` may reach only staging TCP 22 and
+`tag:hook2stream-ci-production` may reach only production TCP 22. Apply
+[`deploy/providers/serversguru/tailscale-policy.hujson`](../deploy/providers/serversguru/tailscale-policy.hujson)
+as the complete tailnet policy, not as an addition to a default allow-all
+grant. It binds the accepted live Tailscale IPv4 addresses, grants the tailnet
+owner ordinary OpenSSH access to both hosts, contains cross-environment deny
+tests, uses no wildcard grant, and intentionally has no `ssh` section because
+Tailscale SSH remains disabled on both hosts. Do not store a reusable
+Tailscale auth key or OAuth client secret in GitHub. The two deploy keys, host
+trust roots, and workload identities must not overlap.
 
-- `STORAGE_DEPLOY_HOST`: the corresponding storage host's Tailscale DNS name;
-- `STORAGE_DEPLOY_SSH_PRIVATE_KEY`: an environment-specific ED25519 key;
-- `STORAGE_DEPLOY_SSH_KNOWN_HOSTS`: the exact pinned ED25519 record;
-- `STORAGE_TS_OAUTH_CLIENT_ID` and `STORAGE_TS_AUDIENCE`:
-  workload-identity federation values.
+Enroll the two permanent hosts as `h2s-app-staging` and
+`h2s-app-production`. Generate each CI deploy key off-host, install only its public half using
+`src/deploy/host/authorized_keys.example`, and place its private half only in
+the matching Environment secret. Read each host key through the Servers.Guru
+VNC console or an already verified Tailscale operator session and pin it
+exactly.
 
-`storage-staging` also has the dedicated
-`STORAGE_STAGING_RECEIPT_SIGNING_KEY` secret. Store its public counterpart as
-the repository variable `STORAGE_STAGING_RECEIPT_ALLOWED_SIGNERS`, in OpenSSH
-allowed-signers format with identity `hook2stream-storage-staging`.
-`storage-production` requires the same two-reviewer/no-self-review protection
-as app production. The minimum protocol, object format, and MinIO security
-sequence plus the last-applied release/source commit are persisted by the
-root-owned host wrapper on the encrypted storage mount; they are not mutable
-GitHub variables.
+Never establish trust with an unauthenticated `ssh-keyscan`. Before enabling
+deployment, prove each CI tag reaches only its matching host and that strict
+OpenSSH rejects a deliberately wrong host key.
 
-The release-independent MinIO approval policy comes only from current protected
-`main`. Install the reviewed file at
-`/etc/hook2stream-storage/minio-security-policy.json` on each storage host as
-root:root mode `0600`, record its source commit and SHA-256, and configure the
-exact path in the root-owned deploy configuration. Never install the policy
-copy carried by an old candidate. The current policy intentionally has an
-empty `approvedSourceReleases` array because the final OSS MinIO release has
-four unresolved High advisories; consequently Storage CI and both host deploys
-remain fail-closed until a supported storage choice is reviewed.
+Storj runtime/backup credentials, the storage marker digest, any optional
+Servers.Guru read-only API key, OAuth/Stripe/OpenRouter values, database/session secrets, age
+material, and H2SE keyrings are host/operator concerns and never GitHub
+Environment secrets.
 
-Tailscale ACLs allow `tag:hook2stream-storage-ci-staging` only to staging
-storage TCP 22 and `tag:hook2stream-storage-ci-production` only to production
-storage TCP 22. They do not grant CI direct access to MinIO, app hosts,
-databases, or the other environment. Storage deployment also uses OIDC and
-ephemeral nodes; no reusable Tailscale auth key is stored in GitHub.
+## Initial provider-to-CI handoff
 
-Storage candidates and receipts are independent of app candidates. Production
-promotion accepts a successful main-branch storage CI run ID, proves the exact
-candidate passed storage staging, and streams those same digest-only files to
-the storage forced command without rebuilding. Before and after production
-approval it reapplies the policy from current protected `main` and rescans all
-three exact image digests with the current vulnerability database. A
-format-floor or MinIO security-sequence downgrade fails before Docker mutation
-and requires a forward fix.
+Complete bootstrap once for each permanent host:
+
+1. In the Servers.Guru panel verify the already paid staging `MTL1-3` record in
+   Montreal and production `NL1-4` record in Amsterdam. Both must show Ubuntu
+   24.04 amd64, the expected primary IPv4 and monthly term. Provisioning,
+   rebuild, power, cancellation, snapshot restore, and backup restore remain
+   manual operator actions. An optional provider API key is read-only and stays
+   outside GitHub and both VPS instances.
+2. Through a verified SSH or panel VNC session, use the issued root password
+   to bootstrap and as the temporary MVP recovery credential. Install operator keys, enroll Tailscale with
+   Tailscale SSH disabled, allow TCP 22 only on `tailscale0`, install
+   `src/deploy/host/sshd-no-public-ssh.conf.example`, and require `sshd -t`.
+   Remove public SSH; keep operator and deploy local passwords locked. Root is
+   the only account with an active password, which must be unique per host and
+   held only in encrypted operator escrow. Prove both operator-key and
+   root-password ordinary OpenSSH through MagicDNS before installing any
+   environment secret.
+3. Run `validate-serversguru-probe.sh staging|production` and the matching
+   `validate-host.sh app staging|production`. Prove KVM, `/dev/net/tun`,
+   Tailscale, loop/dm-crypt/LUKS2, VNC recovery, Docker Compose v2, static IPv4,
+   exact resource capacity, UFW, and required outbound integrations. Production
+   also requires written support acceptance of one FFmpeg job using up to three
+   vCPU for the 60-minute soak.
+4. Bootstrap and accept the environment's separate Storj contract, install its
+   marker digest and runtime secrets, and prove the authenticated storage probe.
+   Initialize each PostgreSQL database once and require its first encrypted
+   backup. The permanent staging database is preserved between candidates
+   unless an explicit test reset is approved.
+5. Register the exact Google callback and Stripe webhook for each environment;
+   staging/test and production/live credentials must not overlap.
+6. Configure the environment-specific deploy key, exact pinned ED25519 host
+   key, Tailscale OIDC values, tailnet policy, and `DEPLOY_HOST`. Mirror the
+   same first H2SE-capable `MIN_ROLLBACK_RELEASE_SHA` in both hosts and
+   Environments.
+7. Point Cloudflare DNS-only `A staging` to the `MTL1-3` IPv4 and `A @` to the
+   `NL1-4` IPv4. Leave `www`, GitHub verification TXT, and AAAA unchanged; AAAA
+   remains absent because these locations do not currently offer IPv6.
+8. Select a successful protected-main candidate and dispatch `Stage candidate`
+   with its `source_ci_run_id`. After the signed staging receipt and 60-minute
+   soak pass, dispatch `Promote production` with only that successful staging
+   run ID. Complete the protected approval inside the maintenance window.
+
+The staging dispatch remains fail-closed until every bootstrap item is
+complete. Do not weaken Environment, host trust, Tailscale, storage, backup, or
+forced-command controls to make a deployment pass. Production accepts only the
+exact immutable candidate recorded by a successful signed staging receipt.
+
+## Candidate promotion
+
+After successful CI on protected `main`, build exactly one immutable
+`release-candidate-<sha>-<run_id>-<attempt>` retained for 90 days. It contains:
+
+- schema-v1 `release-metadata.json`;
+- digest-only `release-images.env`;
+- the application-only `deploy-bundle.tar.gz` from `src/deploy`;
+- `SHA256SUMS`.
+
+The bundle excludes production MinIO/storage-plane material. The checked-in
+MinIO overlay remains local/CI only.
+
+The main `CI` workflow only publishes the candidate. Once the permanent staging
+host is accepted, manually dispatch `Stage candidate` with `source_ci_run_id`. That workflow
+verifies the selected run is a successful protected-main run, downloads its
+exact candidate and attestations, streams it to staging, performs the signed
+Storj marker and authenticated storage probe, requires a fresh encrypted backup
+before migration, runs smoke/E2E plus the 60-minute soak, verifies actual
+digests, and publishes a signed `staging-receipt` artifact.
+
+Freeze protected `main` from the `Stage candidate` dispatch until the staging
+receipt is signed and production finishes its SSH
+promotion (or the rollout is explicitly abandoned). Every secret boundary,
+host mutation, and staging-receipt signature re-reads protected `main` and
+requires it to remain the dispatch policy SHA. A merge during the 60-minute
+soak intentionally invalidates that rollout; stage a new candidate from the
+new protected-main policy instead of weakening this check.
+
+Both the secretless verification job and every Environment-secret-bearing job
+check out policy/helpers only at the exact current `github.workflow_sha` and
+require it to equal the protected-main dispatch SHA. The selected historical
+release SHA is treated only as attested candidate data: no helper, validator,
+shell profile, or workflow command from that checkout is executed on a GitHub
+runner. The verified candidate crosses into the credential-bearing job through
+a new job/artifact boundary and is revalidated there with current policy.
+
+Production starts only from `workflow_dispatch(source_staging_run_id)`.
+Promotion verifies that exact successful `Stage candidate` run belongs to
+protected `main`, extracts the source CI run/attempt/SHA from its signed receipt,
+downloads that exact candidate, and verifies the dedicated staging-receipt
+ED25519 signature before and after protected approval. The production host
+checks the same receipt again and streams the same digest-only artifact without
+rebuild. A stale, failed, unsigned, cross-environment, or mismatched receipt is
+rejected.
+The staging and production concurrency groups are distinct and both use
+`cancel-in-progress:false`; host `flock` is the second lock.
 
 ## Host command protocol
 
-`hook2stream-deploy` has no Docker or secrets access. Its `authorized_keys` entry uses `restrict` and a root-owned forced command. The client command is exactly `deploy <candidate-id>` or `rollback <40-character-sha> H2SEv1`.
+`hook2stream-deploy` is not in `docker` or any secret-reader group. Its
+`authorized_keys` contains exactly one environment-specific ED25519 key with
+`restrict` and the root-owned forced command through absolute
+`/usr/bin/sudo`; the operator key file likewise
+contains exactly one ED25519 key. Record both `ssh-keygen -lf ... -E sha256`
+fingerprints as `HOOK2STREAM_OPERATOR_PUBLIC_KEY_SHA256` and
+`HOOK2STREAM_DEPLOY_PUBLIC_KEY_SHA256` in root-owned `deploy.conf`. The host
+validator also requires the exact two-line `/etc/sudoers.d/hook2stream-deploy`
+grant from `src/deploy/host/sudoers.example`; extra keys, options, or sudo rules
+fail validation. Operator, forced-command deploy, and staging-receipt trust
+roles must all use different ED25519 keys; reusing the deploy
+key for the sudo-capable operator account is a release-blocking privilege
+escalation. The private ED25519 host key must be a non-symlink `root:root 0600`
+file without extended ACLs; its `root:root 0644` public key must match, and both
+must be distinct from every user/receipt authority. The SSH
+client command is exactly `deploy <candidate-id>`, staging-only
+`soak <candidate-id>`, or `rollback <40-character-sha> H2SEv1`.
 
-Deploy receives an uncompressed tar stream on stdin. It contains `candidate/` with the four immutable candidate files; production also contains `approval/staging-receipt.json` and `approval/staging-receipt.sig`. The host validates checksums, metadata schema, repository and image allowlists, archive traversal, staging signature, and the actual running digests. Its final success line is a base64-encoded `hook2stream-remote-deploy-result` JSON record prefixed with `HOOK2STREAM_REMOTE_RECEIPT=`.
+Deploy receives one uncompressed tar stream. It contains `candidate/` with the
+four immutable files; production also carries
+`approval/staging-receipt.json` and `approval/staging-receipt.sig`. The host
+rejects checksum/schema/repository/image allowlist mismatch, tags, duplicate or
+unknown variables, archive traversal, links, special files, invalid staging
+approval, and any mismatch between expected and running digests. Its final
+success line is the base64-encoded `hook2stream-remote-deploy-result` record
+prefixed with `HOOK2STREAM_REMOTE_RECEIPT=`.
 
-Every successful deployment records a root-owned capability document for its release SHA. Rollback accepts only a release recorded as successful on that same host whose capability document explicitly includes `H2SEv1`; the SHA is treated only as an identity and is never compared lexicographically. `MIN_ROLLBACK_RELEASE_SHA` activates this fail-closed floor on both the GitHub Environment and host. Once an H2SE object exists, a target without the H2SE reader capability is ineligible even if it was previously successful.
+Use ordinary OpenSSH only. Bootstrap every host with
+`sudo tailscale set --ssh=false`; validation fails unless
+`tailscale get --json ssh` is exactly `false`, because Tailscale SSH would
+intercept the tailnet listener before these key and forced-command checks.
 
-Rollback is application-image-only. The host starts with the current successful
-environment, replaces only `API_IMAGE`, `WORKER_IMAGE`, `WEB_IMAGE` and
-`RELEASE_VERSION` from the selected target, and preserves the current
-bootstrapper and infrastructure digests. Before mutation it proves that Caddy,
-PostgreSQL, PgBouncer, the backup sidecar and all three egress proxies still run
-those current digests. It then pulls and recreates only API, every worker and
-web with `--no-deps`. It never runs the bootstrapper or migrations and never
-pulls/recreates Caddy, PostgreSQL, PgBouncer, backup or egress services.
+After a successful staging deploy, the workflow opens a separate SSH command
+`soak <candidate-id>` with no input stream. The forced command accepts only the
+exact current successful candidate, holds the host lock, and invokes the
+trusted root-owned E2E hook with fourth argument
+`soak-60m`. The hook must run for 3600--3900 measured seconds and emit one
+strict `hook2stream-soak-hook-result-v1` JSON line proving a completed render,
+at least 3300 active render seconds, render concurrency exactly one, at least 60
+network checks with zero failures, no throttling, and no OOM. The wrapper also
+requires one healthy non-OOM `worker-render` on the candidate digest. It returns
+only the bound base64 `hook2stream-remote-soak-result` line prefixed with
+`HOOK2STREAM_REMOTE_SOAK_RECEIPT=`; hook stderr/logs are never mirrored into
+Actions output. The signed staging receipt includes this result and the
+`render-network-soak` check.
 
-The target schema must therefore be expand/contract compatible with the
-currently migrated database; incompatible rollback remains blocked in favor of
-a forward fix or a separately approved write-stop/restore. After health, public
-smoke, mandatory authenticated E2E and exact app-plus-infrastructure digest
-checks, the host atomically makes the synthesized environment current and emits
-`HOOK2STREAM_ROLLBACK_RECEIPT=` with a base64-encoded
-`hook2stream-remote-rollback-result`. Its checks are
-`target-recorded-success`, `storage-format-compatible`,
-`application-images-only`, `infrastructure-unchanged`, `no-migrations`,
-`smoke`, `e2e`, and `digest-verification`.
+Every successful release gets a root-owned capability document. Rollback is
+eligible only when that host recorded the target as successful and the target
+explicitly supports `H2SEv1`. GitHub additionally requires the target to equal
+the configured `MIN_ROLLBACK_RELEASE_SHA` or be its Git descendant, both before
+tailnet access and immediately before SSH mutation. A SHA is an identity, not
+an ordering primitive. Once an H2SE v1 object exists, a release without the
+reader remains ineligible.
+
+Rollback is application-image-only. It replaces API, worker, web, and release
+version while preserving the current bootstrapper and all infrastructure
+digests. It runs no migration, down-migration, or storage mutation. Before and
+after mutation, the host proves PostgreSQL, PgBouncer, Caddy, the backup sidecar,
+storage janitor, and every egress proxy are unchanged. Incompatible schema
+rollback requires a forward fix or a separately approved write-stop/restore.
+
+## Storj deployment gate
+
+There is no storage deployment workflow. An operator creates two Storj projects
+and four private buckets outside GitHub, derives environment- and role-scoped
+access grants, runs `src/deploy/storj/bootstrap-buckets.sh`, and stores only the
+printed marker SHA-256 in each root-owned Servers.Guru environment configuration.
+
+Staging/production use `STORAGE_MODE=external`,
+`STORAGE_PROVISIONING_MODE=VerifyOnly`, and exact media/backup endpoints. The
+host gate authenticates to the media bucket, verifies
+`.hook2stream/contracts/storage-v1.json` and its pinned digest, then performs
+PUT/HEAD/single-range GET/DELETE. `VerifyOnly` must not create buckets or mutate
+CORS/lifecycle. The backup writer is bucket-scoped, has no Delete permission,
+and carries the 168/840-hour maximum object TTL in its Storj access grant.
+
+Never place a Storj full project grant, encryption passphrase, restore grant, or
+bootstrap credential on a Servers.Guru host or in GitHub. See the canonical
+operations runbook and `src/deploy/storj/README.md` for the operator flow.
+
+## GitHub Pages landing
+
+The static landing in `site/` owns only `www.hook2stream.com`. The production
+application remains at the apex and staging remains at
+`staging.hook2stream.com`; Caddy must never claim or redirect `www`.
+
+For first publication:
+
+1. verify `hook2stream.com` in the GitHub account using Cloudflare's DNS-only
+   TXT challenge and keep that record permanently;
+2. configure the repository Pages custom domain as `www.hook2stream.com`;
+3. create DNS-only `CNAME www` -> `Tassadar2499.github.io`;
+4. confirm TXT and CNAME with a public resolver;
+5. wait for the Pages certificate and enable Enforce HTTPS;
+6. run the manual-only `Pages` workflow from protected `main` and smoke `/`,
+   `/styles.css`, and a nested missing URL for the styled custom 404.
+
+The workflow intentionally does not run on push. Application CI publishes a
+candidate, while deployment to permanent staging is a separate
+operator-selected dispatch. A
+checked-in `site/CNAME` alone does not configure the repository's custom domain.
+
+## External operator boundaries
+
+GitHub workflows do not register the domain, edit Cloudflare DNS, order,
+rebuild, cancel, power, or restore Servers.Guru VPS instances, fund provider or
+Storj balances, create Storj
+projects/grants, unlock
+LUKS, provision host secrets, or execute live OAuth/Stripe/render/recovery
+drills. Those are explicit operator gates.
+
+Servers.Guru account 2FA, wallet funding, renewal review, VNC access, manual
+provider mutations, and shared-CPU acceptance are operator-only. The API is
+optional read-only inventory/status evidence because published keys have no
+documented scopes or expiry controls. The rollout gate stops above EUR 40 per
+month for the pair, any ten-percent SKU price movement, a wrong location/image,
+an overdue invoice, or an ambiguous provider record. Keep at least two complete
+monthly pair budgets funded. The operator retains independent `findmnt`,
+backing-device, and `cryptsetup status` evidence for each active host.
+
+Crypto payment and wallet replenishment remain manual. Renewal invoices arrive
+seven days before the due date, and a new account must not assume a grace
+period. Provider backup, snapshots, IPv6, provider firewalling, and DDoS
+protection are not release dependencies.
+
+External observability and alerting integrations are deferred. Keep
+`OTEL_EXPORTER_OTLP_ENDPOINT` empty. The operator must manually review
+local health, backup age, disk/OOM/queue state, TLS, and provider balances during
+the 60-minute staging soak and at least 30 minutes after production deploy.

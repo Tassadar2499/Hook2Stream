@@ -61,15 +61,25 @@ cat > "${stub_bin}/aws" <<'EOF'
 set -eu
 [ -f "$AWS_CONFIG_FILE" ] \
     && grep -Fx '    addressing_style = path' "$AWS_CONFIG_FILE" >/dev/null \
+    && grep -Fx 'request_checksum_calculation = when_required' "$AWS_CONFIG_FILE" >/dev/null \
+    && grep -Fx 'response_checksum_validation = when_required' "$AWS_CONFIG_FILE" >/dev/null \
     || exit 45
 [ "$AWS_SHARED_CREDENTIALS_FILE" = /dev/null ] || exit 46
 printf '%s' "$AWS_ACCESS_KEY_ID" > "${TEST_STATE_DIR}/used-access-key-id"
 printf '%s' "$AWS_SECRET_ACCESS_KEY" > "${TEST_STATE_DIR}/used-secret-access-key"
 
 case "${1:-}:${2:-}" in
-    s3:cp)
-        source_file=$4
-        destination=$5
+    s3api:put-object)
+        source_file=
+        destination=
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --body) source_file=$2; shift 2 ;;
+                --key) destination=$2; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        [ -n "$source_file" ] && [ -n "$destination" ] || exit 48
         case "$destination" in
             *.manifest.json)
                 [ "${TEST_FAIL_MANIFEST:-false}" != true ] || exit 42
@@ -77,10 +87,12 @@ case "${1:-}:${2:-}" in
         esac
         cp "$source_file" "${TEST_UPLOAD_DIR}/$(basename "$destination")"
         printf '%s\n' "$destination" >> "${TEST_STATE_DIR}/upload-order"
-        ;;
-    s3api:list-object-versions)
-        [ "${TEST_FAIL_RETENTION:-false}" != true ] || exit 43
-        printf '%s\n' '{"Versions":[],"DeleteMarkers":[]}'
+        version_counter_file=${TEST_STATE_DIR}/version-counter
+        version_counter=0
+        [ ! -f "$version_counter_file" ] || version_counter=$(cat "$version_counter_file")
+        version_counter=$((version_counter + 1))
+        printf '%s\n' "$version_counter" > "$version_counter_file"
+        printf '{"VersionId":"version-%s"}\n' "$version_counter"
         ;;
     *)
         printf '%s\n' "unexpected aws command: $*" >&2
@@ -99,7 +111,12 @@ EOF
 cat > "${stub_bin}/jq" <<'EOF'
 #!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args[0] === "-r") process.exit(0);
+if (args[0] === "-er") {
+  const response = JSON.parse(require("node:fs").readFileSync(args.at(-1), "utf8"));
+  if (typeof response.VersionId !== "string" || response.VersionId.length === 0) process.exit(1);
+  process.stdout.write(`${response.VersionId}\n`);
+  process.exit(0);
+}
 if (args[0] !== "-n") throw new Error(`unexpected jq arguments: ${args.join(" ")}`);
 
 const values = {};
@@ -115,7 +132,7 @@ for (let index = 1; index < args.length - 1;) {
 }
 
 process.stdout.write(JSON.stringify({
-  schemaVersion: 2,
+  schemaVersion: 3,
   kind: values.kind,
   createdAt: values.createdAt,
   database: values.database,
@@ -126,10 +143,16 @@ process.stdout.write(JSON.stringify({
   },
   encryptedDump: {
     objectKey: values.dumpObjectKey,
+    versionId: values.dumpVersionId,
     sha256: values.ciphertextSha256,
   },
   checksum: {
     objectKey: values.checksumObjectKey,
+    versionId: values.checksumVersionId,
+  },
+  retention: {
+    mode: "storj-access-grant-max-object-ttl",
+    maxObjectTtlHours: values.maxObjectTtlHours,
   },
 }, null, 2));
 EOF
@@ -147,7 +170,6 @@ run_backup() {
         TEST_STATE_DIR="$state_dir" \
         TEST_UPLOAD_DIR="$upload_dir" \
         TEST_FAIL_MANIFEST="${TEST_FAIL_MANIFEST:-false}" \
-        TEST_FAIL_RETENTION="${TEST_FAIL_RETENTION:-false}" \
         POSTGRES_HOST=postgres \
         POSTGRES_PORT=5432 \
         POSTGRES_DB=testdb \
@@ -157,14 +179,14 @@ run_backup() {
         BACKUP_S3_REGION=test-region-1 \
         BACKUP_S3_BUCKET=test-backups \
         BACKUP_S3_PREFIX=rotation-test/postgres \
-        S3_FORCE_PATH_STYLE=true \
+        BACKUP_S3_FORCE_PATH_STYLE=true \
         BACKUP_S3_ACCESS_KEY_FILE="${secret_dir}/backup_s3_access_key" \
         BACKUP_S3_SECRET_KEY_FILE="${secret_dir}/backup_s3_secret_key" \
         BACKUP_AGE_RECIPIENT_FILE="${secret_dir}/backup_age_recipient" \
         BACKUP_INTERVAL_SECONDS=300 \
         BACKUP_MAX_AGE_SECONDS=7200 \
         BACKUP_RETENTION_DAYS=35 \
-        BACKUP_RETENTION_SAFETY_SECONDS=300 \
+        BACKUP_MAX_OBJECT_TTL_HOURS=840 \
         BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
         "$backup_script" backup-once
 }
@@ -179,6 +201,11 @@ run_backup >"${state_dir}/first-backup-output" 2>&1
     || fail "backup did not load the S3 secret access key from its file"
 grep -Fq 'addressing_style = path' "$backup_script" \
     || fail "backup does not force path-style S3 addressing"
+grep -Fq 'request_checksum_calculation = when_required' "$backup_script" \
+    && grep -Fq 'response_checksum_validation = when_required' "$backup_script" \
+    || fail "backup does not use the Storj-compatible checksum mode"
+grep -Fq 'flock -w "$BACKUP_LOCK_TIMEOUT_SECONDS" 9' "$backup_script" \
+    || fail "backup-once and daemon runs are not serialized on shared scratch"
 [ "$(cat "${state_dir}/used-recipient")" = 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' ] \
     || fail "backup did not use the configured age recipient"
 
@@ -205,7 +232,7 @@ const [manifestPath, dumpPath] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const ciphertext = fs.readFileSync(dumpPath);
 
-assert.equal(manifest.schemaVersion, 2);
+assert.equal(manifest.schemaVersion, 3);
 assert.equal(manifest.kind, "hook2stream-postgresql-logical-backup");
 assert.equal(manifest.database, "testdb");
 assert.match(manifest.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
@@ -215,6 +242,7 @@ assert.deepEqual(manifest.encryption, {
   recipientFingerprint: crypto.createHash("sha256").update("age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq").digest("hex").slice(0, 16),
 });
 assert.match(manifest.encryptedDump.objectKey, /-age-[0-9a-f]{16}\.dump\.age$/);
+assert.match(manifest.encryptedDump.versionId, /^version-\d+$/);
 assert.equal(
   manifest.encryptedDump.sha256,
   crypto.createHash("sha256").update(ciphertext).digest("hex"),
@@ -223,6 +251,11 @@ assert.equal(
   manifest.checksum.objectKey,
   `${manifest.encryptedDump.objectKey}.sha256`,
 );
+assert.match(manifest.checksum.versionId, /^version-\d+$/);
+assert.deepEqual(manifest.retention, {
+  mode: "storj-access-grant-max-object-ttl",
+  maxObjectTtlHours: 840,
+});
 EOF
 
 [ "$(wc -l < "${state_dir}/upload-order" | tr -d ' ')" -eq 3 ] \
@@ -243,6 +276,9 @@ esac
 expected_recipient_fingerprint=$(printf '%s' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' | sha256sum | cut -c1-16)
 [ "$(sed -n '2p' "${state_dir}/last-successful-backup")" = "$expected_recipient_fingerprint" ] \
     || fail "freshness marker does not record the age recipient fingerprint"
+[ -n "$(sed -n '3p' "${state_dir}/last-successful-backup")" ] \
+    && [ -n "$(sed -n '4p' "${state_dir}/last-successful-backup")" ] \
+    || fail "freshness marker does not record the completion manifest key and VersionId"
 
 env \
     BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
@@ -274,11 +310,9 @@ fi
 [ "$(cat "${state_dir}/last-successful-backup")" = "$marker_before_failed_upload" ] \
     || fail "failed manifest upload replaced the last successful freshness marker"
 
-if TEST_FAIL_RETENTION=true run_backup >"${state_dir}/retention-failure-output" 2>&1; then
-    fail "backup succeeded when the retention cycle failed"
+if grep -Eq 'delete-object|list-object-versions|s3 cp' "${state_dir}/upload-order"; then
+    fail "backup used a delete/list retention operation or multipart-capable high-level upload"
 fi
-[ "$(cat "${state_dir}/last-successful-backup")" = "$marker_before_failed_upload" ] \
-    || fail "failed retention cycle replaced the last successful freshness marker"
 
 printf '%s\n' '../invalid-recipient' > "${secret_dir}/backup_age_recipient"
 if run_backup >"${state_dir}/invalid-key-output" 2>&1; then

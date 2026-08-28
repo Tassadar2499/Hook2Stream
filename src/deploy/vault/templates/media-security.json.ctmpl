@@ -1,0 +1,9 @@
+{{- with secret "hook2stream-kv/data/production/media-security" -}}
+{
+  "kv_version": {{ .Data.metadata.version }},
+  "secrets": {
+    "media_keyring": {{ .Data.data.media_keyring | toJSON }},
+    "invited_emails": {{ .Data.data.invited_emails | toJSON }}
+  }
+}
+{{- end -}}

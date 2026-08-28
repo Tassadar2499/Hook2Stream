@@ -53,6 +53,65 @@ public sealed class H2seEncryptedObjectStorageTests
     }
 
     [Fact]
+    public async Task Staging_data_and_manifest_share_one_absolute_storj_expiration()
+    {
+        var raw = new MemoryRawStorage();
+        using var keyring = TestKeyring.Create();
+        var now = new DateTimeOffset(2026, 8, 24, 10, 15, 30, TimeSpan.Zero);
+        var storage = Create(
+            raw,
+            keyring.Path,
+            new StorageOptions { ObjectExpirationMode = StorageObjectExpirationMode.Storj },
+            new OperationalPolicyOptions { StagingHours = 24 },
+            new FixedTimeProvider(now));
+        var source = TempFile("temporary"u8.ToArray());
+        try
+        {
+            await storage.UploadAsync(
+                "staging/workspace/project/upload/part",
+                source,
+                "application/octet-stream",
+                default);
+
+            Assert.Equal(2, raw.Uploads.Count);
+            Assert.All(raw.Uploads, upload => Assert.Equal(now.AddHours(24), upload.ExpiresAt));
+            Assert.Contains(raw.Uploads, upload => upload.Key.Contains(".h2se/data/", StringComparison.Ordinal));
+            Assert.EndsWith(".h2se/manifest", raw.Uploads[^1].Key, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(source);
+        }
+    }
+
+    [Fact]
+    public async Task Permanent_objects_do_not_receive_storj_expiration()
+    {
+        var raw = new MemoryRawStorage();
+        using var keyring = TestKeyring.Create();
+        var storage = Create(
+            raw,
+            keyring.Path,
+            new StorageOptions { ObjectExpirationMode = StorageObjectExpirationMode.Storj });
+        var source = TempFile("permanent"u8.ToArray());
+        try
+        {
+            await storage.UploadAsync(
+                "w/workspace/p/project/assets/asset/original",
+                source,
+                "application/octet-stream",
+                default);
+
+            Assert.Equal(2, raw.Uploads.Count);
+            Assert.All(raw.Uploads, upload => Assert.Null(upload.ExpiresAt));
+        }
+        finally
+        {
+            File.Delete(source);
+        }
+    }
+
+    [Fact]
     public async Task RoundTrips_250MiB_without_buffering_the_whole_object_in_memory()
     {
         const long size = 250L * 1024 * 1024;
@@ -208,8 +267,18 @@ public sealed class H2seEncryptedObjectStorageTests
         finally { File.Delete(source); File.Delete(second); }
     }
 
-    private static H2seEncryptedObjectStorage Create(IRawObjectStorage raw, string keyringPath) =>
-        new(raw, Options.Create(new StorageEncryptionOptions { KeyringPath = keyringPath }));
+    private static H2seEncryptedObjectStorage Create(
+        IRawObjectStorage raw,
+        string keyringPath,
+        StorageOptions? storageOptions = null,
+        OperationalPolicyOptions? policyOptions = null,
+        TimeProvider? timeProvider = null) =>
+        new(
+            raw,
+            Options.Create(new StorageEncryptionOptions { KeyringPath = keyringPath }),
+            Options.Create(storageOptions ?? new StorageOptions()),
+            Options.Create(policyOptions ?? new OperationalPolicyOptions()),
+            timeProvider ?? TimeProvider.System);
     private static string TempFile(byte[] bytes) { var path = NewTempPath(); File.WriteAllBytes(path, bytes); return path; }
     private static string NewTempPath() => Path.Combine(Path.GetTempPath(), $"h2se-test-{Guid.NewGuid():N}");
     private static bool Contains(byte[] haystack, ReadOnlySpan<byte> needle) => haystack.AsSpan().IndexOf(needle) >= 0;
@@ -245,11 +314,22 @@ public sealed class H2seEncryptedObjectStorageTests
     {
         public Dictionary<string, byte[]> Objects { get; } = [];
         public List<string> UploadOrder { get; } = [];
+        public List<(string Key, DateTimeOffset? ExpiresAt)> Uploads { get; } = [];
         public List<(string Key, long Offset, long Length)> RangeReads { get; } = [];
         public Task EnsureBucketAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<StorageObjectInfo?> HeadAsync(string key, CancellationToken cancellationToken) => Task.FromResult(Objects.TryGetValue(key, out var value) ? new StorageObjectInfo(value.Length, null, null) : null);
         public async Task DownloadAsync(string key, string path, CancellationToken cancellationToken) => await File.WriteAllBytesAsync(path, Objects[key], cancellationToken);
-        public async Task UploadAsync(string key, string path, string contentType, CancellationToken cancellationToken) { Objects[key] = await File.ReadAllBytesAsync(path, cancellationToken); UploadOrder.Add(key); }
+        public async Task UploadAsync(
+            string key,
+            string path,
+            string contentType,
+            DateTimeOffset? expiresAt,
+            CancellationToken cancellationToken)
+        {
+            Objects[key] = await File.ReadAllBytesAsync(path, cancellationToken);
+            UploadOrder.Add(key);
+            Uploads.Add((key, expiresAt));
+        }
         public Task CopyToAsync(string key, Stream destination, long offset, long length, CancellationToken cancellationToken) { RangeReads.Add((key, offset, length)); return destination.WriteAsync(Objects[key].AsMemory((int)offset, (int)length), cancellationToken).AsTask(); }
         public Task DeleteAsync(string key, CancellationToken cancellationToken) { Objects.Remove(key); return Task.CompletedTask; }
         public Task DeleteProjectObjectsAsync(ProjectStorageScope scope, CancellationToken cancellationToken) => Task.CompletedTask;
@@ -269,7 +349,12 @@ public sealed class H2seEncryptedObjectStorageTests
                 : null);
         public Task DownloadAsync(string key, string path, CancellationToken cancellationToken) =>
             CopyFileAsync(_objects[key], path, cancellationToken);
-        public Task UploadAsync(string key, string path, string contentType, CancellationToken cancellationToken)
+        public Task UploadAsync(
+            string key,
+            string path,
+            string contentType,
+            DateTimeOffset? expiresAt,
+            CancellationToken cancellationToken)
         {
             var destination = Path.Combine(_root, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))));
             File.Move(path, destination, overwrite: true);
@@ -305,6 +390,11 @@ public sealed class H2seEncryptedObjectStorageTests
             await using var destination = new FileStream(destinationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
             await source.CopyToAsync(destination, cancellationToken);
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 
     private sealed class HashingWriteStream : Stream

@@ -1,1 +1,0 @@
-restrict,command="sudo -n /usr/local/sbin/hook2stream-storage-deploy-launcher" ssh-ed25519 REPLACE_WITH_ENVIRONMENT_SPECIFIC_STORAGE_CI_PUBLIC_KEY

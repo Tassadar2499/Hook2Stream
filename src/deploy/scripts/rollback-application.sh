@@ -162,12 +162,14 @@ verify_running_image() {
 # before mutating any application container. These are read-only inspections.
 for rollback_mapping in \
     'POSTGRES_BACKUP_IMAGE:postgres-backup' \
+    'POSTGRES_BACKUP_IMAGE:storage-janitor' \
     'CADDY_IMAGE:caddy' \
     'POSTGRES_IMAGE:postgres' \
     'PGBOUNCER_IMAGE:pgbouncer' \
     'EGRESS_PROXY_IMAGE:egress-api' \
     'EGRESS_PROXY_IMAGE:egress-s3' \
-    'EGRESS_PROXY_IMAGE:egress-control'; do
+    'EGRESS_PROXY_IMAGE:egress-control' \
+    'EGRESS_PROXY_IMAGE:egress-backup'; do
     verify_running_image "${rollback_mapping%%:*}" "${rollback_mapping#*:}"
 done
 
@@ -213,12 +215,14 @@ for rollback_mapping in \
     'WORKER_IMAGE:worker-export' \
     'WEB_IMAGE:web' \
     'POSTGRES_BACKUP_IMAGE:postgres-backup' \
+    'POSTGRES_BACKUP_IMAGE:storage-janitor' \
     'CADDY_IMAGE:caddy' \
     'POSTGRES_IMAGE:postgres' \
     'PGBOUNCER_IMAGE:pgbouncer' \
     'EGRESS_PROXY_IMAGE:egress-api' \
     'EGRESS_PROXY_IMAGE:egress-s3' \
-    'EGRESS_PROXY_IMAGE:egress-control'; do
+    'EGRESS_PROXY_IMAGE:egress-control' \
+    'EGRESS_PROXY_IMAGE:egress-backup'; do
     verify_running_image "${rollback_mapping%%:*}" "${rollback_mapping#*:}"
 done
 

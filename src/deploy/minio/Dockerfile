@@ -32,7 +32,7 @@ FROM ${ALPINE_IMAGE} AS runtime
 ARG MINIO_RELEASE
 ARG MINIO_COMMIT
 
-LABEL org.opencontainers.image.title="Hook2Stream remote MinIO" \
+LABEL org.opencontainers.image.title="Hook2Stream local/CI MinIO" \
       org.opencontainers.image.description="Source build of the final MinIO community release; deployment security gate enforced separately" \
       org.opencontainers.image.source="https://github.com/minio/minio" \
       com.hook2stream.minio.source-release="${MINIO_RELEASE}" \

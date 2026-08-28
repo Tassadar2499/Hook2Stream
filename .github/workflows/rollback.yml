@@ -44,12 +44,28 @@ jobs:
     env:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: hook2stream-deploy
+      DEPLOYMENT_ENVIRONMENT: ${{ inputs.environment }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      POLICY_SHA: ${{ github.workflow_sha }}
       RELEASE_SHA: ${{ inputs.release_sha }}
       REQUIRED_STORAGE_FORMAT: ${{ inputs.required_storage_format }}
       MIN_ROLLBACK_RELEASE_SHA: ${{ vars.MIN_ROLLBACK_RELEASE_SHA }}
     steps:
+      - name: Revalidate live protected-main rollback policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Validate rollback request
@@ -67,6 +83,11 @@ jobs:
           esac
           test "$REQUIRED_STORAGE_FORMAT" = H2SEv1
           test -n "$ROLLBACK_REASON"
+          floor_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${MIN_ROLLBACK_RELEASE_SHA}...${RELEASE_SHA}" --jq .status)"
+          case "$floor_status" in
+            identical|ahead) ;;
+            *) echo "rollback target predates or diverges from the configured H2SE floor" >&2; exit 1 ;;
+          esac
           {
             echo "### Rollback request"
             echo
@@ -78,6 +99,25 @@ jobs:
             echo
             echo "The host must accept only a locally successful release with an explicit $REQUIRED_STORAGE_FORMAT read-capability record. SHA values are identities, not lexicographic versions. Database down-migrations are forbidden."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate stable environment MagicDNS identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          case "$DEPLOYMENT_ENVIRONMENT" in
+            staging)
+              [[ "$DEPLOY_HOST" =~ ^h2s-app-staging\.[a-z0-9-]+\.ts\.net$ ]] \
+                || { echo "staging deploy host must be the stable full MagicDNS name" >&2; exit 1; }
+              ;;
+            production)
+              [[ "$DEPLOY_HOST" =~ ^h2s-app-production\.[a-z0-9-]+\.ts\.net$ ]] \
+                || { echo "production deploy host must be the stable full MagicDNS name" >&2; exit 1; }
+              ;;
+            *) echo "unsupported deployment environment" >&2; exit 1 ;;
+          esac
 
       - name: Connect ephemeral runner to Tailscale
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
@@ -93,6 +133,10 @@ jobs:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
           install -d -m 0700 "$RUNNER_TEMP/hook2stream-ssh"
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
@@ -101,12 +145,45 @@ jobs:
             "ssh-ed25519 "*) ;;
             *) echo "deploy identity must be ED25519" >&2; exit 1 ;;
           esac
-          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
-            | awk '!/^#/ { found=1; if ($2 != "ssh-ed25519") bad=1 } END { exit (!found || bad) ? 1 : 0 }'
+          case "$DEPLOYMENT_ENVIRONMENT" in
+            staging)
+              awk -v host="$DEPLOY_HOST" '
+                /^[[:space:]]*($|#)/ { next }
+                {
+                  records++
+                  if ($1 != host || $2 != "ssh-ed25519" || NF != 3) bad=1
+                }
+                END { exit (records == 1 && !bad) ? 0 : 1 }
+              ' "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+                || { echo "staging known_hosts must contain only one exact ED25519 host-key record" >&2; exit 1; }
+              ;;
+            production)
+              awk -v host="$DEPLOY_HOST" '
+                /^[[:space:]]*($|#)/ { next }
+                {
+                  records++
+                  if ($1 != host || $2 != "ssh-ed25519" || NF != 3) bad=1
+                }
+                END { exit (records == 1 && !bad) ? 0 : 1 }
+              ' "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+                || { echo "production known_hosts must contain only one exact ED25519 host-key record" >&2; exit 1; }
+              ;;
+            *) echo "unsupported deployment environment" >&2; exit 1 ;;
+          esac
 
       - name: Roll back to a recorded H2SE-compatible release
         shell: bash
         run: |
+          set -euo pipefail
+          umask 077
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          floor_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${MIN_ROLLBACK_RELEASE_SHA}...${RELEASE_SHA}" --jq .status)"
+          case "$floor_status" in
+            identical|ahead) ;;
+            *) echo "rollback target predates or diverges from the configured H2SE floor" >&2; exit 1 ;;
+          esac
           ssh \
             -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
             -o BatchMode=yes \
@@ -114,7 +191,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "rollback $RELEASE_SHA $REQUIRED_STORAGE_FORMAT" | tee "$RUNNER_TEMP/rollback-output.log"
+            "rollback $RELEASE_SHA $REQUIRED_STORAGE_FORMAT" > "$RUNNER_TEMP/rollback-output.log" 2>&1
           encoded_result="$(sed -n 's/^HOOK2STREAM_ROLLBACK_RECEIPT=//p' "$RUNNER_TEMP/rollback-output.log" | tail -n 1)"
           test -n "$encoded_result"
           printf '%s' "$encoded_result" | base64 --decode > rollback-result.json

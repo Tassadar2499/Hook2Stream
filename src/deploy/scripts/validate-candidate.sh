@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/lib/forced-command-trust.sh"
+
 fail() { printf '%s\n' "candidate validation: $*" >&2; exit 1; }
 [ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "usage: validate-candidate.sh CANDIDATE_DIRECTORY [APPROVAL_DIRECTORY]"
 candidate_dir=$1
@@ -8,7 +11,7 @@ approval_dir=${2:-}
 case "$candidate_dir" in /*) ;; *) fail "candidate path must be absolute" ;; esac
 [ -d "$candidate_dir" ] && [ ! -L "$candidate_dir" ] || fail "candidate must be a real directory"
 
-for tool in jq sha256sum tar; do command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"; done
+for tool in awk find jq sha256sum ssh-keygen stat tar wc; do command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"; done
 for file in release-metadata.json release-images.env deploy-bundle.tar.gz SHA256SUMS; do
     path=$candidate_dir/$file
     [ -f "$path" ] && [ ! -L "$path" ] || fail "$file must be a regular non-symlink file"
@@ -73,6 +76,11 @@ for name in $image_names; do case " $seen_names " in *" $name "*) ;; *) fail "re
 tar -tzf "$candidate_dir/deploy-bundle.tar.gz" | while IFS= read -r member; do
     case "$member" in ''|/*|../*|*/../*|*/..|*'//'*) fail "bundle contains an unsafe path" ;; esac
     case "$member" in deploy|deploy/*) ;; *) fail "bundle member is outside deploy/" ;; esac
+    case "$member" in
+        deploy/Caddyfile.minio|deploy/compose.minio.yaml|deploy/minio|deploy/minio/*|deploy/storage|deploy/storage/*|deploy/scripts/validate-deployment.sh|deploy/tests/caddy-minio-contract.test.sh|deploy/tests/minio-overlay-contract.test.sh|deploy/tests/minio-release-integration.test.sh)
+            fail "bundle contains local-only MinIO/storage-plane or CI validation content"
+            ;;
+    esac
 done
 if tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" | awk '$1 !~ /^[d-]/ {bad=1} END {exit bad ? 0 : 1}'; then fail "bundle links and special files are forbidden"; fi
 tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" \
@@ -81,19 +89,56 @@ tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" \
 
 if [ -n "$approval_dir" ]; then
     receipt=$approval_dir/staging-receipt.json; signature=$approval_dir/staging-receipt.sig
-    [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ -f "$signature" ] && [ ! -L "$signature" ] || fail "signed staging approval is incomplete"
-    [ "$(find "$approval_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 2 ] || fail "approval must contain exactly receipt and signature"
+    for approval_file in "$receipt" "$signature"; do
+        [ -f "$approval_file" ] && [ ! -L "$approval_file" ] \
+            || fail "signed staging approval is incomplete"
+    done
+    [ "$(find "$approval_dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 2 ] \
+        || fail "approval must contain exactly one receipt and its signature"
     images_sha=$(sha256sum "$candidate_dir/release-images.env" | awk '{print $1}')
     expected_images=$(jq -c '.images' "$candidate_dir/release-metadata.json")
-    jq -e --arg repository "$repository" --arg commit "$commit" --arg artifact "$artifact" --arg bundle "$actual_bundle" --arg images "$images_sha" --argjson expectedImages "$expected_images" '
+    minimum_release_sha=${MIN_ROLLBACK_RELEASE_SHA:?MIN_ROLLBACK_RELEASE_SHA is required for production approval}
+    printf '%s\n' "$minimum_release_sha" | grep -Eq '^[0-9a-f]{40}$' \
+        || fail "MIN_ROLLBACK_RELEASE_SHA must be exactly 40 lowercase hex"
+    jq -e --arg repository "$repository" --arg commit "$commit" --arg artifact "$artifact" --arg bundle "$actual_bundle" --arg images "$images_sha" --arg minimum "$minimum_release_sha" --argjson expectedImages "$expected_images" '
+      def epoch: fromdateiso8601;
+      def canonical_time: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") and (fromdateiso8601 >= 0);
+      (.soakResult.elapsedSeconds) as $elapsed |
+      (keys | sort) == ["candidateArtifact","checks","ciRunAttempt","ciRunId","commitSha","deployedAt","environment","hashes","kind","policySha","remoteResult","repository","result","schemaVersion","soakResult","stagingWorkflowRunAttempt","stagingWorkflowRunId"] and
       .schemaVersion == 1 and .kind == "hook2stream-staging-receipt" and
       .environment == "staging" and .result == "success" and .repository == $repository and
       .commitSha == $commit and .candidateArtifact == $artifact and
+      (.stagingWorkflowRunId | type == "number" and . > 0 and floor == .) and
+      (.stagingWorkflowRunAttempt | type == "number" and . > 0 and floor == .) and
+      (.policySha | type == "string" and test("^[0-9a-f]{40}$")) and
+      (.remoteResult | keys | sort) == ["actualImages","candidateArtifact","checks","commitSha","deployBundleSha256","environment","kind","minimumRollbackReleaseSha","releaseImagesSha256","result","schemaVersion"] and
       .hashes.releaseImagesSha256 == $images and .hashes.deployBundleSha256 == $bundle and
       .remoteResult.kind == "hook2stream-remote-deploy-result" and
-      .remoteResult.commitSha == $commit and .remoteResult.actualImages == $expectedImages and
+      .remoteResult.environment == "staging" and .remoteResult.result == "success" and
+      .remoteResult.candidateArtifact == $artifact and
+      .remoteResult.commitSha == $commit and .remoteResult.minimumRollbackReleaseSha == $minimum and
+      .remoteResult.actualImages == $expectedImages and
       .remoteResult.checks == ["pre-migration-backup","migration","smoke","e2e","digest-verification"] and
-      .checks == ["pre-migration-backup","migration","smoke","e2e","digest-verification"]
+      (.soakResult | keys | sort) == ["candidateArtifact","checks","commitSha","completedAt","elapsedSeconds","environment","hookResult","kind","result","schemaVersion","startedAt","workerRenderHealthy","workerRenderInstances","workerRenderOomKilled"] and
+      .soakResult.schemaVersion == 1 and .soakResult.kind == "hook2stream-remote-soak-result" and
+      .soakResult.environment == "staging" and .soakResult.result == "success" and
+      .soakResult.candidateArtifact == $artifact and .soakResult.commitSha == $commit and
+      (.soakResult.elapsedSeconds | type == "number" and floor == . and . >= 3600 and . <= 3900) and
+      (.soakResult.startedAt | canonical_time) and (.soakResult.completedAt | canonical_time) and
+      ((.soakResult.completedAt | epoch) - (.soakResult.startedAt | epoch)) == .soakResult.elapsedSeconds and
+      (.deployedAt | canonical_time) and (.deployedAt | epoch) >= (.soakResult.completedAt | epoch) and
+      (.soakResult.hookResult | keys | sort) == ["completedRenderCount","cpuThrottled","maxConcurrentRenderJobs","networkChecks","networkFailures","oomKilled","renderActiveSeconds","schema"] and
+      .soakResult.hookResult.schema == "hook2stream-soak-hook-result-v1" and
+      (.soakResult.hookResult.completedRenderCount | type == "number" and floor == . and . > 0) and
+      (.soakResult.hookResult.renderActiveSeconds | type == "number" and floor == . and . >= 3300 and . <= $elapsed) and
+      .soakResult.hookResult.maxConcurrentRenderJobs == 1 and
+      (.soakResult.hookResult.networkChecks | type == "number" and floor == . and . >= 60) and
+      .soakResult.hookResult.networkFailures == 0 and
+      .soakResult.hookResult.cpuThrottled == false and .soakResult.hookResult.oomKilled == false and
+      .soakResult.workerRenderInstances == 1 and .soakResult.workerRenderHealthy == true and
+      .soakResult.workerRenderOomKilled == false and
+      .soakResult.checks == ["render-network-soak","elapsed-window","single-render-worker","no-oom"] and
+      .checks == ["pre-migration-backup","migration","smoke","e2e","digest-verification","render-network-soak"]
     ' "$receipt" >/dev/null || fail "staging receipt does not approve this candidate"
     signers=${HOOK2STREAM_STAGING_SIGNERS:?HOOK2STREAM_STAGING_SIGNERS is required}
     [ "$signers" = /etc/hook2stream/staging-receipt-allowed-signers ] \
@@ -101,6 +146,8 @@ if [ -n "$approval_dir" ]; then
     [ -f "$signers" ] && [ ! -L "$signers" ] \
         && [ "$(stat -c '%u:%g:%a' "$signers")" = 0:0:600 ] \
         || fail "staging signers must be root:root mode 0600"
+    hook2stream_validate_exact_allowed_signer "$signers" hook2stream-staging \
+        || fail "staging signers must contain exactly one hook2stream-staging ED25519 key"
     ssh-keygen -Y verify -f "$signers" -I hook2stream-staging -n hook2stream-staging-receipt -s "$signature" < "$receipt" >/dev/null \
         || fail "staging receipt signature is invalid"
 fi

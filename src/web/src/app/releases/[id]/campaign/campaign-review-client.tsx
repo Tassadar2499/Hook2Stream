@@ -7,6 +7,7 @@ import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
 import { ApiRequestError, Release, apiFetch } from "@/lib/api";
+import { buildApiUrl } from "@/lib/api-url";
 import {
   Campaign,
   CampaignItem,
@@ -124,7 +125,9 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
     setPreviewState(previewLane?.state);
     setPreviewJobId(previewLane?.currentJobId ?? undefined);
     setWorkflowBatchId(workflowResult.data.currentRenderBatchId ?? null);
-    setPreviewUrl(previewResult?.data.url);
+    setPreviewUrl(
+      previewResult ? buildApiUrl(previewResult.data.url) : undefined,
+    );
     setBackgroundAssetIds([
       ...(artworkResult?.data.backgroundAssetIds ?? []),
       ...releaseResult.data.assets
@@ -158,8 +161,9 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       `/api/v1/releases/${projectId}/renders/${batchId}`,
       token,
     );
-    setRenderBatch(result.data);
-    return result.data;
+    const normalized = normalizeRenderBatchUrls(result.data);
+    setRenderBatch(normalized);
+    return normalized;
   }, [getToken, projectId]);
 
   useEffect(() => {
@@ -857,6 +861,21 @@ function RenderProgress({
       ) : null}
     </div>
   );
+}
+
+function normalizeRenderBatchUrls(batch: RenderBatchStatus): RenderBatchStatus {
+  return {
+    ...batch,
+    items: batch.items.map((item) => ({
+      ...item,
+      download: item.download
+        ? { ...item.download, url: buildApiUrl(item.download.url) }
+        : item.download,
+    })),
+    export: batch.export
+      ? { ...batch.export, url: buildApiUrl(batch.export.url) }
+      : batch.export,
+  };
 }
 
 function renderStorageKey(projectId: string) {

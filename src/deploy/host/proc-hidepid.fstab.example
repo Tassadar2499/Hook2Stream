@@ -1,0 +1,1 @@
+proc /proc proc nosuid,nodev,noexec,hidepid=2 0 0

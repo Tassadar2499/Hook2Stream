@@ -43,8 +43,16 @@ export HOOK2STREAM_ENV_FILE
 . "$deployment_dir/scripts/lib/deployment-common.sh"
 
 for secret_name in $(deployment_required_secret_files); do
-    printf '%s\n' test-secret > "$secret_dir/$secret_name"
+    printf '%s' test-secret > "$secret_dir/$secret_name"
 done
+printf '%s' \
+    '{"activeKeyId":"k1","keys":{"k1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}' \
+    > "$secret_dir/media_keyring"
+printf '%s' 'first@example.com
+second@example.com' > "$secret_dir/invited_emails"
+printf '%s' \
+    'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' \
+    > "$secret_dir/backup_age_recipient"
 
 PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
 
@@ -57,7 +65,7 @@ fi
 if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1; then
     test_fail "preflight accepted an empty required secret"
 fi
-printf '%s\n' test-secret > "$secret_dir/postgres_password"
+printf '%s' test-secret > "$secret_dir/postgres_password"
 
 mv "$secret_dir/google_client_secret" "$secret_dir/google_client_secret.value"
 ln -s "$secret_dir/google_client_secret.value" "$secret_dir/google_client_secret"
@@ -67,24 +75,23 @@ fi
 rm "$secret_dir/google_client_secret"
 mv "$secret_dir/google_client_secret.value" "$secret_dir/google_client_secret"
 
-printf '%s\n' 'STORAGE_MODE=minio' >> "$environment_file"
-if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1; then
-    test_fail "MinIO preflight accepted missing root credential files"
+# Deployed app hosts use managed external storage and never require MinIO root
+# credentials. The local/CI overlay supplies its own disposable credentials.
+printf '%s' test-root-user > "$secret_dir/minio_root_user"
+printf '%s' test-root-password > "$secret_dir/minio_root_password"
+if deployment_required_secret_files | grep -q '^minio_root_'; then
+    test_fail "deployed app secret contract still requires MinIO root credentials"
 fi
-printf '%s\n' test-root-user > "$secret_dir/minio_root_user"
-printf '%s\n' test-root-password > "$secret_dir/minio_root_password"
+PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
+rm "$secret_dir/minio_root_user" "$secret_dir/minio_root_password"
 PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
 
-rm "$secret_dir/minio_root_password"
-if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1; then
-    test_fail "MinIO preflight accepted a missing root password"
+minio_environment_file=${temporary_dir}/minio-deployment.env
+cp "$environment_file" "$minio_environment_file"
+printf '%s\n' 'STORAGE_MODE=minio' >> "$minio_environment_file"
+if (environment_file=$minio_environment_file; compose config) >/dev/null 2>&1; then
+    test_fail "deployed Compose helper accepted local-only STORAGE_MODE=minio"
 fi
-
-# The root credentials are conditional: external S3 must keep the original
-# file-secret contract and must not require any MinIO-only files.
-printf '%s\n' 'STORAGE_MODE=external' >> "$environment_file"
-rm "$secret_dir/minio_root_user"
-PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
 
 SECRETS_GID=2468
 export SECRETS_GID
@@ -97,6 +104,32 @@ if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1
 fi
 
 if command -v jq >/dev/null 2>&1; then
+    vault_candidate=${temporary_dir}/vault-candidate
+    mkdir "$vault_candidate"
+    printf '%s\n' '{"kv_version":1,"secrets":{"postgres_password":"secret"}}' \
+        > "$vault_candidate/foundation.json"
+    printf '%s\n' '{"kv_version":1,"secrets":{"access_key_id":"id","secret_access_key":"secret"}}' \
+        > "$vault_candidate/runtime-s3.json"
+    printf '%s\n' '{"kv_version":1,"secrets":{"google_client_secret":"google","stripe_secret_key":"stripe","stripe_webhook_secret":"webhook"}}' \
+        > "$vault_candidate/api.json"
+    printf '%s\n' '{"kv_version":1,"secrets":{"openrouter_api_key":"openrouter"}}' \
+        > "$vault_candidate/control.json"
+    printf '%s\n' '{"kv_version":1,"secrets":{"access_key_id":"id","secret_access_key":"secret"}}' \
+        > "$vault_candidate/backup-s3.json"
+    printf '%s\n' '{"kv_version":1,"secrets":{"invited_emails":"first@example.com\nsecond@example.com","media_keyring":"{\"activeKeyId\":\"k1\",\"keys\":{\"k1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}}"}}' \
+        > "$vault_candidate/media-security.json"
+    printf '%s\n' '{"kv_version":1,"secrets":{"age_recipient":"age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"}}' \
+        > "$vault_candidate/backup-encryption.json"
+    vault_validate_candidate_bundles "$vault_candidate" \
+        || test_fail "Vault contract rejected the exact seven-bundle app schema"
+
+    printf '%s\n' '{"kv_version":1,"secrets":{"access_key_id":"id","secret_access_key":"secret"}}' \
+        > "$vault_candidate/bootstrap-s3.json"
+    if vault_validate_candidate_bundles "$vault_candidate"; then
+        test_fail "Vault contract accepted the removed bootstrap-s3 bundle"
+    fi
+    rm "$vault_candidate/bootstrap-s3.json"
+
     vault_backup_bundle=${temporary_dir}/backup-s3.json
     cat > "$vault_backup_bundle" <<'EOF'
 {"kv_version":1,"secrets":{"access_key_id":"id","secret_access_key":"secret"}}
@@ -119,6 +152,57 @@ EOF
     if vault_validate_bundle "$vault_backup_bundle" \
         '["access_key_id","secret_access_key"]'; then
         test_fail "Vault contract accepted an empty required credential"
+    fi
+
+    vault_media_bundle=${temporary_dir}/media-security.json
+    printf '%s\n' '{"kv_version":1,"secrets":{"invited_emails":"first@example.com\nsecond@example.com","media_keyring":"{\"activeKeyId\":\"k1\",\"keys\":{\"k1\":\"value\"}}"}}' \
+        > "$vault_media_bundle"
+    vault_validate_bundle "$vault_media_bundle" \
+        '["invited_emails","media_keyring"]' \
+        '["invited_emails"]' '["media_keyring"]' \
+        || test_fail "Vault contract rejected internal LF in invited_emails"
+
+    printf '%s\n' '{"kv_version":1,"secrets":{"invited_emails":"first@example.com","media_keyring":"{\n\"activeKeyId\":\"k1\"}"}}' \
+        > "$vault_media_bundle"
+    if vault_validate_bundle "$vault_media_bundle" \
+        '["invited_emails","media_keyring"]' \
+        '["invited_emails"]' '["media_keyring"]'; then
+        test_fail "Vault contract accepted a multiline media keyring"
+    fi
+
+    printf '%s\n' '{"kv_version":1,"secrets":{"invited_emails":" first@example.com","media_keyring":"{}"}}' \
+        > "$vault_media_bundle"
+    if vault_validate_bundle "$vault_media_bundle" \
+        '["invited_emails","media_keyring"]' \
+        '["invited_emails"]' '["media_keyring"]'; then
+        test_fail "Vault contract accepted leading whitespace"
+    fi
+
+    printf '%s\n' '{"kv_version":1,"secrets":{"invited_emails":"first@example.com","media_keyring":"[]"}}' \
+        > "$vault_media_bundle"
+    if vault_validate_bundle "$vault_media_bundle" \
+        '["invited_emails","media_keyring"]' \
+        '["invited_emails"]' '["media_keyring"]'; then
+        test_fail "Vault contract accepted a non-object media keyring JSON string"
+    fi
+
+    vault_control_bundle=${temporary_dir}/control.json
+    for invalid_control_json in \
+        '{"kv_version":1,"secrets":{"openrouter_api_key":"line-one\nline-two"}}' \
+        '{"kv_version":1,"secrets":{"openrouter_api_key":"line-one\rline-two"}}' \
+        '{"kv_version":1,"secrets":{"openrouter_api_key":"line-one\u0000line-two"}}' \
+        '{"kv_version":1,"secrets":{"openrouter_api_key":"trailing "}}'; do
+        printf '%s\n' "$invalid_control_json" > "$vault_control_bundle"
+        if vault_validate_bundle "$vault_control_bundle" \
+            '["openrouter_api_key"]'; then
+            test_fail "Vault contract accepted prohibited scalar whitespace/control bytes"
+        fi
+    done
+
+    printf '%s\n' '{"kv_version":1,"secrets":{"age_recipient":"not-an-age-recipient"}}' \
+        > "$vault_candidate/backup-encryption.json"
+    if vault_validate_candidate_bundles "$vault_candidate"; then
+        test_fail "Vault contract accepted an invalid backup age recipient"
     fi
 fi
 

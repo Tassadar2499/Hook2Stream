@@ -51,6 +51,28 @@ refresh_bundle_identity() {
     chmod 0600 "$candidate"/*
 }
 
+forbidden_bundle_root=$temporary_dir/forbidden-bundle
+mkdir -p "$forbidden_bundle_root/deploy/minio"
+printf '%s\n' 'local-only' > "$forbidden_bundle_root/deploy/minio/Dockerfile"
+tar -czf "$candidate/deploy-bundle.tar.gz" -C "$forbidden_bundle_root" deploy
+refresh_bundle_identity
+if HOOK2STREAM_REPOSITORY=example/hook2stream "$validator" "$candidate" >/dev/null 2>&1; then
+    fail "candidate containing local-only MinIO content was accepted"
+fi
+
+ci_only_bundle_root=$temporary_dir/ci-only-bundle
+mkdir -p "$ci_only_bundle_root/deploy/scripts"
+printf '%s\n' '#!/bin/sh' > "$ci_only_bundle_root/deploy/scripts/validate-deployment.sh"
+tar -czf "$candidate/deploy-bundle.tar.gz" -C "$ci_only_bundle_root" deploy
+refresh_bundle_identity
+if HOOK2STREAM_REPOSITORY=example/hook2stream "$validator" "$candidate" >/dev/null 2>&1; then
+    fail "candidate containing CI-only deployment validator was accepted"
+fi
+cp "$temporary_dir/good-bundle.tar.gz" "$candidate/deploy-bundle.tar.gz"
+cp "$temporary_dir/good-metadata.json" "$candidate/release-metadata.json"
+(cd "$candidate" && sha256sum release-metadata.json release-images.env deploy-bundle.tar.gz > SHA256SUMS)
+chmod 0600 "$candidate"/*
+
 truncate -s 67108865 "$candidate/deploy-bundle.tar.gz"
 refresh_bundle_identity
 if HOOK2STREAM_REPOSITORY=example/hook2stream "$validator" "$candidate" >/dev/null 2>&1; then

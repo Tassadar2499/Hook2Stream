@@ -1,7 +1,7 @@
 http_port 3128
 acl SSL_ports port 443
 acl CONNECT method CONNECT
-acl allowed_domains dstdomain __HOOK2STREAM_S3_ENDPOINT_HOST__
+acl allowed_domains dstdomain __HOOK2STREAM_MEDIA_S3_ENDPOINT_HOST__
 http_access deny !SSL_ports
 http_access deny !CONNECT
 http_access allow allowed_domains

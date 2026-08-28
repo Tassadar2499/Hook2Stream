@@ -16,6 +16,9 @@ namespace Hook2Stream.Infrastructure.Storage;
 internal sealed class H2seEncryptedObjectStorage(
     IRawObjectStorage raw,
     IOptions<StorageEncryptionOptions> options,
+    IOptions<StorageOptions> storageOptions,
+    IOptions<OperationalPolicyOptions> policyOptions,
+    TimeProvider timeProvider,
     IH2seConcurrencyGate? concurrencyGate = null) : IObjectStorage
 {
     public const int Version = 1;
@@ -87,6 +90,11 @@ internal sealed class H2seEncryptedObjectStorage(
     public async Task UploadAsync(string objectKey, string sourcePath, string contentType, CancellationToken cancellationToken)
     {
         await using var encryptionLease = await _concurrencyGate.AcquireEncryptionAsync(cancellationToken);
+        var expiresAt = StorageObjectExpirationPolicy.GetExpiration(
+            objectKey,
+            storageOptions.Value,
+            policyOptions.Value,
+            timeProvider);
         var dataPath = TempPath();
         var manifestPath = TempPath();
         try
@@ -100,10 +108,20 @@ internal sealed class H2seEncryptedObjectStorage(
                 var manifest = await EncryptFileAsync(objectKey, sourcePath, dataPath, contentType, physicalDataKey, dek, cancellationToken);
                 var envelope = ProtectManifest(objectKey, keyring.ActiveKeyId, kek, dek, manifest);
                 await File.WriteAllTextAsync(manifestPath, JsonSerializer.Serialize(envelope), cancellationToken);
-                await raw.UploadAsync(physicalDataKey, dataPath, "application/octet-stream", cancellationToken);
+                await raw.UploadAsync(
+                    physicalDataKey,
+                    dataPath,
+                    "application/octet-stream",
+                    expiresAt,
+                    cancellationToken);
                 try
                 {
-                    await raw.UploadAsync(ManifestKey(objectKey), manifestPath, "application/vnd.hook2stream.h2se+json", cancellationToken);
+                    await raw.UploadAsync(
+                        ManifestKey(objectKey),
+                        manifestPath,
+                        "application/vnd.hook2stream.h2se+json",
+                        expiresAt,
+                        cancellationToken);
                 }
                 catch
                 {

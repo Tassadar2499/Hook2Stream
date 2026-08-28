@@ -5,9 +5,10 @@ public sealed class StorageOptions
     public const string SectionName = "Storage";
 
     public string ServiceUrl { get; set; } = "http://localhost:9000";
-    public string PublicServiceUrl { get; set; } = "http://localhost:9000";
     public string Region { get; set; } = "us-east-1";
     public string Bucket { get; set; } = "hook2stream-media";
+    public StorageProvisioningMode ProvisioningMode { get; set; } = StorageProvisioningMode.VerifyOnly;
+    public StorageObjectExpirationMode ObjectExpirationMode { get; set; } = StorageObjectExpirationMode.None;
     public StorageCredentialMode CredentialMode { get; set; } = StorageCredentialMode.Auto;
     public string AccessKey { get; set; } = "";
     public string SecretKey { get; set; } = "";
@@ -15,9 +16,21 @@ public sealed class StorageOptions
     public bool RequireCredentials { get; set; }
     public bool ConfigureBucketCors { get; set; }
     public bool ConfigureBucketLifecycle { get; set; }
-    public bool ConfigureMultipartAbortLifecycle { get; set; } = true;
+    public bool ConfigureMultipartAbortLifecycle { get; set; }
     public string[] BrowserUploadOrigins { get; set; } =
         ["http://localhost:3000", "http://127.0.0.1:3000"];
+}
+
+public enum StorageProvisioningMode
+{
+    Manage,
+    VerifyOnly
+}
+
+public enum StorageObjectExpirationMode
+{
+    None,
+    Storj
 }
 
 public enum StorageCredentialMode

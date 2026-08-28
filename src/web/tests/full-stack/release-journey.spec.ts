@@ -148,8 +148,15 @@ test.describe.serial("real PostgreSQL, MinIO and worker journey", () => {
     await expect(preview).toHaveAttribute("src", /^http/, {
       timeout: 300_000,
     });
+    const previewUrl = await preview.getAttribute("src");
+    expectAuthenticatedApiUrl(
+      previewUrl,
+      new RegExp(
+        `^/api/v1/releases/${projectId}/assets/[0-9a-f-]+/content$`,
+      ),
+    );
     const previewPath = join(testInfo.outputDir, "preview.mp4");
-    await downloadTo(request, await preview.getAttribute("src"), previewPath);
+    await downloadTo(request, previewUrl, previewPath);
     expect(videoContract(previewPath)).toMatchObject({
       width: 540,
       height: 960,
@@ -161,8 +168,13 @@ test.describe.serial("real PostgreSQL, MinIO and worker journey", () => {
     await expect(page).toHaveURL(/billing=success/, { timeout: 120_000 });
     const zipLink = page.getByRole("link", { name: "Download ZIP" });
     await expect(zipLink).toBeVisible({ timeout: 20 * 60_000 });
+    const zipUrl = await zipLink.getAttribute("href");
+    expectAuthenticatedApiUrl(
+      zipUrl,
+      new RegExp(`^/api/v1/releases/${projectId}/downloads/[0-9a-f-]+$`),
+    );
     const zipPath = join(testInfo.outputDir, "release-pack.zip");
-    await downloadTo(request, await zipLink.getAttribute("href"), zipPath);
+    await downloadTo(request, zipUrl, zipPath);
 
     const entries = execFileSync("unzip", ["-Z1", zipPath], {
       encoding: "utf8",
@@ -247,10 +259,25 @@ async function downloadTo(
   url: string | null,
   path: string,
 ) {
-  expect(url).toBeTruthy();
-  const response = await request.get(url!);
+  const normalized = authenticatedApiUrl(url);
+  const response = await request.get(normalized.toString(), {
+    headers: { Authorization: `Bearer ${authToken}` },
+  });
   expect(response.ok(), `${response.status()} ${response.statusText()}`).toBe(true);
   writeFileSync(path, await response.body());
+}
+
+function expectAuthenticatedApiUrl(url: string | null, path: RegExp) {
+  const normalized = authenticatedApiUrl(url);
+  expect(normalized.pathname).toMatch(path);
+  expect(normalized.search).toBe("");
+}
+
+function authenticatedApiUrl(url: string | null) {
+  expect(url).toBeTruthy();
+  const normalized = new URL(url!, apiBaseUrl);
+  expect(normalized.origin).toBe(new URL(apiBaseUrl).origin);
+  return normalized;
 }
 
 async function waitForJobSucceeded(

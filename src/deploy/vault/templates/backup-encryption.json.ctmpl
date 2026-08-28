@@ -1,9 +1,8 @@
-{{- with secret "hook2stream-kv/data/production/backup-encryption/current" -}}
+{{- with secret "hook2stream-kv/data/production/backup-encryption" -}}
 {
   "kv_version": {{ .Data.metadata.version }},
   "secrets": {
-    "key_id": {{ .Data.data.key_id | toJSON }},
-    "passphrase": {{ .Data.data.passphrase | toJSON }}
+    "age_recipient": {{ .Data.data.age_recipient | toJSON }}
   }
 }
 {{- end -}}

@@ -175,9 +175,10 @@ for (const workerName of [
 ]) {
   const worker = services[workerName];
   assert(worker, `missing worker pool ${workerName}`);
+  const replicas = worker.deploy?.replicas;
   assert(
-    worker.scale == null && worker.deploy?.replicas == null,
-    `${workerName} must remain a single instance without scale or replicas`,
+    worker.scale == null && (replicas == null || Number(replicas) === 1),
+    `${workerName} must remain a single instance without scale or more than one replica`,
   );
 }
 const initMemory = bytes(minioInit.deploy?.resources?.limits?.memory);
@@ -371,7 +372,6 @@ assert(
 );
 
 const internalEndpoint = "http://minio:9000";
-const publicEndpoint = "https://s3-staging.example.invalid";
 for (const serviceName of [
   "api",
   "worker-media",
@@ -388,8 +388,12 @@ for (const serviceName of [
     `${serviceName} internal S3 endpoint must be exactly ${internalEndpoint}`,
   );
   assert(
-    environmentValue(service, "Storage__PublicServiceUrl") === publicEndpoint,
-    `${serviceName} public S3 endpoint must be exactly ${publicEndpoint}`,
+    environmentValue(service, "Storage__PublicServiceUrl") === undefined,
+    `${serviceName} must not configure the removed public S3 endpoint`,
+  );
+  assert(
+    environmentValue(service, "Storage__ObjectExpirationMode") === "None",
+    `${serviceName} must not send Storj-specific TTL metadata to MinIO`,
   );
   assert(
     String(environmentValue(service, "Storage__ForcePathStyle")).toLowerCase() === "true",
@@ -401,6 +405,11 @@ for (const serviceName of [
     `${serviceName} must bypass Squid only for the local Compose peers including MinIO`,
   );
 }
+assert(
+  environmentValue(services.bootstrapper, "Storage__ProvisioningMode") === "Manage" &&
+    environmentValue(services.bootstrapper, "Storage__ObjectExpirationMode") === "None",
+  "the disposable MinIO bootstrapper must explicitly manage buckets without Storj TTL metadata",
+);
 assert(
   environmentValue(services["postgres-backup"] ?? {}, "BACKUP_S3_ENDPOINT") ===
     internalEndpoint,

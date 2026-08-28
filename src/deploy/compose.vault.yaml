@@ -36,9 +36,6 @@ services:
       - source: vault_template_runtime_s3
         target: /vault/templates/runtime-s3.json.ctmpl
         mode: 0444
-      - source: vault_template_bootstrap_s3
-        target: /vault/templates/bootstrap-s3.json.ctmpl
-        mode: 0444
       - source: vault_template_api
         target: /vault/templates/api.json.ctmpl
         mode: 0444
@@ -47,6 +44,9 @@ services:
         mode: 0444
       - source: vault_template_backup_s3
         target: /vault/templates/backup-s3.json.ctmpl
+        mode: 0444
+      - source: vault_template_media_security
+        target: /vault/templates/media-security.json.ctmpl
         mode: 0444
       - source: vault_template_backup_encryption
         target: /vault/templates/backup-encryption.json.ctmpl
@@ -94,14 +94,14 @@ configs:
     file: ./vault/templates/foundation.json.ctmpl
   vault_template_runtime_s3:
     file: ./vault/templates/runtime-s3.json.ctmpl
-  vault_template_bootstrap_s3:
-    file: ./vault/templates/bootstrap-s3.json.ctmpl
   vault_template_api:
     file: ./vault/templates/api.json.ctmpl
   vault_template_control:
     file: ./vault/templates/control.json.ctmpl
   vault_template_backup_s3:
     file: ./vault/templates/backup-s3.json.ctmpl
+  vault_template_media_security:
+    file: ./vault/templates/media-security.json.ctmpl
   vault_template_backup_encryption:
     file: ./vault/templates/backup-encryption.json.ctmpl
 

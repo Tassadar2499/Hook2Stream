@@ -33,8 +33,6 @@ for secret_name in \
     postgres_password \
     s3_runtime_access_key \
     s3_runtime_secret_key \
-    s3_bootstrap_access_key \
-    s3_bootstrap_secret_key \
     google_client_secret \
     stripe_secret_key \
     stripe_webhook_secret \
@@ -45,7 +43,9 @@ for secret_name in \
     backup_s3_secret_key \
     backup_age_recipient \
     minio_root_user \
-    minio_root_password; do
+    minio_root_password \
+    s3_bootstrap_access_key \
+    s3_bootstrap_secret_key; do
     printf '%s\n' "ci-placeholder-not-a-production-secret" \
         > "${secret_dir}/${secret_name}"
 done
@@ -57,11 +57,6 @@ done
 for test_path in "$deployment_dir"/tests/*.test.sh; do
     sh "$test_path"
 done
-sh "$deployment_dir/storage/tests/validate-storage-deployment.sh"
-node -e \
-    'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' \
-    "$deployment_dir/backup/lifecycle-policy.json"
-
 validation_caddy_image=$(awk -F= '
     $1 == "CADDY_IMAGE" { print substr($0, index($0, "=") + 1) }
 ' "$deployment_dir/.env.example")
@@ -146,7 +141,6 @@ STORAGE_MODE=minio \
 MINIO_IMAGE=$validation_minio_image \
 MINIO_MC_IMAGE=$validation_minio_mc_image \
 S3_SERVICE_URL=http://minio:9000 \
-S3_PUBLIC_SERVICE_URL=https://s3-staging.example.invalid \
 S3_PUBLIC_DOMAIN=s3-staging.example.invalid \
 S3_REGION=us-east-1 \
 S3_MEDIA_BUCKET=hook2stream-staging-media \
@@ -154,8 +148,10 @@ S3_FORCE_PATH_STYLE=true \
 BACKUP_S3_BUCKET=hook2stream-staging-pg-backups \
 BACKUP_S3_ENDPOINT=http://minio:9000 \
 BACKUP_S3_REGION=us-east-1 \
+BACKUP_S3_FORCE_PATH_STYLE=true \
 BACKUP_S3_PREFIX=hook2stream/staging/postgres \
 BACKUP_RETENTION_DAYS=7 \
+BACKUP_MAX_OBJECT_TTL_HOURS=168 \
 S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE=false \
 MINIO_MEDIA_QUOTA_GIB=180 \
 MINIO_BACKUP_QUOTA_GIB=20 \
@@ -191,4 +187,4 @@ node "$deployment_dir/../ci/validate-compose-images.mjs" \
     "$temporary_dir/vault-compose.json"
 
 printf '%s\n' \
-    "deployment validation: shell tests, lifecycle JSON, Caddyfiles, digest images, and base/build/MinIO/Vault Compose models are valid"
+    "deployment validation: shell tests, Caddyfiles, digest images, and base/build/local-MinIO/Vault Compose models are valid"

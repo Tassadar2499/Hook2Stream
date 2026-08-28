@@ -11,7 +11,7 @@ usage() {
         "Usage: rotate-vault-secrets.sh" \
         "" \
         "Rotates routine Vault bundles and health-gates their exact consumers." \
-        "PostgreSQL and backup-encryption changes require specialized scripts."
+        "PostgreSQL and backup age-recipient changes require specialized scripts."
 }
 
 case "${1:-}" in
@@ -47,7 +47,7 @@ if vault_list_has "$changed_bundles" foundation; then
 fi
 if vault_list_has "$changed_bundles" backup-encryption; then
     printf '%s\n' \
-        "${deployment_program}: backup-encryption changed; use rotate-backup-encryption-key.sh" >&2
+        "${deployment_program}: backup-encryption changed; use rotate-backup-age-recipient.sh" >&2
     special_change=true
 fi
 if [ "$special_change" = true ]; then

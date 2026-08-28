@@ -1,0 +1,14 @@
+# Install as /etc/systemd/system/srv-hook2stream.mount.
+# The mapper is opened manually; this unit never stores or obtains a LUKS key.
+[Unit]
+Description=Hook2Stream encrypted application data
+Requires=dev-mapper-hook2stream\x2ddata.device
+After=dev-mapper-hook2stream\x2ddata.device
+Before=docker.service
+
+[Mount]
+What=/dev/mapper/hook2stream-data
+Where=/srv/hook2stream
+Type=ext4
+Options=defaults,nosuid,nodev
+TimeoutSec=30

@@ -1,0 +1,416 @@
+name: Stage candidate
+run-name: Stage CI run ${{ inputs.source_ci_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ci_run_id:
+        description: Successful protected-main CI run ID whose immutable candidate will be staged
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hook2stream-staging
+  cancel-in-progress: false
+
+jobs:
+  verify-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      source-sha: ${{ steps.source.outputs.sha }}
+      source-attempt: ${{ steps.source.outputs.attempt }}
+      candidate-name: ${{ steps.source.outputs.candidate_name }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+      POLICY_SHA: ${{ github.workflow_sha }}
+    steps:
+      - name: Bind workflow policy to the current protected-main dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+
+      - name: Verify successful protected-main CI source
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$SOURCE_CI_RUN_ID" in
+            ''|0|0*|*[!0-9]*) echo "source_ci_run_id must be a canonical positive integer" >&2; exit 1 ;;
+          esac
+
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID")"
+          test "$(jq -r .name <<<"$run_json")" = CI
+          test "$(jq -r .event <<<"$run_json")" = push
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          test "$(jq -r '.head_repository.full_name // empty' <<<"$run_json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+
+          workflow_id="$(jq -r .workflow_id <<<"$run_json")"
+          workflow_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id")"
+          test "$(jq -r .path <<<"$workflow_json")" = .github/workflows/ci.yml
+          test "$(jq -r .state <<<"$workflow_json")" = active
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+
+          sha="$(jq -r .head_sha <<<"$run_json")"
+          attempt="$(jq -r .run_attempt <<<"$run_json")"
+          case "$sha" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "source CI returned an invalid head SHA" >&2; exit 1 ;;
+          esac
+          case "$attempt" in ''|*[!0-9]*|0) echo "source CI returned an invalid run attempt" >&2; exit 1 ;; esac
+
+          compare_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${sha}...main" --jq .status)"
+          case "$compare_status" in
+            identical|ahead) ;;
+            *) echo "source CI commit is no longer an ancestor of protected main" >&2; exit 1 ;;
+          esac
+
+          candidate_name="release-candidate-${sha}-${SOURCE_CI_RUN_ID}-${attempt}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          echo "candidate_name=$candidate_name" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Staging source"
+            echo
+            echo "- CI run: \`$SOURCE_CI_RUN_ID\`"
+            echo "- Commit: \`$sha\`"
+            echo "- Candidate: \`$candidate_name\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download exact immutable candidate from source CI
+        shell: bash
+        env:
+          CANDIDATE_NAME: ${{ steps.source.outputs.candidate_name }}
+        run: |
+          set -euo pipefail
+          mkdir release-candidate
+          gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_NAME" --dir release-candidate
+
+      - name: Verify candidate contract and CI attestations
+        shell: bash
+        run: |
+          set -euo pipefail
+          node src/ci/release-candidate.mjs validate \
+            --candidate release-candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "${{ steps.source.outputs.sha }}" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ steps.source.outputs.attempt }}"
+          attestation_policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"
+            --source-ref refs/heads/main
+            --source-digest "${{ steps.source.outputs.sha }}"
+            --deny-self-hosted-runners
+          )
+          while read -r _ file; do
+            gh attestation verify "release-candidate/$file" "${attestation_policy[@]}"
+          done < release-candidate/SHA256SUMS
+
+      - name: Seal verified staging payload
+        shell: bash
+        run: tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf staging-candidate-payload.tar.gz release-candidate
+
+      - name: Upload verified staging payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-staging-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-candidate-payload.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-staging:
+    needs: verify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    environment: staging
+    permissions:
+      actions: read
+      attestations: write
+      artifact-metadata: write
+      contents: read
+      id-token: write
+    env:
+      CANDIDATE_NAME: ${{ needs.verify-source.outputs.candidate-name }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: hook2stream-deploy
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      MIN_ROLLBACK_RELEASE_SHA: ${{ vars.MIN_ROLLBACK_RELEASE_SHA }}
+      POLICY_SHA: ${{ github.workflow_sha }}
+      SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+      SOURCE_SHA: ${{ needs.verify-source.outputs.source-sha }}
+    steps:
+      - name: Revalidate live protected-main policy after staging Environment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download verified staging payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-staging-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Revalidate candidate after staging Environment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          tar -xzf staging-candidate-payload.tar.gz
+          node src/ci/release-candidate.mjs validate \
+            --candidate release-candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$SOURCE_SHA" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ needs.verify-source.outputs.source-attempt }}"
+          [[ "$MIN_ROLLBACK_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          floor_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}" --jq .status)"
+          case "$floor_status" in
+            identical|ahead) ;;
+            *) echo "candidate is not the rollback-floor commit or its descendant" >&2; exit 1 ;;
+          esac
+
+      - name: Validate staging receipt authority before deployment
+        shell: bash
+        env:
+          STAGING_RECEIPT_SIGNING_KEY: ${{ secrets.STAGING_RECEIPT_SIGNING_KEY }}
+          STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STAGING_RECEIPT_ALLOWED_SIGNERS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          signing_key="$RUNNER_TEMP/staging-receipt-preflight-key"
+          trap 'rm -f "$signing_key" "$signing_key.pub"' EXIT
+          printf '%s\n' "$STAGING_RECEIPT_SIGNING_KEY" > "$signing_key"
+          printf '%s\n' "$STAGING_RECEIPT_ALLOWED_SIGNERS" \
+            > "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          chmod 0600 "$signing_key" \
+            "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          signing_public="$(ssh-keygen -y -f "$signing_key")"
+          case "$signing_public" in
+            "ssh-ed25519 "*) ;;
+            *) echo "staging receipt signing identity must be ED25519" >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$signing_public" > "$signing_key.pub"
+          . src/deploy/scripts/lib/forced-command-trust.sh
+          hook2stream_validate_exact_allowed_signer \
+            "$RUNNER_TEMP/staging-receipt-allowed-signers" hook2stream-staging
+          test "$(awk '$1 == "hook2stream-staging" { print $2, $3 }' \
+            "$RUNNER_TEMP/staging-receipt-allowed-signers")" = \
+            "$(awk '{ print $1, $2 }' "$signing_key.pub")"
+          signing_fingerprint="$(ssh-keygen -lf "$signing_key.pub" -E sha256 | awk '{ print $2 }')"
+          printf 'STAGING_RECEIPT_SIGNING_FINGERPRINT=%s\n' "$signing_fingerprint" >> "$GITHUB_ENV"
+
+      - name: Validate stable staging MagicDNS identity
+        shell: bash
+        run: |
+          [[ "$DEPLOY_HOST" =~ ^h2s-app-staging\.[a-z0-9-]+\.ts\.net$ ]] \
+            || { echo "staging deploy host must be the stable full MagicDNS name" >&2; exit 1; }
+
+      - name: Connect ephemeral staging runner to Tailscale
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:hook2stream-ci-staging
+          ping: ${{ secrets.DEPLOY_HOST }}
+
+      - name: Configure SSH identity and pinned staging host key
+        shell: bash
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$RUNNER_TEMP/hook2stream-ssh"
+          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
+          case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in
+            "ssh-ed25519 "*) ;;
+            *) echo "deploy identity must be ED25519" >&2; exit 1 ;;
+          esac
+          awk -v host="$DEPLOY_HOST" '
+            /^[[:space:]]*($|#)/ { next }
+            {
+              records++
+              if ($1 != host || $2 != "ssh-ed25519" || NF != 3) bad=1
+            }
+            END { exit (records == 1 && !bad) ? 0 : 1 }
+          ' "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            || { echo "staging known_hosts must contain only one exact ED25519 host-key record" >&2; exit 1; }
+          awk '{ print $2, $3 }' "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            > "$RUNNER_TEMP/hook2stream-ssh/staging-host-key.pub"
+          . src/deploy/scripts/lib/forced-command-trust.sh
+          for independent_staging_key in \
+            "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
+            "$RUNNER_TEMP/hook2stream-ssh/staging-host-key.pub"; do
+            independent_staging_fingerprint="$(ssh-keygen -lf \
+              "$independent_staging_key" -E sha256 | awk '{ print $2 }')"
+            hook2stream_validate_distinct_ed25519_fingerprints \
+              "$STAGING_RECEIPT_SIGNING_FINGERPRINT" "$independent_staging_fingerprint" \
+              || { echo "staging receipt signer must differ from deploy and host keys" >&2; exit 1; }
+          done
+
+      - name: Deploy candidate through forced SSH and run host smoke/E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          mkdir -p transfer/candidate
+          cp -a release-candidate/. transfer/candidate/
+          tar -C transfer -cf - . | ssh \
+            -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "deploy $CANDIDATE_NAME" > "$RUNNER_TEMP/deploy-output.log" 2>&1
+          encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log" | tail -n 1)"
+          test -n "$encoded_result"
+          printf '%s' "$encoded_result" | base64 --decode > remote-result.json
+          node src/ci/remote-deploy-result.mjs validate \
+            --candidate release-candidate \
+            --result remote-result.json \
+            --environment staging \
+            --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
+
+      - name: Run trusted 60-minute render and network soak
+        shell: bash
+        timeout-minutes: 70
+        run: |
+          set -euo pipefail
+          umask 077
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          ssh \
+            -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "soak $CANDIDATE_NAME" </dev/null > "$RUNNER_TEMP/soak-output.log" 2>&1
+          test "$(wc -l < "$RUNNER_TEMP/soak-output.log")" -eq 1
+          test "$(wc -c < "$RUNNER_TEMP/soak-output.log")" -le 32768
+          test "$(grep -c '^HOOK2STREAM_REMOTE_SOAK_RECEIPT=' "$RUNNER_TEMP/soak-output.log")" -eq 1
+          encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_SOAK_RECEIPT=//p' "$RUNNER_TEMP/soak-output.log")"
+          test -n "$encoded_result"
+          printf '%s' "$encoded_result" | base64 --decode > remote-soak-result.json
+          node src/ci/staging-receipt.mjs validate-soak \
+            --candidate release-candidate \
+            --remote-result remote-result.json \
+            --soak-result remote-soak-result.json \
+            --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
+          echo "Trusted sustained render/network soak passed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create successful staging receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          node src/ci/staging-receipt.mjs create \
+            --candidate release-candidate \
+            --remote-result remote-result.json \
+            --soak-result remote-soak-result.json \
+            --output staging-receipt.json \
+            --staging-run-id "$GITHUB_RUN_ID" \
+            --staging-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --policy-sha "$POLICY_SHA" \
+            --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
+
+      - name: Sign staging receipt for production host verification
+        shell: bash
+        env:
+          STAGING_RECEIPT_SIGNING_KEY: ${{ secrets.STAGING_RECEIPT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$STAGING_RECEIPT_SIGNING_KEY" > "$RUNNER_TEMP/staging-receipt-signing-key"
+          chmod 0600 "$RUNNER_TEMP/staging-receipt-signing-key"
+          trap 'rm -f "$RUNNER_TEMP/staging-receipt-signing-key" "$RUNNER_TEMP/staging-receipt-signing-key.pub"' EXIT
+          staging_receipt_signing_public="$(ssh-keygen -y -f "$RUNNER_TEMP/staging-receipt-signing-key")"
+          case "$staging_receipt_signing_public" in
+            "ssh-ed25519 "*) ;;
+            *) echo "staging receipt signing identity must be ED25519" >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$staging_receipt_signing_public" \
+            > "$RUNNER_TEMP/staging-receipt-signing-key.pub"
+          staging_receipt_signing_fingerprint="$(ssh-keygen -lf \
+            "$RUNNER_TEMP/staging-receipt-signing-key.pub" -E sha256 | awk '{ print $2 }')"
+          test "$staging_receipt_signing_fingerprint" = "$STAGING_RECEIPT_SIGNING_FINGERPRINT"
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          ssh-keygen -Y sign \
+            -f "$RUNNER_TEMP/staging-receipt-signing-key" \
+            -n hook2stream-staging-receipt \
+            staging-receipt.json
+          mv staging-receipt.json.sig staging-receipt.sig
+          ssh-keygen -Y verify \
+            -f "$RUNNER_TEMP/staging-receipt-allowed-signers" \
+            -I hook2stream-staging \
+            -n hook2stream-staging-receipt \
+            -s staging-receipt.sig \
+            < staging-receipt.json
+
+      - name: Attest staging receipt
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: |
+            staging-receipt.json
+            staging-receipt.sig
+
+      - name: Upload staging receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            staging-receipt.json
+            staging-receipt.sig
+          if-no-files-found: error
+          retention-days: 90

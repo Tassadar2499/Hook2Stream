@@ -1,2 +1,0 @@
-Defaults:hook2stream-storage-deploy env_keep += "SSH_ORIGINAL_COMMAND"
-hook2stream-storage-deploy ALL=(root) NOPASSWD: /usr/local/sbin/hook2stream-storage-deploy-launcher

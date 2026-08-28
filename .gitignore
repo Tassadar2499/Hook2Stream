@@ -41,6 +41,15 @@ ScaffoldingReadMe.txt
 .env.local
 .env.*.local
 
+# Local infrastructure credentials and encrypted operator state
+*.pem
+*.key
+id_*
+*.age
+*.tfstate
+*.tfstate.*
+*.luks
+
 # Node / Next.js
 node_modules/
 .next/

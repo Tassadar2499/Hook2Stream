@@ -37,9 +37,10 @@ x-dotnet-environment: &dotnet-environment
   DB_CONNECT_TIMEOUT_SECONDS: "15"
   DB_COMMAND_TIMEOUT_SECONDS: "180"
   Storage__ServiceUrl: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}
-  Storage__PublicServiceUrl: ${S3_PUBLIC_SERVICE_URL:?Set S3_PUBLIC_SERVICE_URL}
   Storage__Region: ${S3_REGION:?Set S3_REGION}
   Storage__Bucket: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
+  Storage__ProvisioningMode: ${STORAGE_PROVISIONING_MODE:?Set STORAGE_PROVISIONING_MODE}
+  Storage__ObjectExpirationMode: ${STORAGE_OBJECT_EXPIRATION_MODE:?Set STORAGE_OBJECT_EXPIRATION_MODE}
   Storage__CredentialMode: Static
   Storage__ForcePathStyle: ${S3_FORCE_PATH_STYLE:-false}
   Storage__RequireCredentials: "true"
@@ -48,8 +49,8 @@ x-dotnet-environment: &dotnet-environment
   StorageEncryption__KeyringPath: /run/secrets/media_keyring
   StorageEncryption__Mode: H2se
   StorageEncryption__AllowLegacyPlaintextReads: "false"
-  StorageEncryption__MaxConcurrentEncryptions: "8"
-  StorageEncryption__MaxConcurrentDownloads: "4"
+  StorageEncryption__MaxConcurrentEncryptions: ${H2SE_MAX_CONCURRENT_ENCRYPTIONS:-8}
+  StorageEncryption__MaxConcurrentDownloads: ${H2SE_MAX_CONCURRENT_DOWNLOADS:-4}
   TMPDIR: /tmp
   STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
   STORAGE_SECRET_FILE: /run/secrets/s3_runtime_secret_key
@@ -317,6 +318,9 @@ services:
       OperationalPolicy__RetentionSweepEnabled: "false"
     volumes:
       - worker_media_scratch:/tmp
+    networks:
+      - backend
+      - media-egress
     deploy:
       resources:
         limits:
@@ -335,6 +339,9 @@ services:
       OperationalPolicy__RetentionSweepEnabled: "false"
     volumes:
       - worker_analysis_scratch:/tmp
+    networks:
+      - backend
+      - media-egress
     deploy:
       resources:
         limits:
@@ -399,7 +406,12 @@ services:
       OperationalPolicy__RetentionSweepEnabled: "false"
     volumes:
       - worker_render_scratch:/tmp
+    networks:
+      - backend
+      - media-egress
     deploy:
+      mode: replicated
+      replicas: 1
       resources:
         limits:
           cpus: "3.00"
@@ -417,6 +429,9 @@ services:
       OperationalPolicy__RetentionSweepEnabled: "false"
     volumes:
       - worker_export_scratch:/tmp
+    networks:
+      - backend
+      - media-egress
     deploy:
       resources:
         limits:
@@ -443,25 +458,28 @@ services:
       DB_COMMAND_TIMEOUT_SECONDS: "900"
       DB_PASSWORD_FILE: /run/secrets/postgres_password
       OTEL_SERVICE_NAME: hook2stream-bootstrapper
-      STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_bootstrap_access_key
-      STORAGE_SECRET_FILE: /run/secrets/s3_bootstrap_secret_key
+      STORAGE_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
+      STORAGE_SECRET_FILE: /run/secrets/s3_runtime_secret_key
       Storage__ConfigureBucketCors: "false"
       StorageEncryption__KeyringPath: /run/secrets/media_keyring
       StorageEncryption__AllowLegacyPlaintextReads: "false"
-      Storage__ConfigureBucketLifecycle: ${S3_CONFIGURE_BUCKET_LIFECYCLE:-true}
+      Storage__ConfigureBucketLifecycle: ${S3_CONFIGURE_BUCKET_LIFECYCLE:-false}
       Storage__ConfigureMultipartAbortLifecycle: ${S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE:-false}
       Storage__BrowserUploadOrigins__0: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
       OperationalPolicy__RetentionSweepEnabled: "false"
     secrets:
       - postgres_password
-      - s3_bootstrap_access_key
-      - s3_bootstrap_secret_key
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
       - media_keyring
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=128m,mode=1777
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - backend
+      - media-egress
     deploy:
       resources:
         limits:
@@ -631,16 +649,16 @@ services:
       BACKUP_S3_REGION: ${BACKUP_S3_REGION:?Set BACKUP_S3_REGION}
       BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?Set BACKUP_S3_BUCKET}
       BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-hook2stream/production/postgres}
-      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+      BACKUP_S3_FORCE_PATH_STYLE: ${BACKUP_S3_FORCE_PATH_STYLE:-false}
       BACKUP_S3_ACCESS_KEY_FILE: /run/secrets/backup_s3_access_key
       BACKUP_S3_SECRET_KEY_FILE: /run/secrets/backup_s3_secret_key
       BACKUP_AGE_RECIPIENT_FILE: /run/secrets/backup_age_recipient
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-3600}
       BACKUP_MAX_AGE_SECONDS: ${BACKUP_MAX_AGE_SECONDS:-7200}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-35}
-      BACKUP_RETENTION_SAFETY_SECONDS: ${BACKUP_RETENTION_SAFETY_SECONDS:-7200}
-      HTTP_PROXY: http://egress-s3:3128
-      HTTPS_PROXY: http://egress-s3:3128
+      BACKUP_MAX_OBJECT_TTL_HOURS: ${BACKUP_MAX_OBJECT_TTL_HOURS:?Set BACKUP_MAX_OBJECT_TTL_HOURS}
+      HTTP_PROXY: http://egress-backup:3128
+      HTTPS_PROXY: http://egress-backup:3128
       NO_PROXY: 127.0.0.1,localhost,postgres
     secrets:
       - postgres_password
@@ -671,6 +689,7 @@ services:
     logging: *json-logging
     networks:
       - backend
+      - backup-egress
     deploy:
       resources:
         limits:
@@ -701,7 +720,9 @@ services:
       S3_ENDPOINT: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}
       S3_REGION: ${S3_REGION:?Set S3_REGION}
       S3_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
-      STORAGE_PROTOCOL_URL: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}/.well-known/hook2stream-storage-protocol
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:?Set BACKUP_S3_BUCKET}
+      STORAGE_CONTRACT_KEY: ${STORAGE_CONTRACT_KEY:?Set STORAGE_CONTRACT_KEY}
+      STORAGE_CONTRACT_SHA256: ${STORAGE_CONTRACT_SHA256:?Set STORAGE_CONTRACT_SHA256}
       STORAGE_PROTOCOL_VERSION: ${STORAGE_PROTOCOL_VERSION:-1}
       S3_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
       S3_SECRET_KEY_FILE: /run/secrets/s3_runtime_secret_key
@@ -725,7 +746,7 @@ services:
       egress-s3:
         condition: service_healthy
     networks:
-      - backend
+      - media-egress
     logging: *json-logging
     deploy:
       resources:
@@ -733,6 +754,64 @@ services:
           cpus: "0.25"
           memory: 128M
           pids: 64
+
+  storage-janitor:
+    image: ${POSTGRES_BACKUP_IMAGE:?Set POSTGRES_BACKUP_IMAGE to an immutable image reference}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    user: postgres
+    group_add:
+      - "${SECRETS_GID:-2000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    stop_grace_period: 30s
+    entrypoint:
+      - /usr/local/bin/storj-media-janitor
+    command:
+      - daemon
+    environment:
+      S3_ENDPOINT: ${S3_SERVICE_URL:?Set S3_SERVICE_URL}
+      S3_REGION: ${S3_REGION:?Set S3_REGION}
+      S3_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}
+      S3_ACCESS_KEY_FILE: /run/secrets/s3_runtime_access_key
+      S3_SECRET_KEY_FILE: /run/secrets/s3_runtime_secret_key
+      MEDIA_MULTIPART_MAX_AGE_SECONDS: "86400"
+      MEDIA_JANITOR_INTERVAL_SECONDS: ${MEDIA_JANITOR_INTERVAL_SECONDS:-86400}
+      MEDIA_JANITOR_MAX_AGE_SECONDS: ${MEDIA_JANITOR_MAX_AGE_SECONDS:-93600}
+      HTTP_PROXY: http://egress-s3:3128
+      HTTPS_PROXY: http://egress-s3:3128
+      NO_PROXY: 127.0.0.1,localhost
+    secrets:
+      - s3_runtime_access_key
+      - s3_runtime_secret_key
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/storj-media-janitor-healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 5m
+    depends_on:
+      egress-s3:
+        condition: service_healthy
+    networks:
+      - media-egress
+    logging: *json-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: ${STORAGE_JANITOR_MEMORY_LIMIT:-128M}
+          pids: 64
+        reservations:
+          memory: ${STORAGE_JANITOR_MEMORY_RESERVATION:-32M}
 
   egress-api:
     image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
@@ -785,7 +864,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-    networks: [backend, public-egress]
+    networks: [media-egress, public-egress]
     logging: *json-logging
     deploy:
       resources:
@@ -827,6 +906,37 @@ services:
         reservations:
           memory: ${EGRESS_PROXY_MEMORY_RESERVATION:-32M}
 
+  egress-backup:
+    image: ${EGRESS_PROXY_IMAGE:?Set EGRESS_PROXY_IMAGE to an immutable image reference}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    configs:
+      - source: egress_backup_config
+        target: /etc/squid/squid.conf
+        mode: 0444
+    tmpfs:
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m
+      - /var/run:rw,nosuid,nodev,noexec,size=4m
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=32m
+    healthcheck:
+      test: [CMD, squid, -k, parse]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [backup-egress, public-egress]
+    logging: *json-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: ${EGRESS_PROXY_MEMORY_LIMIT:-128M}
+          pids: 128
+        reservations:
+          memory: ${EGRESS_PROXY_MEMORY_RESERVATION:-32M}
+
 configs:
   caddyfile:
     file: ${CADDYFILE_PATH:-./Caddyfile}
@@ -836,6 +946,8 @@ configs:
     file: ${EGRESS_CONFIG_DIR:-./egress}/s3.conf
   egress_control_config:
     file: ${EGRESS_CONFIG_DIR:-./egress}/control.conf
+  egress_backup_config:
+    file: ${EGRESS_CONFIG_DIR:-./egress}/backup.conf
   storage_probe:
     file: ./scripts/storage-probe.sh
   dotnet_load_secrets:
@@ -856,10 +968,6 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/s3_runtime_access_key
   s3_runtime_secret_key:
     file: ${SECRETS_DIR:-./secrets}/s3_runtime_secret_key
-  s3_bootstrap_access_key:
-    file: ${SECRETS_DIR:-./secrets}/s3_bootstrap_access_key
-  s3_bootstrap_secret_key:
-    file: ${SECRETS_DIR:-./secrets}/s3_bootstrap_secret_key
   google_client_secret:
     file: ${SECRETS_DIR:-./secrets}/google_client_secret
   stripe_secret_key:
@@ -899,5 +1007,9 @@ networks:
   api-egress:
     internal: true
   control-egress:
+    internal: true
+  media-egress:
+    internal: true
+  backup-egress:
     internal: true
   public-egress:

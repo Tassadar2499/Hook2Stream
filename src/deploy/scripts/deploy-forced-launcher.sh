@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset CDPATH ENV BASH_ENV
 
 config=/etc/hook2stream/deploy.conf
 wrapper=/usr/local/libexec/hook2stream/deploy-forced-command.sh

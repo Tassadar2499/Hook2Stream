@@ -71,6 +71,12 @@ assert_contains "$bootstrap_service" \
     'Storage__ConfigureBucketCors: "false"' \
     "the MinIO bootstrapper must not call unsupported PutBucketCors"
 assert_contains "$bootstrap_service" \
+    'Storage__ProvisioningMode: Manage' \
+    "the disposable MinIO bootstrapper must explicitly use Manage mode"
+assert_contains "$bootstrap_service" \
+    'Storage__ObjectExpirationMode: None' \
+    "the MinIO overlay must not send Storj-specific TTL metadata"
+assert_contains "$bootstrap_service" \
     'Storage__ConfigureMultipartAbortLifecycle: "false"' \
     "the MinIO bootstrapper must not submit the unsupported abort lifecycle rule"
 grep -Fq 'Storage__ConfigureBucketCors: "false"' "$base_compose" \

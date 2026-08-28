@@ -31,24 +31,6 @@ app_dual_stack_status="${app_status}
 hook2stream_validate_ufw_status app "$app_dual_stack_status" \
     || fail_test "the mirrored dual-stack app policy was rejected"
 
-storage_status='Status: active
-Logging: on (low)
-Default: deny (incoming), allow (outgoing), deny (routed)
-
-To                         Action      From
---                         ------      ----
-22/tcp on tailscale0       ALLOW IN    Anywhere
-443/tcp on tailscale0      ALLOW IN    Anywhere'
-
-hook2stream_validate_ufw_status storage "$storage_status" \
-    || fail_test "the Tailscale-only storage policy was rejected"
-
-storage_dual_stack_status="${storage_status}
-22/tcp (v6) on tailscale0  ALLOW IN    Anywhere (v6)
-443/tcp (v6) on tailscale0 ALLOW IN    Anywhere (v6)"
-hook2stream_validate_ufw_status storage "$storage_dual_stack_status" \
-    || fail_test "the Tailscale-only dual-stack storage policy was rejected"
-
 assert_rejected() {
     rejected_role=$1
     rejected_name=$2
@@ -89,18 +71,7 @@ partial_ipv6_status="${app_status}
 80/tcp (v6)                ALLOW IN    Anywhere (v6)"
 assert_rejected app partial-ipv6 "$partial_ipv6_status"
 
-public_storage_https=$(printf '%s\n' "$storage_status" \
-    | sed 's#443/tcp on tailscale0#443/tcp             #')
-assert_rejected storage public-https "$public_storage_https"
-
-storage_with_http="${storage_status}
-80/tcp                     ALLOW IN    Anywhere"
-assert_rejected storage public-http "$storage_with_http"
-
-storage_v6_only=$(printf '%s\n' "$storage_dual_stack_status" \
-    | sed -e '/^22\/tcp on tailscale0[[:space:]]*ALLOW/d' \
-        -e '/^443\/tcp on tailscale0[[:space:]]*ALLOW/d')
-assert_rejected storage missing-tailscale-ipv4 "$storage_v6_only"
+assert_rejected storage removed-role "$app_status"
 
 printf '%s\n' \
-    "host firewall test: app public web and Tailscale-only app/storage administration passed"
+    "host firewall test: app public web and Tailscale-only administration passed"

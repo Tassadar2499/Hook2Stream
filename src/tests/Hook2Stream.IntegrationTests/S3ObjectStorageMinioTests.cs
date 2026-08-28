@@ -37,6 +37,7 @@ public sealed class S3ObjectStorageMinioTests(ITestOutputHelper output)
         {
             ["Storage:ServiceUrl"] = endpoint,
             ["Storage:Bucket"] = bucket,
+            ["Storage:ProvisioningMode"] = "Manage",
             ["Storage:CredentialMode"] = "Static",
             ["Storage:AccessKey"] = accessKey,
             ["Storage:SecretKey"] = secretKey,
@@ -107,9 +108,9 @@ public sealed class S3ObjectStorageMinioTests(ITestOutputHelper output)
             {
                 ["ConnectionStrings:hook2stream"] = postgresConnection,
                 ["Storage:ServiceUrl"] = endpoint,
-                ["Storage:PublicServiceUrl"] = endpoint,
                 ["Storage:Region"] = "us-east-1",
                 ["Storage:Bucket"] = bucket,
+                ["Storage:ProvisioningMode"] = "Manage",
                 ["Storage:CredentialMode"] = "Static",
                 ["Storage:AccessKey"] = accessKey,
                 ["Storage:SecretKey"] = secretKey,

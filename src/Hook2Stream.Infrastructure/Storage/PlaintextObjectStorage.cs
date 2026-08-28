@@ -1,13 +1,28 @@
 using Hook2Stream.Application;
+using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.Infrastructure.Storage;
 
-internal sealed class PlaintextObjectStorage(IRawObjectStorage raw) : IObjectStorage
+internal sealed class PlaintextObjectStorage(
+    IRawObjectStorage raw,
+    IOptions<StorageOptions> storageOptions,
+    IOptions<OperationalPolicyOptions> policyOptions,
+    TimeProvider timeProvider) : IObjectStorage
 {
     public Task EnsureBucketAsync(CancellationToken token) => raw.EnsureBucketAsync(token);
     public Task<StorageObjectInfo?> HeadAsync(string key, CancellationToken token) => raw.HeadAsync(key, token);
     public Task DownloadAsync(string key, string path, CancellationToken token) => raw.DownloadAsync(key, path, token);
-    public Task UploadAsync(string key, string path, string contentType, CancellationToken token) => raw.UploadAsync(key, path, contentType, token);
+    public Task UploadAsync(string key, string path, string contentType, CancellationToken token) =>
+        raw.UploadAsync(
+            key,
+            path,
+            contentType,
+            StorageObjectExpirationPolicy.GetExpiration(
+                key,
+                storageOptions.Value,
+                policyOptions.Value,
+                timeProvider),
+            token);
     public Task DeleteAsync(string key, CancellationToken token) => raw.DeleteAsync(key, token);
     public Task DeleteProjectObjectsAsync(ProjectStorageScope scope, CancellationToken token) => raw.DeleteProjectObjectsAsync(scope, token);
     public Task DeleteAssetObjectsAsync(AssetStorageScope scope, CancellationToken token) => raw.DeleteAssetObjectsAsync(scope, token);

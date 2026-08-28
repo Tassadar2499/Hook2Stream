@@ -71,19 +71,8 @@ compose() {
                 -f "$deployment_dir/compose.yaml" \
                 -f "$deployment_dir/compose.vault.yaml" "$@"
             ;;
-        file:minio)
-            docker compose --env-file "$environment_file" \
-                -f "$deployment_dir/compose.yaml" \
-                -f "$deployment_dir/compose.minio.yaml" "$@"
-            ;;
-        vault:minio)
-            docker compose --env-file "$environment_file" \
-                -f "$deployment_dir/compose.yaml" \
-                -f "$deployment_dir/compose.vault.yaml" \
-                -f "$deployment_dir/compose.minio.yaml" "$@"
-            ;;
         *)
-            fail "SECRET_PROVIDER must be file or vault and STORAGE_MODE must be external or minio"
+            fail "deployed releases require SECRET_PROVIDER=file|vault and STORAGE_MODE=external; MinIO is local/CI only"
             ;;
     esac
 }
@@ -114,8 +103,7 @@ deployment_compose_input_names() {
 
     for deployment_compose_source in \
         "$deployment_dir/compose.yaml" \
-        "$deployment_dir/compose.vault.yaml" \
-        "$deployment_dir/compose.minio.yaml"; do
+        "$deployment_dir/compose.vault.yaml"; do
         [ -r "$deployment_compose_source" ] || continue
         grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$deployment_compose_source" \
             | sed 's/^${//'
@@ -180,8 +168,6 @@ deployment_required_secret_files() {
         postgres_password \
         s3_runtime_access_key \
         s3_runtime_secret_key \
-        s3_bootstrap_access_key \
-        s3_bootstrap_secret_key \
         google_client_secret \
         stripe_secret_key \
         stripe_webhook_secret \
@@ -191,11 +177,32 @@ deployment_required_secret_files() {
         backup_s3_access_key \
         backup_s3_secret_key \
         backup_age_recipient
-    if [ "$(deployment_storage_mode)" = minio ]; then
-        printf '%s\n' \
-            minio_root_user \
-            minio_root_password
-    fi
+}
+
+deployment_validate_scalar_secret_content() {
+    deployment_scalar_secret_path=$1
+    deployment_scalar_secret_name=$2
+    jq -Rse --arg name "$deployment_scalar_secret_name" '
+        (length > 0)
+        and (contains("\u0000") | not)
+        and (contains("\r") | not)
+        and (test("^[[:space:]]|[[:space:]]$") | not)
+        and (if $name == "invited_emails" then
+            true
+        else
+            (contains("\n") | not)
+        end)
+        and (if $name == "media_keyring" then
+            (try ((fromjson | type) == "object") catch false)
+        else
+            true
+        end)
+        and (if $name == "backup_age_recipient" then
+            test("^age1[0-9a-z]+$")
+        else
+            true
+        end)
+    ' "$deployment_scalar_secret_path" >/dev/null 2>&1
 }
 
 deployment_validate_file_secrets() {
@@ -440,10 +447,10 @@ vault_bundle_names() {
     printf '%s\n' \
         foundation \
         runtime-s3 \
-        bootstrap-s3 \
         api \
         control \
         backup-s3 \
+        media-security \
         backup-encryption
 }
 
@@ -451,11 +458,11 @@ vault_bundle_scalar_files() {
     case "$1" in
         foundation) printf '%s\n' postgres_password ;;
         runtime-s3) printf '%s\n' s3_runtime_access_key s3_runtime_secret_key ;;
-        bootstrap-s3) printf '%s\n' s3_bootstrap_access_key s3_bootstrap_secret_key ;;
         api) printf '%s\n' google_client_secret stripe_secret_key stripe_webhook_secret ;;
         control) printf '%s\n' openrouter_api_key ;;
         backup-s3) printf '%s\n' backup_s3_access_key backup_s3_secret_key ;;
-        backup-encryption) printf '%s\n' backup_encryption_key_id backup_encryption_passphrase ;;
+        media-security) printf '%s\n' media_keyring invited_emails ;;
+        backup-encryption) printf '%s\n' backup_age_recipient ;;
         *) return 1 ;;
     esac
 }
@@ -469,23 +476,36 @@ vault_required_scalar_files() {
 vault_validate_bundle() {
     vault_bundle_file=$1
     vault_expected_keys=$2
+    vault_multiline_keys=${3:-[]}
+    vault_json_string_keys=${4:-[]}
     [ -f "$vault_bundle_file" ] && [ ! -L "$vault_bundle_file" ] \
         || return 1
     jq -e \
-        --argjson expected "$vault_expected_keys" '
+        --argjson expected "$vault_expected_keys" \
+        --argjson multiline "$vault_multiline_keys" \
+        --argjson json_strings "$vault_json_string_keys" '
         type == "object"
         and ((keys | sort) == ["kv_version", "secrets"])
         and (.kv_version | (type == "number") and (. >= 1) and (floor == .))
         and (.secrets | type == "object")
         and ((.secrets | keys | sort) == ($expected | sort))
         and ([.secrets | to_entries[] |
-            .key as $key |
-            (.value | type == "string")
-            and (.value | length > 0)
-            and (.value | contains("\u0000") | not)
-            and (.value | contains("\n") | not)
-            and (.value | contains("\r") | not)
-            and (.value | test("^[[:space:]]|[[:space:]]$") | not)
+            . as $entry |
+            ($entry.value | type == "string")
+            and ($entry.value | length > 0)
+            and ($entry.value | contains("\u0000") | not)
+            and ($entry.value | contains("\r") | not)
+            and ($entry.value | test("^[[:space:]]|[[:space:]]$") | not)
+            and (if ($multiline | index($entry.key)) == null then
+                ($entry.value | contains("\n") | not)
+            else
+                true
+            end)
+            and (if ($json_strings | index($entry.key)) == null then
+                true
+            else
+                (try (($entry.value | fromjson | type) == "object") catch false)
+            end)
         ] | all)
     ' "$vault_bundle_file" >/dev/null 2>&1
 }
@@ -503,16 +523,19 @@ vault_validate_candidate_bundles() {
         '["postgres_password"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/runtime-s3.json" \
         '["access_key_id","secret_access_key"]' || return 1
-    vault_validate_bundle "$vault_candidate_dir/bootstrap-s3.json" \
-        '["access_key_id","secret_access_key"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/api.json" \
         '["google_client_secret","stripe_secret_key","stripe_webhook_secret"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/control.json" \
         '["openrouter_api_key"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/backup-s3.json" \
         '["access_key_id","secret_access_key"]' || return 1
+    vault_validate_bundle "$vault_candidate_dir/media-security.json" \
+        '["invited_emails","media_keyring"]' \
+        '["invited_emails"]' '["media_keyring"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/backup-encryption.json" \
-        '["key_id","passphrase"]' || return 1
+        '["age_recipient"]' || return 1
+    jq -e '.secrets.age_recipient | test("^age1[0-9a-z]+$")' \
+        "$vault_candidate_dir/backup-encryption.json" >/dev/null 2>&1
 }
 
 vault_write_scalar() {
@@ -520,11 +543,17 @@ vault_write_scalar() {
     vault_source_key=$2
     vault_destination_file=$3
     vault_destination_tmp=${vault_destination_file}.tmp
-    jq -erj --arg key "$vault_source_key" '.secrets[$key]' \
-        "$vault_source_json" > "$vault_destination_tmp"
-    [ -s "$vault_destination_tmp" ] || return 1
-    chown "0:${vault_secrets_gid}" "$vault_destination_tmp"
-    chmod 0640 "$vault_destination_tmp"
+    if ! jq -erj --arg key "$vault_source_key" '.secrets[$key]' \
+        "$vault_source_json" > "$vault_destination_tmp"; then
+        rm -f "$vault_destination_tmp"
+        return 1
+    fi
+    [ -s "$vault_destination_tmp" ] \
+        || { rm -f "$vault_destination_tmp"; return 1; }
+    chown "0:${vault_secrets_gid}" "$vault_destination_tmp" \
+        || { rm -f "$vault_destination_tmp"; return 1; }
+    chmod 0640 "$vault_destination_tmp" \
+        || { rm -f "$vault_destination_tmp"; return 1; }
     mv -f "$vault_destination_tmp" "$vault_destination_file"
 }
 
@@ -532,70 +561,73 @@ vault_split_candidate() {
     vault_candidate_dir=$1
 
     vault_write_scalar "$vault_candidate_dir/foundation.json" postgres_password \
-        "$vault_candidate_dir/postgres_password"
+        "$vault_candidate_dir/postgres_password" || return 1
     vault_write_scalar "$vault_candidate_dir/runtime-s3.json" access_key_id \
-        "$vault_candidate_dir/s3_runtime_access_key"
+        "$vault_candidate_dir/s3_runtime_access_key" || return 1
     vault_write_scalar "$vault_candidate_dir/runtime-s3.json" secret_access_key \
-        "$vault_candidate_dir/s3_runtime_secret_key"
-    vault_write_scalar "$vault_candidate_dir/bootstrap-s3.json" access_key_id \
-        "$vault_candidate_dir/s3_bootstrap_access_key"
-    vault_write_scalar "$vault_candidate_dir/bootstrap-s3.json" secret_access_key \
-        "$vault_candidate_dir/s3_bootstrap_secret_key"
+        "$vault_candidate_dir/s3_runtime_secret_key" || return 1
     vault_write_scalar "$vault_candidate_dir/api.json" google_client_secret \
-        "$vault_candidate_dir/google_client_secret"
+        "$vault_candidate_dir/google_client_secret" || return 1
     vault_write_scalar "$vault_candidate_dir/api.json" stripe_secret_key \
-        "$vault_candidate_dir/stripe_secret_key"
+        "$vault_candidate_dir/stripe_secret_key" || return 1
     vault_write_scalar "$vault_candidate_dir/api.json" stripe_webhook_secret \
-        "$vault_candidate_dir/stripe_webhook_secret"
+        "$vault_candidate_dir/stripe_webhook_secret" || return 1
     vault_write_scalar "$vault_candidate_dir/control.json" openrouter_api_key \
-        "$vault_candidate_dir/openrouter_api_key"
+        "$vault_candidate_dir/openrouter_api_key" || return 1
     vault_write_scalar "$vault_candidate_dir/backup-s3.json" access_key_id \
-        "$vault_candidate_dir/backup_s3_access_key"
+        "$vault_candidate_dir/backup_s3_access_key" || return 1
     vault_write_scalar "$vault_candidate_dir/backup-s3.json" secret_access_key \
-        "$vault_candidate_dir/backup_s3_secret_key"
-    vault_write_scalar "$vault_candidate_dir/backup-encryption.json" key_id \
-        "$vault_candidate_dir/backup_encryption_key_id"
-    vault_write_scalar "$vault_candidate_dir/backup-encryption.json" passphrase \
-        "$vault_candidate_dir/backup_encryption_passphrase"
+        "$vault_candidate_dir/backup_s3_secret_key" || return 1
+    vault_write_scalar "$vault_candidate_dir/media-security.json" media_keyring \
+        "$vault_candidate_dir/media_keyring" || return 1
+    vault_write_scalar "$vault_candidate_dir/media-security.json" invited_emails \
+        "$vault_candidate_dir/invited_emails" || return 1
+    vault_write_scalar "$vault_candidate_dir/backup-encryption.json" age_recipient \
+        "$vault_candidate_dir/backup_age_recipient" || return 1
 
     vault_manifest_tmp=$vault_candidate_dir/manifest.json.tmp
     jq -n \
         --slurpfile foundation "$vault_candidate_dir/foundation.json" \
         --slurpfile runtime_s3 "$vault_candidate_dir/runtime-s3.json" \
-        --slurpfile bootstrap_s3 "$vault_candidate_dir/bootstrap-s3.json" \
         --slurpfile api "$vault_candidate_dir/api.json" \
         --slurpfile control "$vault_candidate_dir/control.json" \
         --slurpfile backup_s3 "$vault_candidate_dir/backup-s3.json" \
+        --slurpfile media_security "$vault_candidate_dir/media-security.json" \
         --slurpfile backup_encryption "$vault_candidate_dir/backup-encryption.json" \
         '{
             schema_version: 1,
             bundle_kv_versions: {
                 foundation: $foundation[0].kv_version,
                 "runtime-s3": $runtime_s3[0].kv_version,
-                "bootstrap-s3": $bootstrap_s3[0].kv_version,
                 api: $api[0].kv_version,
                 control: $control[0].kv_version,
                 "backup-s3": $backup_s3[0].kv_version,
+                "media-security": $media_security[0].kv_version,
                 "backup-encryption": $backup_encryption[0].kv_version
             }
-        }' > "$vault_manifest_tmp"
-    chmod 0600 "$vault_manifest_tmp"
-    mv -f "$vault_manifest_tmp" "$vault_candidate_dir/manifest.json"
+        }' > "$vault_manifest_tmp" || return 1
+    chmod 0600 "$vault_manifest_tmp" || return 1
+    mv -f "$vault_manifest_tmp" "$vault_candidate_dir/manifest.json" || return 1
 
     rm -f \
         "$vault_candidate_dir/foundation.json" \
         "$vault_candidate_dir/runtime-s3.json" \
-        "$vault_candidate_dir/bootstrap-s3.json" \
         "$vault_candidate_dir/api.json" \
         "$vault_candidate_dir/control.json" \
         "$vault_candidate_dir/backup-s3.json" \
-        "$vault_candidate_dir/backup-encryption.json"
+        "$vault_candidate_dir/media-security.json" \
+        "$vault_candidate_dir/backup-encryption.json" || return 1
 }
 
 vault_validate_generation() {
     vault_generation_dir=$1
     [ -d "$vault_generation_dir" ] && [ ! -L "$vault_generation_dir" ] \
         || return 1
+    [ -z "$(find "$vault_generation_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ] \
+        || return 1
+    vault_generation_file_count=$(find "$vault_generation_dir" \
+        -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+    [ "$vault_generation_file_count" = 13 ] || return 1
     for vault_scalar_file in $(vault_required_scalar_files); do
         [ -f "$vault_generation_dir/$vault_scalar_file" ] \
             && [ ! -L "$vault_generation_dir/$vault_scalar_file" ] \
@@ -606,17 +638,23 @@ vault_validate_generation() {
             "$vault_generation_dir/$vault_scalar_file")
         [ "$vault_scalar_metadata" = "0:${vault_secrets_gid}:640" ] \
             || return 1
+        deployment_validate_scalar_secret_content \
+            "$vault_generation_dir/$vault_scalar_file" "$vault_scalar_file" \
+            || return 1
     done
     [ -f "$vault_generation_dir/manifest.json" ] \
         && [ ! -L "$vault_generation_dir/manifest.json" ] \
         || return 1
+    vault_manifest_metadata=$(stat -c '%u:%g:%a' \
+        "$vault_generation_dir/manifest.json")
+    [ "$vault_manifest_metadata" = "0:0:600" ] || return 1
     jq -e '
         type == "object"
         and (.schema_version == 1)
         and (.bundle_kv_versions | type == "object")
         and ((.bundle_kv_versions | keys | sort) == [
-            "api", "backup-encryption", "backup-s3", "bootstrap-s3",
-            "control", "foundation", "runtime-s3"
+            "api", "backup-encryption", "backup-s3", "control",
+            "foundation", "media-security", "runtime-s3"
         ])
         and ([.bundle_kv_versions[] |
             (type == "number") and (. >= 1) and (floor == .)
@@ -821,29 +859,46 @@ vault_recreate_and_wait() {
     done
 }
 
+vault_add_reconcile_service() {
+    vault_reconcile_service=$1
+    if ! vault_list_has "$vault_reconcile_services" "$vault_reconcile_service"; then
+        vault_reconcile_services="${vault_reconcile_services}${vault_reconcile_services:+ }${vault_reconcile_service}"
+    fi
+}
+
 vault_reconcile_regular_consumers() {
     vault_changed_list=$1
     vault_reconcile_mode=${2:-apply}
+    vault_reconcile_services=
 
     if vault_list_has "$vault_changed_list" runtime-s3; then
-        vault_recreate_and_wait \
-            worker-media worker-analysis worker-render worker-export || return 1
+        for vault_runtime_consumer in \
+            worker-media worker-analysis worker-render worker-export \
+            worker-control api storage-janitor; do
+            vault_add_reconcile_service "$vault_runtime_consumer"
+        done
     fi
-    if vault_list_has "$vault_changed_list" runtime-s3 \
-        || vault_list_has "$vault_changed_list" control; then
-        vault_recreate_and_wait worker-control || return 1
+    if vault_list_has "$vault_changed_list" control; then
+        vault_add_reconcile_service worker-control
     fi
-    if vault_list_has "$vault_changed_list" runtime-s3 \
-        || vault_list_has "$vault_changed_list" api; then
-        vault_recreate_and_wait api || return 1
+    if vault_list_has "$vault_changed_list" api; then
+        vault_add_reconcile_service api
     fi
+    if vault_list_has "$vault_changed_list" media-security; then
+        for vault_media_security_consumer in \
+            worker-media worker-analysis worker-render worker-export \
+            worker-control api; do
+            vault_add_reconcile_service "$vault_media_security_consumer"
+        done
+    fi
+    vault_recreate_and_wait $vault_reconcile_services || return 1
+
     if vault_list_has "$vault_changed_list" backup-s3; then
         if [ "$vault_reconcile_mode" = apply ]; then
             compose run --rm postgres-backup backup-once || return 1
         fi
         vault_recreate_and_wait postgres-backup || return 1
     fi
-    # bootstrap-s3 intentionally has no long-running consumer.
 }
 
 vault_reconcile_postgres_consumers() {
@@ -859,7 +914,7 @@ vault_reconcile_postgres_consumers() {
     vault_recreate_and_wait postgres-backup || return 1
 }
 
-vault_reconcile_backup_encryption_consumer() {
+vault_reconcile_backup_age_recipient_consumer() {
     vault_reconcile_mode=${1:-apply}
     if [ "$vault_reconcile_mode" = apply ]; then
         compose run --rm postgres-backup backup-once || return 1

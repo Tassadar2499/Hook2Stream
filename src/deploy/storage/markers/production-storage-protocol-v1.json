@@ -1,7 +1,0 @@
-{
-  "schemaVersion": 1,
-  "kind": "hook2stream-storage-protocol",
-  "environment": "production",
-  "protocolVersion": 1,
-  "objectFormat": "H2SEv1"
-}

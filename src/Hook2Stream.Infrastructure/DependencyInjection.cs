@@ -50,8 +50,15 @@ public static class DependencyInjection
                 options => IsValidOrigin(options.ServiceUrl, requireHttps: false),
                 "Storage ServiceUrl must be an absolute HTTP(S) origin without credentials, paths, queries, or fragments.")
             .Validate(
-                options => IsValidOrigin(options.PublicServiceUrl, environment.IsProduction()),
-                "Storage PublicServiceUrl must be an absolute HTTPS origin without credentials, paths, queries, or fragments in Production.")
+                options => options.ProvisioningMode != StorageProvisioningMode.Manage ||
+                           environment.IsDevelopment() || environment.IsEnvironment("Testing"),
+                "Storage ProvisioningMode=Manage is allowed only in Development or Testing.")
+            .Validate(
+                options => options.ProvisioningMode != StorageProvisioningMode.VerifyOnly ||
+                           !options.ConfigureBucketCors &&
+                           !options.ConfigureBucketLifecycle &&
+                           !options.ConfigureMultipartAbortLifecycle,
+                "Storage VerifyOnly mode forbids bucket CORS and lifecycle mutations.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.Bucket), "Storage Bucket is required.")
             .Validate(
                 HasCompleteOrEmptyStaticCredentials,
@@ -159,8 +166,8 @@ public static class DependencyInjection
                 serviceProvider.GetRequiredService<IOptions<StorageOptions>>().Value));
 
         // Storage is stateless apart from the process-wide H2SE keyring and
-        // concurrency gates. Singleton lifetime makes the configured 8/4
-        // limits real process ceilings instead of per-request semaphores.
+        // concurrency gates. Singleton lifetime makes the configured limits
+        // real process ceilings instead of per-request semaphores.
         services.AddSingleton<IRawObjectStorage, S3ObjectStorage>();
         services.AddSingleton<IH2seConcurrencyGate, PostgresH2seConcurrencyGate>();
         services.AddSingleton<H2seEncryptedObjectStorage>();

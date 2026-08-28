@@ -6,11 +6,14 @@ namespace Hook2Stream.UnitTests;
 public sealed class S3LifecycleConfigurationBuilderTests
 {
     [Fact]
-    public void StorageOptionsEnablesMultipartAbortLifecycleByDefault()
+    public void StorageOptionsDisablesBucketMutationsByDefault()
     {
         var options = new StorageOptions();
 
-        Assert.True(options.ConfigureMultipartAbortLifecycle);
+        Assert.Equal(StorageProvisioningMode.VerifyOnly, options.ProvisioningMode);
+        Assert.False(options.ConfigureBucketCors);
+        Assert.False(options.ConfigureBucketLifecycle);
+        Assert.False(options.ConfigureMultipartAbortLifecycle);
     }
 
     [Fact]
@@ -60,7 +63,7 @@ public sealed class S3LifecycleConfigurationBuilderTests
         int expectedMultipartAbortDays)
     {
         var configuration = S3LifecycleConfigurationBuilder.Build(
-            new StorageOptions(),
+            new StorageOptions { ConfigureMultipartAbortLifecycle = true },
             new OperationalPolicyOptions
             {
                 StagingHours = stagingHours,
