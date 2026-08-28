@@ -18,7 +18,7 @@
     "test:e2e:full-stack": "playwright test --config playwright.full-stack.config.ts"
   },
   "dependencies": {
-    "next": "16.2.11",
+    "next": "16.3.3",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
@@ -29,13 +29,13 @@
     "@types/react": "19.2.6",
     "@types/react-dom": "19.2.3",
     "eslint": "9.39.2",
-    "eslint-config-next": "16.2.11",
+    "eslint-config-next": "16.3.3",
     "openapi-typescript": "^7.13.0",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3"
   },
   "overrides": {
-    "postcss": "8.5.19",
+    "nanoid": "3.3.18",
     "sharp": "0.35.3"
   }
 }
