@@ -165,7 +165,9 @@ test.describe.serial("real PostgreSQL, MinIO and worker journey", () => {
     });
 
     await page.getByRole("button", { name: "Unlock full pack" }).click();
-    await expect(page).toHaveURL(/billing=success/, { timeout: 120_000 });
+    await expect(page).toHaveURL(/[?&]checkout=fixture-complete(?:&|$)/, {
+      timeout: 120_000,
+    });
     const zipLink = page.getByRole("link", { name: "Download ZIP" });
     await expect(zipLink).toBeVisible({ timeout: 20 * 60_000 });
     const zipUrl = await zipLink.getAttribute("href");
