@@ -14,7 +14,10 @@ const campaignBackgroundIds = [
   "88888888-8888-4888-8888-888888888884",
 ];
 
-test("advanced Audio-first setup accepts a WAV master", async ({ page }) => {
+test("advanced Audio-first setup accepts a WAV master", async ({
+  browserName,
+  page,
+}) => {
   let createdPayload: Record<string, unknown> | undefined;
   let uploadCompleted = false;
 
@@ -53,7 +56,14 @@ test("advanced Audio-first setup accepts a WAV master", async ({ page }) => {
       path === `/api/v1/uploads/${uploadSessionId}/parts/1`
     ) {
       expect(request.headers()["content-type"]).toBe("application/octet-stream");
-      expect(request.postDataBuffer()?.toString()).toBe("RIFF-fixture-wave");
+      const uploadBody = request.postDataBuffer();
+      if (uploadBody === null) {
+        // WebKit omits Blob-backed request bodies from intercepted requests.
+        // https://github.com/microsoft/playwright/issues/6479
+        expect(browserName).toBe("webkit");
+      } else {
+        expect(uploadBody.toString()).toBe("RIFF-fixture-wave");
+      }
       return json(route, {
         partNumber: 1,
         plaintextLength: 17,
