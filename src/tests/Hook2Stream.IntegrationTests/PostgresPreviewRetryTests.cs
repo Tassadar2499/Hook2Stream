@@ -50,8 +50,10 @@ public sealed class PostgresPreviewRetryTests
             await create.ExecuteNonQueryAsync();
         }
 
+        string? keyringPath = null;
         try
         {
+            keyringPath = CreateKeyring();
             await using (var migrationDb = CreateDb(testConnectionString))
             {
                 await migrationDb.Database.MigrateAsync();
@@ -60,7 +62,8 @@ public sealed class PostgresPreviewRetryTests
             var saveBarrier = new PreviewRetrySaveBarrier();
             await using (var factory = new PostgresPreviewRetryApiFactory(
                              testConnectionString,
-                             saveBarrier))
+                             saveBarrier,
+                             keyringPath))
             using (var client = factory.CreateClient())
             {
                 await Onboard(client);
@@ -127,10 +130,20 @@ public sealed class PostgresPreviewRetryTests
         }
         finally
         {
-            await using var drop = new NpgsqlCommand(
-                $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)",
-                admin);
-            await drop.ExecuteNonQueryAsync();
+            try
+            {
+                await using var drop = new NpgsqlCommand(
+                    $"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)",
+                    admin);
+                await drop.ExecuteNonQueryAsync();
+            }
+            finally
+            {
+                if (keyringPath is not null)
+                {
+                    File.Delete(keyringPath);
+                }
+            }
         }
     }
 
@@ -273,6 +286,48 @@ public sealed class PostgresPreviewRetryTests
         return new Hook2StreamDbContext(options);
     }
 
+    private static string CreateKeyring()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"hook2stream-preview-retry-keyring-{Guid.NewGuid():N}.json");
+        var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        try
+        {
+            var options = new FileStreamOptions
+            {
+                Access = FileAccess.Write,
+                Mode = FileMode.CreateNew,
+                Share = FileShare.None
+            };
+            if (!OperatingSystem.IsWindows())
+            {
+                options.UnixCreateMode =
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            }
+
+            using var keyring = new FileStream(path, options);
+            JsonSerializer.Serialize(keyring, new
+            {
+                activeKeyId = "preview-retry-test-kek",
+                keys = new Dictionary<string, string>
+                {
+                    ["preview-retry-test-kek"] = Convert.ToBase64String(key)
+                }
+            });
+            return path;
+        }
+        catch
+        {
+            File.Delete(path);
+            throw;
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
+        }
+    }
+
     private sealed record SeededPreview(
         Guid WorkspaceId,
         Guid ProjectId,
@@ -280,7 +335,8 @@ public sealed class PostgresPreviewRetryTests
 
     private sealed class PostgresPreviewRetryApiFactory(
         string connectionString,
-        PreviewRetrySaveBarrier saveBarrier)
+        PreviewRetrySaveBarrier saveBarrier,
+        string keyringPath)
         : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -293,6 +349,8 @@ public sealed class PostgresPreviewRetryTests
             builder.UseSetting(
                 "Storage:SecretKey",
                 "test-secret-key");
+            builder.UseSetting("StorageEncryption:Mode", "H2se");
+            builder.UseSetting("StorageEncryption:KeyringPath", keyringPath);
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<
