@@ -40,6 +40,21 @@ public sealed class AppHostTopologyTests
         Assert.Equal("UserSecretsParameterDefault", minioPassword.Default!.GetType().Name);
         Assert.IsType<GenerateParameterDefault>(localAuthToken.Default);
 
+        var postgresImage = Assert.Single(
+            resources["postgres"].Annotations.OfType<ContainerImageAnnotation>());
+        Assert.Equal("17.11-alpine3.24", postgresImage.Tag);
+        var postgresBuild = Assert.Single(
+            resources["postgres"].Annotations.OfType<DockerfileBuildAnnotation>());
+        Assert.True(Path.IsPathRooted(postgresBuild.ContextPath));
+        Assert.True(File.Exists(Path.Combine(postgresBuild.ContextPath, "global.json")));
+        var expectedPostgresDockerfile = Path.GetFullPath(
+            Path.Combine(postgresBuild.ContextPath, "src/deploy/postgres/Dockerfile"));
+        var actualPostgresDockerfile = Path.GetFullPath(
+            Path.IsPathRooted(postgresBuild.DockerfilePath)
+                ? postgresBuild.DockerfilePath
+                : Path.Combine(postgresBuild.ContextPath, postgresBuild.DockerfilePath));
+        Assert.Equal(expectedPostgresDockerfile, actualPostgresDockerfile);
+
         var executionContext = new DistributedApplicationExecutionContext(
             DistributedApplicationOperation.Publish);
         var apiConfiguration = await ExecutionConfigurationBuilder
@@ -61,6 +76,9 @@ public sealed class AppHostTopologyTests
         Assert.Equal("Local", apiEnvironment["Auth__Mode"]);
         Assert.Equal(childEnvironment, bootstrapperEnvironment["DOTNET_ENVIRONMENT"]);
         Assert.Equal(childEnvironment, apiEnvironment["DOTNET_ENVIRONMENT"]);
+        Assert.Equal("Manage", bootstrapperEnvironment["Storage__ProvisioningMode"]);
+        Assert.DoesNotContain("Storage__PublicServiceUrl", bootstrapperEnvironment.Keys);
+        Assert.DoesNotContain("Storage__PublicServiceUrl", apiEnvironment.Keys);
         Assert.Equal("false", bootstrapperEnvironment["Storage__ConfigureBucketCors"]);
         Assert.Equal("true", bootstrapperEnvironment["Storage__ConfigureBucketLifecycle"]);
         Assert.Equal(
@@ -86,6 +104,7 @@ public sealed class AppHostTopologyTests
             var workerEnvironment = workerConfiguration.EnvironmentVariables.ToDictionary();
             Assert.Equal(childEnvironment, workerEnvironment["DOTNET_ENVIRONMENT"]);
             Assert.Equal(capability, workerEnvironment["Worker__Capabilities__0"]);
+            Assert.DoesNotContain("Storage__PublicServiceUrl", workerEnvironment.Keys);
         }
 
         var postgresVolume = GetDataVolume(resources["postgres"]);

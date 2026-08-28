@@ -8,6 +8,7 @@ import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
 import { UploadManager } from "@/components/upload-manager";
 import { ApiRequestError, Release, apiFetch } from "@/lib/api";
+import { buildApiUrl } from "@/lib/api-url";
 import {
   type ArtworkEditSpec,
   coverFontCss,
@@ -69,7 +70,11 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
         if (caught instanceof ApiRequestError && caught.status === 409) return undefined;
         throw caught;
       });
-      setCleanCover(download?.data);
+      setCleanCover(
+        download
+          ? { ...download.data, url: buildApiUrl(download.data.url) }
+          : undefined,
+      );
     } else {
       setCleanCover(undefined);
     }
@@ -103,7 +108,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
               `/api/v1/releases/${projectId}/assets/${assetId}/view-url`,
               token,
             );
-            return [assetId, read.data.url] as const;
+            return [assetId, buildApiUrl(read.data.url)] as const;
           } catch {
             return [assetId, ""] as const;
           }

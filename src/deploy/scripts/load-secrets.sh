@@ -69,9 +69,5 @@ if [ -n "${BACKUP_S3_ACCESS_KEY_FILE:-}" ]; then
     export_secret "$BACKUP_S3_ACCESS_KEY_FILE" BACKUP_S3_ACCESS_KEY
 fi
 
-if [ -n "${BACKUP_ENCRYPTION_KEY_ID_FILE:-}" ]; then
-    export_secret "$BACKUP_ENCRYPTION_KEY_ID_FILE" BACKUP_ENCRYPTION_KEY_ID
-fi
-
 [ "$#" -gt 0 ] || fail "no application command was supplied"
 exec "$@"

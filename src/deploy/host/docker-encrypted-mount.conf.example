@@ -1,0 +1,6 @@
+# Install as /etc/systemd/system/docker.service.d/10-hook2stream-encrypted-mount.conf
+# on an application host, then run `systemctl daemon-reload`.
+[Unit]
+RequiresMountsFor=/srv/hook2stream
+After=srv-hook2stream.mount
+ConditionPathIsMountPoint=/srv/hook2stream

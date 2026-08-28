@@ -92,7 +92,10 @@ var postgresPassword = builder.AddParameter(
     secret: true,
     persist: !isE2e);
 
-var postgres = builder.AddPostgres("postgres", password: postgresPassword);
+var postgres = builder
+    .AddPostgres("postgres", password: postgresPassword)
+    .WithImageTag("17.11-alpine3.24")
+    .WithDockerfile("../..", "src/deploy/postgres/Dockerfile");
 if (!isE2e)
 {
     postgres.WithDataVolume();
@@ -126,17 +129,16 @@ var bootstrapper = builder
 if (isE2e)
 {
     bootstrapper
-        .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000")
-        .WithEnvironment("Storage__PublicServiceUrl", "http://127.0.0.1:9000");
+        .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000");
 }
 else
 {
     bootstrapper
-        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-        .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
+        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"));
 }
 bootstrapper
     .WithEnvironment("StorageEncryption__Mode", "Plaintext")
+    .WithEnvironment("Storage__ProvisioningMode", "Manage")
     .WithEnvironment("Storage__AccessKey", "hook2stream")
     .WithEnvironment("Storage__SecretKey", minioPassword)
     .WithEnvironment("Storage__RequireCredentials", "true")
@@ -154,14 +156,12 @@ if (isE2e)
 {
     api
         .WithEndpoint("http", endpoint => endpoint.Port = 5100)
-        .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000")
-        .WithEnvironment("Storage__PublicServiceUrl", "http://127.0.0.1:9000");
+        .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000");
 }
 else
 {
     api
-        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-        .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
+        .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"));
 }
 api
     .WithEnvironment("StorageEncryption__Mode", "Plaintext")
@@ -203,7 +203,6 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
     {
         worker
             .WithEnvironment("Storage__ServiceUrl", "http://localhost:9000")
-            .WithEnvironment("Storage__PublicServiceUrl", "http://127.0.0.1:9000")
             .WithEnvironment("PipelineProviders__AudioAnalysis__Mode", "Deterministic")
             .WithEnvironment("PipelineProviders__Transcription__Mode", "Fixture")
             .WithEnvironment("PipelineProviders__Artwork__Mode", "Fixture")
@@ -214,8 +213,7 @@ foreach (var capability in JobRoutingRegistry.Capabilities)
     else
     {
         worker
-            .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"))
-            .WithEnvironment("Storage__PublicServiceUrl", minio.GetEndpoint("s3"));
+            .WithEnvironment("Storage__ServiceUrl", minio.GetEndpoint("s3"));
         if (string.Equals(
                 capability,
                 JobRoutingRegistry.Control,

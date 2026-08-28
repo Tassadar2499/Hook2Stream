@@ -8,8 +8,7 @@
 flowchart LR
     WEB["Next.js web"] --> API["ASP.NET Core API"]
     API --> DB["PostgreSQL"]
-    WEB --> S3["MinIO / S3 upload"]
-    API --> S3
+    API --> S3["Storj in deploy / MinIO locally"]
     API --> JOBS["PostgreSQL durable jobs + outbox"]
     JOBS --> CONTROL["Control worker"]
     JOBS --> MEDIA["Media / FFmpeg"]
@@ -36,7 +35,7 @@ flowchart LR
 | `Hook2Stream.Infrastructure` | EF Core/PostgreSQL, S3, capability-routed queue, FFmpeg and fixture/external providers |
 | `Hook2Stream.Api` | Authenticated `/api/v1`, MP3 quick upload, workflow/review, assets, jobs and SSE |
 | `Hook2Stream.Worker` | Leased background execution, outbox dispatch and capability handlers |
-| `Hook2Stream.Bootstrapper` | Database migrations and object-storage bucket/CORS bootstrap |
+| `Hook2Stream.Bootstrapper` | Database migrations and object-storage verification; bucket management only in local/CI |
 | `Hook2Stream.ServiceDefaults` | OpenTelemetry, service discovery and health endpoints |
 | `Hook2Stream.AppHost` | Local Aspire topology: PostgreSQL, MinIO, backend and web |
 | `web` | Next.js landing and authenticated release setup |
@@ -50,7 +49,7 @@ npm ci --prefix src/web
 dotnet run --project src/Hook2Stream.AppHost
 ```
 
-The AppHost generates and persists local PostgreSQL and MinIO passwords in .NET user secrets, then reuses path-scoped data volumes across restarts. The volume names include the AppHost path identity, so parallel clones and worktrees do not share local state. MinIO CORS for direct browser uploads is configured by the container environment; the storage adapter can apply bucket CORS for compatible S3 providers.
+The AppHost generates and persists local PostgreSQL and MinIO passwords in .NET user secrets, then reuses path-scoped data volumes across restarts. The volume names include the AppHost path identity, so parallel clones and worktrees do not share local state. Browser uploads always use the same-origin API; MinIO CORS stays disabled.
 
 When both Google OAuth settings are absent, the Development AppHost automatically supplies a fixed local user and a per-run bearer token to the API and web app. The local scheme only accepts loopback requests and is rejected outside Development and Testing. Configure both settings to exercise the real Google sign-in flow:
 
@@ -100,11 +99,11 @@ immutable image can move between environments without rebuilding it for a
 hostname. Set `NEXT_PUBLIC_API_BASE_URL` only for split-origin deployments;
 `NEXT_PUBLIC_AUTH_MODE` remains a build-time choice.
 
-Set exactly one `Worker__Capabilities__0` value per worker deployment (`media`, `analysis`, `control`, `render`, or `export`). The bootstrapper owns bucket setup; when `Storage__ConfigureBucketCors=true`, provide every public browser origin through `Storage__BrowserUploadOrigins__N` (HTTPS is required in Production). Providers that do not support the S3 `AbortIncompleteMultipartUpload` lifecycle action must set `Storage__ConfigureMultipartAbortLifecycle=false`; staging-object expiration remains controlled independently by `Storage__ConfigureBucketLifecycle`.
+Set exactly one `Worker__Capabilities__0` value per worker deployment (`media`, `analysis`, `control`, `render`, or `export`). Local/CI MinIO uses `Storage__ProvisioningMode=Manage`; Servers.Guru/Storj deployments use `VerifyOnly`, never mutate bucket CORS or lifecycle, and attach Storj object TTL metadata to temporary `staging/` ciphertext. A separate daily janitor aborts incomplete media multipart uploads older than 24 hours.
 
 ## MP3-first API flow
 
-1. `POST /api/v1/releases/audio-uploads` with `Idempotency-Key`, rights confirmation and external-AI consent creates an `Unscheduled` project, bound attestation, audio asset and direct-upload session atomically.
+1. `POST /api/v1/releases/audio-uploads` with `Idempotency-Key`, rights confirmation and external-AI consent creates an `Unscheduled` project, bound attestation, audio asset and same-origin multipart upload session atomically.
 2. Existing upload completion starts ingest through the outbox. Deterministic analysis and OpenRouter transcription begin once the audio master is ready and consent remains current.
 3. `PUT /api/v1/releases/{id}/setup` confirms metadata; the existing rights endpoint confirms rights before artwork generation.
 4. `/transcript`, `/artwork`, `/hooks` and `/campaign` expose immutable revisions. Mutations require current `If-Match`; asynchronous generation commands also require `Idempotency-Key`.
@@ -137,8 +136,9 @@ isolated worker pools, encrypted off-host PostgreSQL backups, Docker secrets,
 health checks, resource limits, and an ordered release/rollback runbook. It is
 intended for a closed alpha; the runbook identifies the managed PostgreSQL and
 multi-instance upgrades required for paid beta. Backup manifests bind every
-encrypted recovery point to an immutable key ID; historical passphrases remain
-available for the 35-day recovery window plus a 14-day restore margin.
+encrypted recovery point to its age-recipient fingerprint and Storj version ID.
+The matching private age identities remain in off-host operator escrow for the
+full retention and restore-drill window.
 
 ## Implementation boundary
 

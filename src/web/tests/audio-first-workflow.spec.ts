@@ -14,15 +14,13 @@ const campaignBackgroundIds = [
   "88888888-8888-4888-8888-888888888884",
 ];
 
-test("advanced Audio-first setup accepts a WAV master", async ({ page }) => {
+test("advanced Audio-first setup accepts a WAV master", async ({
+  browserName,
+  page,
+}) => {
   let createdPayload: Record<string, unknown> | undefined;
   let uploadCompleted = false;
 
-  await page.route("**/object-upload", async (route) => {
-    expect(route.request().method()).toBe("PUT");
-    expect(route.request().headers()["content-type"]).toBe("audio/wav");
-    await route.fulfill({ status: 200, headers: { ETag: '"fixture-etag"' } });
-  });
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -44,18 +42,42 @@ test("advanced Audio-first setup accepts a WAV master", async ({ page }) => {
         sessionId: uploadSessionId,
         assetId: uploadAssetId,
         multipart: false,
-        uploadUrl: "http://127.0.0.1:3101/object-upload",
+        uploadUrl: null,
         multipartUploadId: null,
-        partSizeBytes: 0,
+        partSizeBytes: 10 * 1024 * 1024,
         partCount: 1,
         urlExpiresAt: "2030-01-01T00:10:00Z",
         sessionExpiresAt: "2030-01-02T00:00:00Z",
+        completedParts: [],
+      });
+    }
+    if (
+      request.method() === "PUT" &&
+      path === `/api/v1/uploads/${uploadSessionId}/parts/1`
+    ) {
+      expect(request.headers()["content-type"]).toBe("application/octet-stream");
+      const uploadBody = request.postDataBuffer();
+      if (uploadBody === null) {
+        // WebKit omits Blob-backed request bodies from intercepted requests.
+        // https://github.com/microsoft/playwright/issues/6479
+        expect(browserName).toBe("webkit");
+      } else {
+        expect(uploadBody.toString()).toBe("RIFF-fixture-wave");
+      }
+      return json(route, {
+        partNumber: 1,
+        plaintextLength: 17,
+        sha256: "fixture-sha256",
+        eTag: '"fixture-etag"',
       });
     }
     if (
       request.method() === "POST" &&
       path === `/api/v1/uploads/${uploadSessionId}/complete`
     ) {
+      expect(request.postDataJSON()).toEqual({
+        parts: [{ partNumber: 1, eTag: '"fixture-etag"' }],
+      });
       return json(route, { assetId: uploadAssetId, jobId: ingestJobId });
     }
     if (request.method() === "GET" && path === `/api/v1/jobs/${ingestJobId}`) {
@@ -202,7 +224,7 @@ test("approved artwork can retry missing campaign backgrounds once locally", asy
       const assetId = path.split("/").at(-2)!;
       return json(route, {
         assetId,
-        url: `https://media.example.test/${assetId}`,
+        url: `/api/v1/releases/${projectId}/assets/${assetId}/content`,
         expiresAt: "2030-01-01T00:10:00Z",
       });
     }

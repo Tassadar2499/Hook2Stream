@@ -1,6 +1,5 @@
-#!/bin/sh
-set -eu
-set -o pipefail
+#!/bin/bash
+set -euo pipefail
 
 fail() {
     printf '%s\n' "postgres backup: $*" >&2
@@ -27,77 +26,16 @@ read_age_recipient() {
     printf '%s' "$age_recipient"
 }
 
-aws_command() {
-    if [ -n "$BACKUP_S3_ENDPOINT" ]; then
-        aws --endpoint-url "$BACKUP_S3_ENDPOINT" "$@"
-    else
-        aws "$@"
-    fi
-}
-
-send_success_heartbeat() {
-    [ -n "$BACKUP_HEARTBEAT_URL_FILE" ] || return 0
-
-    if [ ! -r "$BACKUP_HEARTBEAT_URL_FILE" ]; then
-        printf '%s\n' \
-            "postgres backup: warning: heartbeat secret file is not readable; skipping notification" >&2
-        return 0
-    fi
-
-    if ! heartbeat_url=$(sed -e 's/[[:space:]]*$//' "$BACKUP_HEARTBEAT_URL_FILE"); then
-        printf '%s\n' \
-            "postgres backup: warning: heartbeat secret file could not be read; skipping notification" >&2
-        return 0
-    fi
-    if [ -z "$heartbeat_url" ]; then
-        unset heartbeat_url
-        return 0
-    fi
-    case "$heartbeat_url" in
-        https://?*) ;;
-        *)
-            printf '%s\n' \
-                "postgres backup: warning: heartbeat URL must use HTTPS; skipping notification" >&2
-            unset heartbeat_url
-            return 0
-            ;;
-    esac
-    case "$heartbeat_url" in
-        *[[:space:]]*)
-            printf '%s\n' \
-                "postgres backup: warning: heartbeat URL is invalid; skipping notification" >&2
-            unset heartbeat_url
-            return 0
-            ;;
-    esac
-
-    heartbeat_status=
-    if heartbeat_status=$(curl \
-        --fail \
-        --silent \
-        --show-error \
-        --proto '=https' \
-        --connect-timeout 3 \
-        --max-time 10 \
-        --retry 2 \
-        --retry-delay 1 \
-        --retry-max-time 20 \
-        --retry-connrefused \
-        --output /dev/null \
-        --write-out '%{http_code}' \
-        "$heartbeat_url" 2>/dev/null); then
-        case "$heartbeat_status" in
-            2[0-9][0-9])
-                printf '%s\n' "postgres backup: success heartbeat delivered"
-                unset heartbeat_status heartbeat_url
-                return 0
-                ;;
-        esac
-    fi
-    printf '%s\n' \
-        "postgres backup: warning: success heartbeat delivery failed" >&2
-    unset heartbeat_status heartbeat_url
-    return 0
+storage_command() {
+    storage_operation=$1
+    shift
+    hook2stream-storage-tool "$storage_operation" \
+        --endpoint "$BACKUP_S3_ENDPOINT" \
+        --region "$BACKUP_S3_REGION" \
+        --bucket "$BACKUP_S3_BUCKET" \
+        --access-key-file "$BACKUP_S3_ACCESS_KEY_FILE" \
+        --secret-key-file "$BACKUP_S3_SECRET_KEY_FILE" \
+        "$@"
 }
 
 cleanup() {
@@ -106,8 +44,7 @@ cleanup() {
         "${checksum_file:-}" \
         "${manifest_file:-}" \
         "${pgpass_file:-}" \
-        "${versions_file:-}" \
-        "${expired_versions_file:-}" \
+        "${put_response_file:-}" \
         "${success_marker_tmp:-}"
 }
 
@@ -118,42 +55,28 @@ on_signal() {
     exit "$signal_status"
 }
 
-purge_expired_versions() {
-    retention_seconds=$((BACKUP_RETENTION_DAYS * 86400))
-    # Never purge before the advertised retention window. The extra safety
-    # interval absorbs clock skew and a delayed hourly run.
-    purge_age_seconds=$((retention_seconds + BACKUP_RETENTION_SAFETY_SECONDS))
-    cutoff_epoch=$(($(date -u +%s) - purge_age_seconds))
-    cutoff_timestamp=$(date -u -d "@${cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)
-    versions_file=/tmp/backup-object-versions.json
-    expired_versions_file=/tmp/expired-backup-object-versions.tsv
+put_versioned_object() {
+    put_body=$1
+    put_key=$2
+    put_response_file=/tmp/hook2stream-backup-put-response.json
+    storage_command put-object \
+        --key "$put_key" \
+        --body "$put_body" > "$put_response_file"
+    put_version_id=$(jq -er '.versionId | select(type == "string" and length > 0)' \
+        "$put_response_file") \
+        || fail "versioned backup bucket did not return a VersionId for ${put_key}"
+    rm -f "$put_response_file"
+    put_response_file=
+    printf '%s' "$put_version_id"
+}
 
-    aws_command s3api list-object-versions \
-        --bucket "$BACKUP_S3_BUCKET" \
-        --prefix "${BACKUP_S3_PREFIX%/}/" \
-        --output json > "$versions_file"
-    jq -r --arg cutoff "$cutoff_timestamp" '
-        ((.Versions // []) + (.DeleteMarkers // []))[]
-        | select(.LastModified <= $cutoff)
-        | [.Key, .VersionId]
-        | @tsv
-    ' "$versions_file" > "$expired_versions_file"
-
-    deleted_versions=0
-    tab=$(printf '\t')
-    while IFS="$tab" read -r expired_key expired_version_id; do
-        [ -n "$expired_key" ] || continue
-        [ -n "$expired_version_id" ] || fail "object storage returned an empty backup VersionId"
-        aws_command s3api delete-object \
-            --bucket "$BACKUP_S3_BUCKET" \
-            --key "$expired_key" \
-            --version-id "$expired_version_id" \
-            --output json >/dev/null
-        deleted_versions=$((deleted_versions + 1))
-    done < "$expired_versions_file"
-
-    printf '%s\n' \
-        "postgres backup: permanently removed ${deleted_versions} expired object versions/delete markers"
+with_backup_lock() {
+    exec 9>"$BACKUP_LOCK_FILE"
+    flock -w "$BACKUP_LOCK_TIMEOUT_SECONDS" 9 \
+        || fail "another backup did not release the shared lock within ${BACKUP_LOCK_TIMEOUT_SECONDS} seconds"
+    perform_backup
+    flock -u 9
+    exec 9>&-
 }
 
 perform_backup() {
@@ -197,7 +120,9 @@ perform_backup() {
         --compress 9 \
         --no-owner \
         --no-privileges \
-        | age --recipient "$age_recipient" --output "$encrypted_file"
+        | hook2stream-storage-tool encrypt-age-x25519 \
+            --recipient "$age_recipient" \
+            --output "$encrypted_file"
 
     [ -s "$encrypted_file" ] || fail "pg_dump produced an empty backup"
     (
@@ -206,16 +131,22 @@ perform_backup() {
     )
     ciphertext_sha256=$(sed -e 's/[[:space:]].*$//' "$checksum_file")
 
+    dump_version_id=$(put_versioned_object "$encrypted_file" "$object_key")
+    checksum_version_id=$(put_versioned_object "$checksum_file" "$checksum_object_key")
+
     jq -n \
         --arg kind "hook2stream-postgresql-logical-backup" \
         --arg createdAt "$created_at" \
         --arg database "$POSTGRES_DB" \
         --arg recipientFingerprint "$recipient_fingerprint" \
         --arg dumpObjectKey "$object_key" \
+        --arg dumpVersionId "$dump_version_id" \
         --arg checksumObjectKey "$checksum_object_key" \
+        --arg checksumVersionId "$checksum_version_id" \
         --arg ciphertextSha256 "$ciphertext_sha256" \
+        --argjson maxObjectTtlHours "$BACKUP_MAX_OBJECT_TTL_HOURS" \
         '{
-            schemaVersion: 2,
+            schemaVersion: 3,
             kind: $kind,
             createdAt: $createdAt,
             database: $database,
@@ -226,31 +157,32 @@ perform_backup() {
             },
             encryptedDump: {
                 objectKey: $dumpObjectKey,
+                versionId: $dumpVersionId,
                 sha256: $ciphertextSha256
             },
             checksum: {
-                objectKey: $checksumObjectKey
+                objectKey: $checksumObjectKey,
+                versionId: $checksumVersionId
+            },
+            retention: {
+                mode: "storj-access-grant-max-object-ttl",
+                maxObjectTtlHours: $maxObjectTtlHours
             }
         }' > "$manifest_file"
 
-    aws_command s3 cp --only-show-errors \
-        "$encrypted_file" "s3://${BACKUP_S3_BUCKET}/${object_key}"
-    aws_command s3 cp --only-show-errors \
-        "$checksum_file" "s3://${BACKUP_S3_BUCKET}/${checksum_object_key}"
     # The manifest is the completion record for this backup set and is uploaded last.
-    aws_command s3 cp --only-show-errors \
-        "$manifest_file" "s3://${BACKUP_S3_BUCKET}/${manifest_object_key}"
+    manifest_version_id=$(put_versioned_object "$manifest_file" "$manifest_object_key")
 
-    purge_expired_versions
     success_marker_tmp="${BACKUP_SUCCESS_MARKER}.tmp"
     {
         date -u +%s
         printf '%s\n' "$recipient_fingerprint"
+        printf '%s\n' "$manifest_object_key"
+        printf '%s\n' "$manifest_version_id"
     } > "$success_marker_tmp"
     mv -f "$success_marker_tmp" "$BACKUP_SUCCESS_MARKER"
     printf '%s\n' \
         "postgres backup: uploaded s3://${BACKUP_S3_BUCKET}/${manifest_object_key}"
-    send_success_heartbeat
     cleanup
 }
 
@@ -259,44 +191,52 @@ perform_backup() {
 : "${POSTGRES_DB:=hook2stream}"
 : "${POSTGRES_USER:=hook2stream}"
 : "${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE is required}"
-: "${BACKUP_S3_ENDPOINT:=}"
+: "${BACKUP_S3_ENDPOINT:?BACKUP_S3_ENDPOINT is required}"
 : "${BACKUP_S3_REGION:?BACKUP_S3_REGION is required}"
 : "${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}"
 : "${BACKUP_S3_PREFIX:=hook2stream/production/postgres}"
+: "${BACKUP_S3_FORCE_PATH_STYLE:?BACKUP_S3_FORCE_PATH_STYLE is required}"
 : "${BACKUP_S3_ACCESS_KEY_FILE:?BACKUP_S3_ACCESS_KEY_FILE is required}"
 : "${BACKUP_S3_SECRET_KEY_FILE:?BACKUP_S3_SECRET_KEY_FILE is required}"
 : "${BACKUP_AGE_RECIPIENT_FILE:?BACKUP_AGE_RECIPIENT_FILE is required}"
 : "${BACKUP_INTERVAL_SECONDS:=3600}"
 : "${BACKUP_RETENTION_DAYS:=35}"
-: "${BACKUP_RETENTION_SAFETY_SECONDS:=7200}"
+: "${BACKUP_MAX_OBJECT_TTL_HOURS:=$((BACKUP_RETENTION_DAYS * 24))}"
 : "${BACKUP_SUCCESS_MARKER:=/tmp/last-successful-backup}"
-: "${BACKUP_HEARTBEAT_URL_FILE:=}"
+: "${BACKUP_LOCK_FILE:=/tmp/hook2stream-postgres-backup.lock}"
+: "${BACKUP_LOCK_TIMEOUT_SECONDS:=1800}"
 
 for integer_value in \
     "$BACKUP_INTERVAL_SECONDS" \
     "$BACKUP_RETENTION_DAYS" \
-    "$BACKUP_RETENTION_SAFETY_SECONDS"; do
+    "$BACKUP_MAX_OBJECT_TTL_HOURS" \
+    "$BACKUP_LOCK_TIMEOUT_SECONDS"; do
     case "$integer_value" in
-        *[!0-9]*|'') fail "backup interval, retention, and safety values must be integers" ;;
+        *[!0-9]*|'') fail "backup interval, retention, and TTL values must be integers" ;;
     esac
 done
 [ "$BACKUP_INTERVAL_SECONDS" -ge 300 ] || fail "BACKUP_INTERVAL_SECONDS must be at least 300"
 [ "$BACKUP_RETENTION_DAYS" -ge 2 ] || fail "BACKUP_RETENTION_DAYS must be at least 2"
-retention_seconds=$((BACKUP_RETENTION_DAYS * 86400))
-[ "$BACKUP_RETENTION_SAFETY_SECONDS" -ge "$BACKUP_INTERVAL_SECONDS" ] \
-    || fail "BACKUP_RETENTION_SAFETY_SECONDS must cover at least one backup interval"
-[ "$BACKUP_RETENTION_SAFETY_SECONDS" -le 86400 ] \
-    || fail "BACKUP_RETENTION_SAFETY_SECONDS must be at most one day"
+[ "$BACKUP_MAX_OBJECT_TTL_HOURS" -eq "$((BACKUP_RETENTION_DAYS * 24))" ] \
+    || fail "BACKUP_MAX_OBJECT_TTL_HOURS must equal BACKUP_RETENTION_DAYS * 24"
+[ "$BACKUP_LOCK_TIMEOUT_SECONDS" -ge 60 ] \
+    || fail "BACKUP_LOCK_TIMEOUT_SECONDS must be at least 60"
+case "$BACKUP_LOCK_FILE" in
+    /tmp/*) ;;
+    *) fail "BACKUP_LOCK_FILE must be below the encrypted backup scratch mount" ;;
+esac
+[ "$BACKUP_S3_FORCE_PATH_STYLE" = true ] \
+    || fail "BACKUP_S3_FORCE_PATH_STYLE must be true for backup object storage"
+command -v flock >/dev/null 2>&1 || fail "flock is required"
+command -v hook2stream-storage-tool >/dev/null 2>&1 \
+    || fail "hook2stream-storage-tool is required"
 
-export AWS_ACCESS_KEY_ID
-AWS_ACCESS_KEY_ID=$(read_secret "$BACKUP_S3_ACCESS_KEY_FILE")
-export AWS_SECRET_ACCESS_KEY
-AWS_SECRET_ACCESS_KEY=$(read_secret "$BACKUP_S3_SECRET_KEY_FILE")
-export AWS_DEFAULT_REGION=$BACKUP_S3_REGION
-export AWS_REGION=$BACKUP_S3_REGION
-export AWS_EC2_METADATA_DISABLED=true
-export AWS_PAGER=
+for backup_credential_file in "$BACKUP_S3_ACCESS_KEY_FILE" "$BACKUP_S3_SECRET_KEY_FILE"; do
+    [ -r "$backup_credential_file" ] && [ -s "$backup_credential_file" ] \
+        || fail "required S3 credential file is missing or empty: $backup_credential_file"
+done
 
+umask 077
 trap cleanup EXIT
 trap 'on_signal 129' HUP
 trap 'on_signal 130' INT
@@ -309,11 +249,11 @@ done
 
 case "${1:-daemon}" in
     backup-once)
-        perform_backup
+        with_backup_lock
         ;;
     daemon)
         while :; do
-            perform_backup
+            with_backup_lock
             sleep "$BACKUP_INTERVAL_SECONDS"
         done
         ;;

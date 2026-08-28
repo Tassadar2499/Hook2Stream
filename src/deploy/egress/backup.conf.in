@@ -1,0 +1,14 @@
+http_port 3128
+acl SSL_ports port 443
+acl CONNECT method CONNECT
+acl allowed_domains dstdomain __HOOK2STREAM_BACKUP_S3_ENDPOINT_HOST__
+http_access deny !SSL_ports
+http_access deny !CONNECT
+http_access allow allowed_domains
+http_access deny all
+access_log stdio:/dev/stdout
+cache deny all
+via off
+forwarded_for delete
+request_header_access Authorization deny all
+request_header_access Cookie deny all

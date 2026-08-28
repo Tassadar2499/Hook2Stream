@@ -3,8 +3,7 @@
   "kv_version": {{ .Data.metadata.version }},
   "secrets": {
     "access_key_id": {{ .Data.data.access_key_id | toJSON }},
-    "secret_access_key": {{ .Data.data.secret_access_key | toJSON }},
-    "heartbeat_url": {{ .Data.data.heartbeat_url | toJSON }}
+    "secret_access_key": {{ .Data.data.secret_access_key | toJSON }}
   }
 }
 {{- end -}}

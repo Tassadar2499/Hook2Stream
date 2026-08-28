@@ -42,15 +42,6 @@ template {
 }
 
 template {
-  source               = "/vault/templates/bootstrap-s3.json.ctmpl"
-  destination          = "/vault/rendered/bootstrap-s3.json"
-  create_dest_dirs     = false
-  error_on_missing_key = true
-  backup               = false
-  perms                = "0600"
-}
-
-template {
   source               = "/vault/templates/api.json.ctmpl"
   destination          = "/vault/rendered/api.json"
   create_dest_dirs     = false
@@ -71,6 +62,15 @@ template {
 template {
   source               = "/vault/templates/backup-s3.json.ctmpl"
   destination          = "/vault/rendered/backup-s3.json"
+  create_dest_dirs     = false
+  error_on_missing_key = true
+  backup               = false
+  perms                = "0600"
+}
+
+template {
+  source               = "/vault/templates/media-security.json.ctmpl"
+  destination          = "/vault/rendered/media-security.json"
   create_dest_dirs     = false
   error_on_missing_key = true
   backup               = false

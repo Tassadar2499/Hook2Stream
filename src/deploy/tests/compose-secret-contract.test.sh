@@ -28,8 +28,6 @@ for secret_name in \
     postgres_password \
     s3_runtime_access_key \
     s3_runtime_secret_key \
-    s3_bootstrap_access_key \
-    s3_bootstrap_secret_key \
     google_client_secret \
     stripe_secret_key \
     stripe_webhook_secret \
@@ -38,8 +36,7 @@ for secret_name in \
     invited_emails \
     backup_s3_access_key \
     backup_s3_secret_key \
-    backup_age_recipient \
-    backup_heartbeat_url; do
+    backup_age_recipient; do
     printf '%s\n' "test-secret" > "$temporary_dir/$secret_name"
 done
 
@@ -140,17 +137,24 @@ const expectedSecrets = {
   bootstrapper: [
     "media_keyring",
     "postgres_password",
-    "s3_bootstrap_access_key",
-    "s3_bootstrap_secret_key",
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
   ],
   pgbouncer: ["postgres_password"],
   postgres: ["postgres_password"],
   "postgres-backup": [
     "backup_age_recipient",
-    "backup_heartbeat_url",
     "backup_s3_access_key",
     "backup_s3_secret_key",
     "postgres_password",
+  ],
+  "storage-probe": [
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
+  ],
+  "storage-janitor": [
+    "s3_runtime_access_key",
+    "s3_runtime_secret_key",
   ],
 };
 
@@ -169,6 +173,23 @@ function mountedConfigNames(service) {
   return (service.configs ?? [])
     .map((config) => typeof config === "string" ? config : config.source)
     .sort();
+}
+
+function networkNames(service) {
+  return (Array.isArray(service.networks)
+    ? service.networks
+    : Object.keys(service.networks ?? {})).sort();
+}
+
+function assertNetworks(model, serviceName, expectedNetworks) {
+  const actual = networkNames(model.services?.[serviceName] ?? {});
+  const expected = [...expectedNetworks].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    fail(
+      `${serviceName} networks differ: expected ${expected.join(",")}; ` +
+      `received ${actual.join(",")}`,
+    );
+  }
 }
 
 function assertModel(path, expectedGid) {
@@ -226,6 +247,21 @@ function assertModel(path, expectedGid) {
   if (!mountedConfigNames(model.services.postgres).includes("postgres_set_password")) {
     fail("postgres must mount the audited password-rotation helper");
   }
+
+  for (const serviceName of [
+    "worker-media",
+    "worker-analysis",
+    "worker-render",
+    "worker-export",
+    "bootstrapper",
+  ]) {
+    assertNetworks(model, serviceName, ["backend", "media-egress"]);
+  }
+  assertNetworks(model, "storage-probe", ["media-egress"]);
+  assertNetworks(model, "storage-janitor", ["media-egress"]);
+  assertNetworks(model, "egress-s3", ["media-egress", "public-egress"]);
+  assertNetworks(model, "postgres-backup", ["backend", "backup-egress"]);
+  assertNetworks(model, "egress-backup", ["backup-egress", "public-egress"]);
 }
 
 assertModel(process.argv[2], "2000");
@@ -244,6 +280,27 @@ if (vaultRenderer.user !== "0:2000") {
 }
 if (vaultRenderer.command?.[0] !== "agent") {
   fail("vault-renderer must invoke Vault Agent through /bin/vault");
+}
+const expectedVaultConfigs = [
+  "vault_agent_config",
+  "vault_template_api",
+  "vault_template_backup_encryption",
+  "vault_template_backup_s3",
+  "vault_template_control",
+  "vault_template_foundation",
+  "vault_template_media_security",
+  "vault_template_runtime_s3",
+].sort();
+const actualVaultConfigs = mountedConfigNames(vaultRenderer);
+if (JSON.stringify(actualVaultConfigs) !== JSON.stringify(expectedVaultConfigs)) {
+  fail(
+    `Vault renderer configs differ: ${actualVaultConfigs.join(",")}`,
+  );
+}
+if (Object.keys(vaultModel.configs ?? {}).some((name) =>
+  name.includes("bootstrap_s3") || name.includes("backup_key")
+)) {
+  fail("Vault overlay retains an obsolete bootstrap or backup-key config");
 }
 NODE
 

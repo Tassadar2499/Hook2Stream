@@ -22,6 +22,16 @@ const CANDIDATE_FILES = [
   "deploy-bundle.tar.gz",
   "SHA256SUMS",
 ];
+const LOCAL_ONLY_DEPLOY_PATHS = [
+  "deploy/Caddyfile.minio",
+  "deploy/compose.minio.yaml",
+  "deploy/minio",
+  "deploy/storage",
+  "deploy/scripts/validate-deployment.sh",
+  "deploy/tests/caddy-minio-contract.test.sh",
+  "deploy/tests/minio-overlay-contract.test.sh",
+  "deploy/tests/minio-release-integration.test.sh",
+];
 const SHA_RE = /^[0-9a-f]{40}$/;
 const DIGEST_IMAGE_RE = /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?\/)?[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
 
@@ -112,8 +122,6 @@ function validateImages(path, expectedSha) {
   for (const key of IMAGE_KEYS) {
     if (!DIGEST_IMAGE_RE.test(values.get(key))) fail(`${key} is not a digest-only image reference`);
   }
-  const owner = process.env.GITHUB_REPOSITORY_OWNER?.toLowerCase();
-  if (owner) validateImageRepositories(Object.fromEntries(IMAGE_KEYS.map((key) => [key, values.get(key)])), owner);
   return Object.fromEntries(IMAGE_KEYS.map((key) => [key, values.get(key)]));
 }
 
@@ -126,7 +134,7 @@ function validateImageRepositories(images, owner) {
     WEB_IMAGE: new RegExp(`^ghcr\\.io/${escapedOwner}/hook2stream-web@sha256:`),
     POSTGRES_BACKUP_IMAGE: new RegExp(`^ghcr\\.io/${escapedOwner}/hook2stream-postgres-backup@sha256:`),
     CADDY_IMAGE: /^(?:docker\.io\/library\/)?caddy@sha256:/,
-    POSTGRES_IMAGE: /^(?:docker\.io\/library\/)?postgres@sha256:/,
+    POSTGRES_IMAGE: new RegExp(`^ghcr\\.io/${escapedOwner}/hook2stream-postgres@sha256:`),
     PGBOUNCER_IMAGE: /^(?:docker\.io\/)?edoburu\/pgbouncer@sha256:/,
     EGRESS_PROXY_IMAGE: /^(?:docker\.io\/)?ubuntu\/squid@sha256:/,
   };
@@ -145,6 +153,10 @@ function validateBundle(path) {
     }
     if (entry !== "deploy" && !entry.startsWith("deploy/")) {
       fail(`deploy bundle entry is outside deploy/: ${JSON.stringify(entry)}`);
+    }
+    const normalizedEntry = entry.replace(/\/$/, "");
+    if (LOCAL_ONLY_DEPLOY_PATHS.some((localPath) => normalizedEntry === localPath || normalizedEntry.startsWith(`${localPath}/`))) {
+      fail(`deploy bundle contains local-only MinIO/storage-plane or CI validation path: ${JSON.stringify(entry)}`);
     }
     if (/[[\]\x00-\x1f\x7f]/.test(entry)) fail("deploy bundle path contains control characters");
   }
@@ -266,7 +278,19 @@ function create(args) {
   const repoRoot = dirname(dirname(deployDir));
   const uncompressedBundle = join(output, "deploy-bundle.tar");
   run("git", ["-C", repoRoot, "cat-file", "-e", `${commitSha}:src/deploy`]);
-  run("git", ["-C", repoRoot, "archive", "--format=tar", "--prefix=deploy/", `--output=${uncompressedBundle}`, `${commitSha}:src/deploy`]);
+  run("git", [
+    "-C", repoRoot,
+    "archive", "--format=tar", "--prefix=deploy/", `--output=${uncompressedBundle}`,
+    `${commitSha}:src/deploy`, ".",
+    ":(exclude)Caddyfile.minio",
+    ":(exclude)compose.minio.yaml",
+    ":(exclude)minio",
+    ":(exclude)storage",
+    ":(exclude)scripts/validate-deployment.sh",
+    ":(exclude)tests/caddy-minio-contract.test.sh",
+    ":(exclude)tests/minio-overlay-contract.test.sh",
+    ":(exclude)tests/minio-release-integration.test.sh",
+  ]);
   const compressed = spawnSync("gzip", ["-n", "-9", "-c", uncompressedBundle], { encoding: null });
   if (compressed.status !== 0) fail(`gzip failed: ${compressed.error?.message ?? compressed.stderr?.toString().trim()}`);
   writeFileSync(bundlePath, compressed.stdout, { mode: 0o644 });

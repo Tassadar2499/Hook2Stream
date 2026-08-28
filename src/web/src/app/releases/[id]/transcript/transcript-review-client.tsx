@@ -7,6 +7,7 @@ import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
 import { ApiRequestError, Release, apiFetch } from "@/lib/api";
+import { buildApiUrl } from "@/lib/api-url";
 import {
   TranscriptPhrase,
   TranscriptRevision,
@@ -74,7 +75,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
         `/api/v1/releases/${projectId}/assets/${audio.id}/view-url`,
         token,
       )
-        .then((result) => setAudioUrl(result.data.url))
+        .then((result) => setAudioUrl(buildApiUrl(result.data.url)))
         .catch(() => setAudioUrl(undefined));
     }
 

@@ -1,554 +1,299 @@
-# Hook2Stream single-node deployment bundle
+# Hook2Stream deployment bundle
 
-The current staging/production operating contract is
-`docs/operations/hook2stream-mvp-runbook.md` from the repository root. It
-supersedes older provider sizing, plaintext-MinIO staging, browser CORS, and
-AES/passphrase backup guidance retained later in this historical README. MinIO
-remains a local/CI overlay only; both deployed environments use private Hetzner
-Object Storage, H2SE v1 media encryption, and age-encrypted PostgreSQL backups.
+The canonical operating contract is
+[`docs/operations/hook2stream-mvp-runbook.md`](../../docs/operations/hook2stream-mvp-runbook.md).
+The deployed MVP has two permanent app-only Servers.Guru VPS instances:
+staging is `MTL1-3` in Montreal with 4 shared vCPU, 8 GiB RAM, and 80 GB NVMe;
+production is `NL1-4` in Amsterdam with 6 shared vCPU, 8 GiB RAM, and 160 GB
+NVMe. Media and encrypted backups use separate Storj projects; there is no
+deployed object-storage host or storage release pipeline.
 
-This directory is the budget deployment for one Linux host (for example a
-Hetzner Cloud VM) plus external S3-compatible object storage. Caddy is the only
-service with published ports. It terminates TLS and serves a single origin:
-`/api/*` goes to ASP.NET Core and every other route goes to Next.js. PostgreSQL,
-PgBouncer, the API, and all workers stay on Docker networks without host ports.
+## Directory map
 
-This topology is suitable for a closed alpha or an operationally accepted
-single-node beta. It is **not** the paid-beta NFR topology: one host is a failure
-domain, PostgreSQL is self-managed, logical backups are not PITR, and there is
-only one control-plane instance. Moving PostgreSQL to a managed 35-day PITR
-service and running at least two API/web instances is the production upgrade
-path; the application and S3 settings remain the same.
+- `compose.yaml`: Caddy, app, workers, PostgreSQL, PgBouncer, encrypted backup,
+  Storj media janitor, storage probe, and role-specific egress proxies;
+- `compose.minio.yaml`: disposable local-development and CI overlay only;
+- `environments/`: reviewed staging/production app-host templates;
+- `host/`: app forced-command SSH, sudo, and mount-guard templates;
+- `scripts/`: candidate validation, app deploy/rollback, host validation,
+  backup, Storj probe/janitor, health, and E2E contracts;
+- `storj/`: operator-only bucket bootstrap and live acceptance;
+- `secrets/`: scalar file-secret contract; values are never committed;
+- `vault/`: optional external Vault-to-file renderer;
+- `tests/`: offline deployment contracts.
 
-## Temporary single-host MinIO staging
+`compose.minio.yaml` must never run on staging or production and is excluded
+from immutable candidates. Its `Manage` storage mode, root credentials, bucket
+bootstrap, and test routing are local/CI conveniences only. The final MinIO
+Community source release is archived and no longer receives OSS security
+fixes. CI therefore records its vulnerability inventory without treating that
+test-only image as deployable; all images that can enter a candidate retain the
+blocking High/Critical gate. A MinIO finding can never be waived into staging
+or production.
 
-`STORAGE_MODE=minio` activates `compose.minio.yaml` for a personal,
-production-like staging environment. It adds a source-built MinIO server on an
-isolated Docker network, exposes only its signed S3 API through Caddy, and keeps
-the console and administrative API private. The normal `external` storage mode
-and its production topology are unchanged.
+## Deployed app-host contract
 
-This profile is deliberately **disposable**. PostgreSQL, media, and encrypted
-logical backups all live on the same unencrypted VPS disk, so a host or disk
-loss destroys every copy. Use it for no more than 30 days and never admit a
-second user; move both media and backups to a maintained external S3 provider
-before either limit is reached. The MinIO community source repository is
-archived, so CI builds the final CVE-fixed source release
-`RELEASE.2025-10-15T17-29-55Z` instead of using the older archived Docker Hub
-server image.
-
-For the IT-Garage staging profile, provision an amd64 Ubuntu 24.04 VM with 8
-vCPU, 16 GB RAM, and 320 GB NVMe. Configure two DNS-only A records pointing to
-its static IPv4 address:
-
-- `APP_DOMAIN=staging.<base-domain>` and
-  `PUBLIC_ORIGIN=https://staging.<base-domain>`;
-- `S3_PUBLIC_DOMAIN=s3-staging.<base-domain>` and
-  `S3_PUBLIC_SERVICE_URL=https://s3-staging.<base-domain>`.
-
-Set the remaining storage values exactly as follows. The release preflight
-accepts cleartext only for these two internal Docker-network endpoints and
-continues to require HTTPS for the browser-visible origin.
+Copy the matching `environments/*.env.example` to the root-owned release
+configuration outside Git. Replace every placeholder and pin every image as
+`@sha256:<64 lowercase hex>`. The deployed storage contract is:
 
 ```dotenv
-STORAGE_MODE=minio
-S3_SERVICE_URL=http://minio:9000
-S3_PUBLIC_SERVICE_URL=https://s3-staging.<base-domain>
-S3_PUBLIC_DOMAIN=s3-staging.<base-domain>
-S3_REGION=us-east-1
-S3_MEDIA_BUCKET=hook2stream-staging-media
+STORAGE_MODE=external
+STORAGE_PROVISIONING_MODE=VerifyOnly
+STORAGE_OBJECT_EXPIRATION_MODE=Storj
+S3_ENDPOINT_HOST=gateway.storjshare.io
+S3_SERVICE_URL=https://gateway.storjshare.io
+S3_REGION=global
+S3_MEDIA_BUCKET=hook2stream-com-<environment>-media
 S3_FORCE_PATH_STYLE=true
+S3_CONFIGURE_BUCKET_LIFECYCLE=false
 S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE=false
-MINIO_MEDIA_QUOTA_GIB=180
-MINIO_BACKUP_QUOTA_GIB=20
-BACKUP_S3_ENDPOINT=http://minio:9000
-BACKUP_S3_REGION=us-east-1
-BACKUP_S3_BUCKET=hook2stream-staging-pg-backups
-BACKUP_S3_PREFIX=hook2stream/staging/postgres
-BACKUP_RETENTION_DAYS=7
-POSTGRES_MAX_CONNECTIONS=50
-POSTGRES_SHARED_BUFFERS=512MB
-POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
-POSTGRES_MAINTENANCE_WORK_MEM=64MB
-POSTGRES_WORK_MEM=4MB
+STORAGE_PROTOCOL_VERSION=1
+STORAGE_CONTRACT_KEY=.hook2stream/contracts/storage-v1.json
+STORAGE_CONTRACT_SHA256=<bootstrap-output-sha256>
+BACKUP_S3_ENDPOINT_HOST=gateway.storjshare.io
+BACKUP_S3_ENDPOINT=https://gateway.storjshare.io
+BACKUP_S3_REGION=global
+BACKUP_S3_BUCKET=hook2stream-com-<environment>-pg-backups
+BACKUP_S3_FORCE_PATH_STYLE=true
 ```
 
-Pin `MINIO_IMAGE` and `MINIO_MC_IMAGE` by digest and add the two conditional
-root files documented in `secrets/README.md`. MinIO creates separate identities
-from the existing runtime, bootstrap, and backup S3 credential pairs; no
-application container receives the root secrets. The media bucket is
-unversioned and capped at 180 GiB. The backup bucket is versioned, capped at 20
-GiB, and retains encrypted PostgreSQL recovery points for seven days.
+Media and backup endpoint/region/path-style settings remain independent even
+when their current Storj values are equal. The egress renderer validates each
+exact credential-free HTTPS origin and renders separate media and backup proxy
+allowlists. Wildcards and arbitrary HTTPS origins are rejected.
 
-The selected MinIO server rejects its standalone abort-incomplete-multipart
-lifecycle rule, so the staging profile disables that one external-S3 safety
-net. Application error paths still abort failed multipart uploads directly;
-the 30-day disposal limit remains the outer cleanup bound.
+`VerifyOnly` checks the pre-created private media bucket and never creates a
+bucket or mutates CORS/lifecycle. Browser S3 URLs, object keys, grants, and
+credentials are never exposed; uploads and content downloads use same-origin
+Hook2Stream APIs. Storj does not support the S3 Lifecycle API, so both deployed
+lifecycle flags stay `false`.
 
-Community MinIO does not implement per-bucket `PutBucketCors`. In this profile,
-its wildcard global CORS default is disabled and `Caddyfile.minio` answers CORS
-only for the path-style media bucket, only for the exact application origin.
-The backup bucket receives no browser CORS headers. The external-S3 profile
-continues to configure native bucket CORS through the bootstrapper.
+Before backup or database migration, the wrapper authenticates with the media
+runtime credential, downloads
+`.hook2stream/contracts/storage-v1.json`, verifies the root-pinned SHA-256 and
+provider/environment/bucket/H2SE/retention fields, and performs a disposable
+PUT, HEAD, single-range GET, and DELETE. It also requires a successful encrypted
+backup newer than two hours. Any failure stops before migration.
 
-On this 16 GB host, create a 4 GB swap file as an emergency OOM guard, keep at
-least 20% disk space free, and run only one instance of every worker pool. Swap
-is not capacity for normal renders. The MinIO overlay lowers PostgreSQL and
-non-render worker memory ceilings while preserving 3 GB for the render worker.
+The backup sidecar uses separate bucket-scoped Storj credentials, single
+`PutObject` uploads, version IDs, age ciphertext, and manifest-last publication.
+Its credential has no Delete permission and carries maximum object TTL 168
+hours for staging or 840 hours for production. The daily media janitor uses the
+media credential only to abort incomplete multipart uploads older than 24
+hours; temporary `staging/` H2SE data and manifest share a 24-hour absolute TTL.
 
-The base domain itself is intentionally an operator-provided value. Register
-the exact application callback and webhook only after both public hostnames
-resolve and Caddy can issue their certificates.
+## Storj operator bootstrap
 
-Prepare the persistent layout before changing Docker's `data-root`:
+Staging and production use different Storj Standard/global projects and
+different escrowed encryption passphrases. Their fixed private buckets are:
 
-```bash
-sudo install -d -o root -g root -m 0755 \
-  /srv/hook2stream \
-  /srv/hook2stream/docker \
-  /srv/hook2stream/releases
-sudo install -d -o root -g root -m 0700 \
-  /srv/hook2stream/config \
-  /srv/hook2stream/release-state
-sudo install -d -o root -g 2000 -m 0750 \
-  /srv/hook2stream/secrets/current
+| Environment | Media | PostgreSQL backup |
+|---|---|---|
+| staging | `hook2stream-com-staging-media` | `hook2stream-com-staging-pg-backups` |
+| production | `hook2stream-com-production-media` | `hook2stream-com-production-pg-backups` |
+
+Media is unversioned and has no CORS; backup is versioned. The operating
+thresholds are 35/160 GiB media and 10/30 GiB backup. Follow
+[`storj/README.md`](storj/README.md) to derive role-scoped grants, bootstrap the
+buckets and private storage marker, and run live acceptance. Full project,
+bootstrap/root, restore-read grants, and project encryption passphrases remain
+off every VPS and outside GitHub. Only runtime media, no-Delete backup writer,
+and the marker digest reach their corresponding app environment.
+
+## Servers.Guru hosts and encrypted mount
+
+Both VPS instances are provisioned manually in the Servers.Guru control panel
+and remain running between releases. The canonical provider checklist and
+policy live under `../../deploy/providers/serversguru`. The public API is
+optional and read-only for inventory, status, product/image, and wallet checks;
+CI never receives an API key and never creates, rebuilds, powers, cancels, or
+restores a server. There is no Terraform provider contract, provider lifecycle
+receipt, retained address, or per-release staging lifecycle.
+
+Verify the paid records exactly before bootstrap: `MTL1-3` in Montreal for
+staging and `NL1-4` in Amsterdam for production, both Ubuntu 24.04 amd64. The
+pair's storefront baseline is EUR 32.48 per monthly cycle. A total above EUR
+40, a price movement above ten percent, a location/SKU/image substitution, or
+an unpaid/ambiguous invoice blocks rollout. Keep two monthly budgets in the
+provider wallet because a new account has no documented renewal grace.
+
+Servers.Guru documents KVM, ordinary SSH, and panel VNC but does not document
+custom cloud-init, SSH-key injection, a provider firewall, or scoped/expiring
+API keys. Use the issued root password through a verified SSH/VNC session.
+Install operator keys, enroll Tailscale with Tailscale SSH disabled, and
+restrict TCP 22 to `tailscale0`. The operator and deploy accounts stay
+password-locked and key-only; as a temporary MVP exception, root retains a
+unique active password for ordinary OpenSSH recovery through Tailscale only.
+Never place that password in GitHub, shell history, provider API logs, or
+deployment artifacts. Retain independent `findmnt`,
+backing-device-chain, and `cryptsetup status` evidence.
+
+Install the reviewed SSH policy before host validation:
+
+```sh
+sudo install -o root -g root -m 0644 \
+  host/sshd-no-public-ssh.conf.example \
+  /etc/ssh/sshd_config.d/99-hook2stream-no-public-ssh.conf
+sudo sshd -t
+sudo systemctl reload ssh.service
 ```
 
-Keep `/srv/hook2stream/release-state` as a real root-owned directory with mode
-`0700`; every parent must also be root-owned and non-writable by group/others.
-Do not replace it or any parent component with a symlink. The release preflight
-fails closed instead of following or repairing an unsafe state path.
+Both permanent hosts use only `/etc/ssh/ssh_host_ed25519_key` and an exact
+pinned ED25519 `known_hosts` record. Neither profile uses SSH host
+certificates. Never establish trust through an unauthenticated
+`ssh-keyscan` or hand-author a partial drop-in from validator output.
 
-On a fresh host, configure Docker Engine's `data-root` as
-`/srv/hook2stream/docker` before starting any application containers. Create
-the emergency swap once, record it in `/etc/fstab`, and keep swappiness low:
+The provider root disk is not treated as protected runtime storage. Both hosts
+use a fully allocated root-owned mode `0600`
+`/var/lib/hook2stream-data.luks`, mapped as `hook2stream-data`, and mounted at
+`/srv/hook2stream`. Staging uses exactly 48 GiB; production uses 64 GiB.
+Docker data-root, PostgreSQL, secrets, release state, logs, scratch, and 4 GiB
+swap live below the encrypted mount.
 
-```bash
-sudo fallocate -l 4G /swapfile
-sudo chmod 0600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-printf '%s\n' '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-printf '%s\n' 'vm.swappiness=10' | sudo tee /etc/sysctl.d/90-hook2stream.conf
-sudo sysctl --system
+Never configure automatic unlock. Docker's systemd unit must require the exact
+mount. After a reboot, use the already verified Tailscale ordinary-OpenSSH path
+to attach the loop device, unlock LUKS2, mount it, enable encrypted swap, then
+start Docker. If network-independent recovery is required, use the Servers.Guru
+panel VNC console.
+VNC at the boot prompt must be proved by the live provider probe before relying
+on it. Finally validate:
+
+```sh
+sudo ./scripts/validate-host.sh app staging
+sudo ./scripts/validate-host.sh app production
 ```
 
-Run `sudo ./scripts/validate-staging-host.sh` after Docker Compose v2 and the
-UFW firewall are configured. The check fails when the host is undersized,
-Docker stores data outside `/srv/hook2stream`, free disk falls below 20%, a
-private application/storage port is bound to every host interface, or UFW does
-not default-deny inbound traffic with the exact public/restricted rules below.
+Run only the command matching that host. The validator proves the exact
+file/loop/LUKS2/mapper/mount chain, capacity/allocation/permissions, at least
+20 percent free on root and encrypted filesystems, encrypted swap, Docker root,
+the installed and loaded systemd mount guard, UFW, Tailscale-only SSH, listener
+policy, and secret modes.
 
-### IT-Garage host hardening
+Only Caddy publishes 80/TCP, 443/TCP, and 443/UDP. Servers.Guru provider-level
+firewalling is not assumed; these are the only public UFW ingress rules, and
+UFW allows SSH only inbound on `tailscale0`.
+Application backend networks are
+internal. The operator and deploy users are not in `docker` or the secrets
+group and their local passwords remain locked. The reviewed global sshd policy
+allows password authentication only because `Match` blocks are forbidden; the
+exact `AllowUsers` list and account state make root the sole password-capable
+SSH identity. This is a temporary MVP risk: store each root password only in
+encrypted operator escrow and rotate it after any suspected disclosure. Install
+`host/docker-encrypted-mount.conf.example` as the reviewed Docker systemd
+drop-in so Docker cannot start while `/srv/hook2stream` is absent.
+Use the fail-closed, interactive initialization and reboot procedure in
+[`host/README.md`](host/README.md). The bootstrap interface formats only a new
+backing file created by the same invocation, never stores an unlock key, and
+refuses to format an existing path or an existing unlocked volume.
 
-`my.it-garage.pro` is the provider control panel, not an application hostname.
-Confirm that the RZ-W-8 offer, German location, price, and stock still match the
-required 8 vCPU / 16 GB / 320 GB profile before ordering. After Ubuntu boots:
+## App release gate
 
-1. Create a named operator with `sudo` and install only the operator's public
-   key in its `authorized_keys`. Do not add that account to the `docker` group;
-   releases intentionally run through `sudo`.
-2. In `/etc/ssh/sshd_config.d/90-hook2stream.conf`, set
-   `PermitRootLogin no`, `PasswordAuthentication no`,
-   `KbdInteractiveAuthentication no`, and `PubkeyAuthentication yes`. Run
-   `sudo sshd -t`, keep the original session open, and prove a second key-only
-   operator login before reloading SSH.
-3. Default-deny inbound traffic. Permit 22/TCP only from the operator CIDR and
-   permit 80/TCP, 443/TCP, and 443/UDP publicly. Apply the same policy in the
-   provider firewall when it is available; do not open any Compose-private
-   port. Configure explicit UFW port rules rather than broad application
-   profiles:
+Install the app gate only after `/srv/hook2stream` is the active encrypted
+mount. The mount root remains `root:root` mode `0755`; configuration, releases,
+state, and `/etc/hook2stream` are root-private. The deploy user's parent paths
+must not be writable or symlinked. Install the reviewed forced-command launcher,
+wrapper, candidate validator, libraries, and E2E script with the exact ownership
+and modes enforced by `validate-host.sh`.
 
-   ```bash
-   sudo ufw default deny incoming
-   sudo ufw default allow outgoing
-   sudo ufw default deny routed
-   sudo ufw allow from '<operator-cidr>' to any port 22 proto tcp
-   sudo ufw allow 80/tcp
-   sudo ufw allow 443/tcp
-   sudo ufw allow 443/udp
-   sudo ufw enable
-   ```
-4. Install Docker Engine from Docker's official Ubuntu repository with the
-   Compose v2 plugin. Set `/etc/docker/daemon.json` to use
-   `"data-root": "/srv/hook2stream/docker"` before the first workload starts.
-   Enable Ubuntu unattended security upgrades and reboot deliberately when a
-   kernel or container-runtime update requires it.
-5. Log in to GHCR with a dedicated token that has only `read:packages`; keep it
-   in Docker's root credential store, never in `.env` or a secret mounted into
-   the application.
+Create `/srv/hook2stream/config/staging.env` or `production.env` from the
+matching environment template as `root:root` mode `0600`. Install
+`host/deploy.conf.example` as `/etc/hook2stream/deploy.conf`, also `0600`.
+Replace both public-key fingerprint placeholders with the exact OpenSSH SHA-256
+fingerprints for the single operator key and the single environment-specific CI
+deploy key. `validate-host.sh` rejects extra/unrestricted keys and any sudoers
+content other than `host/sudoers.example`, including effective grants from a
+different drop-in or group. Run `sudo tailscale set --ssh=false` before host
+validation; the deployment contract uses ordinary OpenSSH only. The validator
+also rejects named/default POSIX ACLs on trusted files, secrets, and the Docker
+socket.
+Production installs the staging-receipt allowed-signers file with exactly one
+named ED25519 authority; additional or wildcard records are rejected. An
+accepted promotion carries and verifies the signed staging receipt before
+GitHub Environment approval and again on the host. No provider lifecycle
+marker is part of release evidence.
+Secret scalar files live below `/srv/hook2stream/secrets/current` according to
+[`secrets/README.md`](secrets/README.md).
 
-Create DNS-only A records for both public names. If an AAAA record is added,
-first apply the same SSH/firewall policy to IPv6 and verify that Caddy can reach
-the ACME service over that route.
+The candidate contains schema-v1 metadata, digest-only image variables, this
+application deploy bundle, and checksums. Protected `main` CI publishes it but
+does not deploy staging. On the already accepted permanent staging host, the
+`Stage candidate` workflow takes a selected successful `source_ci_run_id`,
+deploys the existing artifact without rebuild, runs acceptance plus the
+60-minute soak, and signs a receipt. The soak is a separate staging-only forced
+command for the exact current candidate. It holds the deployment lock for
+3600--3900 seconds, invokes the root-owned E2E hook in `soak-60m` mode, and
+requires a completed render, at least 3300 active render seconds, concurrency
+one, at least 60 successful network checks, no throttling/OOM, and one healthy
+candidate-digest `worker-render`. Its strict result is included in the signed
+application receipt; hook diagnostics are not exposed to CI logs. Production
+takes the successful staging workflow
+run ID and accepts only its exact candidate after GitHub Environment approval.
+All GitHub-runner policy and sourced helpers are pinned to the current
+`github.workflow_sha`; the selected release SHA is data only and is never
+checked out or executed in a credential-bearing job. A separate job/artifact
+boundary precedes Environment secrets, and current policy revalidates the data
+after that boundary.
+The forced command rejects
+archive traversal, links, special files, unknown images, tags, checksum/schema
+or receipt mismatch; host `flock` is the second concurrency lock.
 
-### Staging accounts and first release
+Before the first candidate, finish the deploy-key, host trust, MagicDNS,
+rollback-marker, integration callback, and DNS handoff in
+[`DEPLOYMENT.md`](../../.github/DEPLOYMENT.md). The host and matching GitHub
+Environment must contain the same first H2SE-capable release SHA. Production
+and staging each use an exact, distinct pinned ED25519 host key for their stable
+MagicDNS names.
 
-- Keep Google OAuth in **Testing** status, add only the owner as a test user,
-  and register exactly
-  `https://staging.<base-domain>/api/v1/auth/callback`.
-- Use Stripe test mode, create the five products/prices listed below, and
-  register exactly
-  `https://staging.<base-domain>/api/v1/billing/stripe/webhook`.
-- Issue a dedicated OpenRouter key, require ZDR, deny data collection, restrict
-  it to the configured three models, and cap the account/key at USD 20 monthly.
-- Store the non-secret staging environment at
-  `/srv/hook2stream/config/staging.env`; keep file secrets under
-  `/srv/hook2stream/secrets/current`. The environment sets
-  `HOOK2STREAM_RELEASE_STATE_DIR=/srv/hook2stream/release-state`.
+Rollback is application-only. It changes API, workers, and web to a previously
+successful H2SE-compatible target, preserves bootstrap and infrastructure
+digests, and runs no migration. Incompatible schema rollback requires a forward
+fix or separately approved write-stop/restore.
 
-Release only a commit whose verify, full-stack, container scan, and publish jobs
-are green. Download `release-images-<sha>/release-images.env`, copy its digest
-references into the staging environment, resolve the remaining infrastructure
-images to reviewed digests, and check out that same SHA on the VPS. Then run:
+## Local and CI MinIO
 
-```bash
-test "$(git rev-parse HEAD)" = '<green-commit-sha>'
-sudo env \
-  HOOK2STREAM_ENV_FILE=/srv/hook2stream/config/staging.env \
-  ./src/deploy/scripts/deploy-release.sh
+`compose.minio.yaml` provides reproducible disposable S3 integration tests. Use
+it only with an explicit local/CI environment and `STORAGE_MODE=minio`. Local
+MinIO may use `StorageProvisioningMode=Manage`, test CORS/lifecycle behavior,
+and local bootstrap/root secrets. It is not published as a production runtime
+image, is not included in a release candidate, and never stores a backup claim.
+Its CI scan is inventory-only because upstream Community Edition is archived;
+the release-candidate exclusions are the fail-closed deployment boundary.
+
+## Validation and external gates
+
+Run the offline deployment validation from this directory:
+
+```sh
+./scripts/validate-deployment.sh
 ```
 
-Use the same command for upgrades. The script records the previous environment
-under the configured release-state directory. CI-managed staging/production
-rollback must use the forced command described below: it changes only API,
-worker and web digests and never runs the bootstrapper or a migration.
+It renders Compose and egress configurations and executes the shell/Node
+contract suites. Action workflows also require workflow contract checks and
+published image scans against exact digests.
 
-## One-time setup for the external-S3 alpha
+Repository tests do not register, order, rebuild, cancel, or fund Servers.Guru
+VPS instances or provider/Storj balances,
+create Storj projects/grants, register a domain, change Cloudflare/GitHub Pages,
+unlock LUKS, provision host secrets, or perform live OAuth/Stripe/render/recovery
+drills. Those remain explicit operator gates in the canonical runbook.
 
-This section describes the existing Hetzner/LUKS/external-S3 profile. For the
-temporary IT-Garage staging profile, use the unencrypted single-disk procedure
-above and do not mix the two storage contracts.
+External observability and alerting are not configured;
+`OTEL_EXPORTER_OTLP_ENDPOINT` remains empty. Local healthchecks, structured
+logs, backup-age gate, deployment E2E, the 60-minute staging soak, recovery
+drills, and manual post-release observation remain mandatory.
 
-1. Provision a Hetzner CX43-class x86_64 host in Helsinki with Ubuntu 24.04,
-   Docker Engine, and the Docker Compose plugin v2 or newer. Attach a 160 GB Cloud Volume,
-   encrypt it with LUKS, and mount it at `/srv/hook2stream`; put Docker's
-   `data-root`, release checkouts, release state, and secrets there. Configure
-   systemd so Docker requires that mount, and document the manual LUKS unlock
-   required after a reboot. Restrict SSH to the operator IP and expose only TCP
-   80/443 and UDP 443. Point the `APP_DOMAIN` A record at the host; add AAAA only
-   after IPv6 is configured. Use DNS-only mode when the DNS provider offers an
-   HTTP proxy. Authenticate private GHCR pulls with a dedicated `read:packages`
-   credential in Docker's credential store, never in `.env`.
-2. Copy `.env.example` to `.env`. `APP_DOMAIN` and the host in `PUBLIC_ORIGIN`
-   must match. Register `${PUBLIC_ORIGIN}/api/v1/auth/callback` in Google and
-   `${PUBLIC_ORIGIN}/api/v1/billing/stripe/webhook` in Stripe.
-3. Set `SECRET_PROVIDER=file`, `SECRETS_DIR=/srv/hook2stream/secrets/current`,
-   and `SECRETS_GID=2000`. Create every file in `secrets/README.md` as
-   `root:2000` mode `0640` in a `root:2000` mode `0750` directory. Run releases
-   through `sudo`; preflight rejects missing files, symlinks, or weaker/different
-   ownership and modes. Keep the runtime media, bucket-bootstrap, and backup
-   credentials separate. `ReverseProxy__TrustAllProxies` trusts Docker-network
-   peers. This is acceptable here because the API has no published port and
-   Caddy is the only
-   container accepting external traffic. Use a fixed `KnownProxies` address
-   instead if the host's network policy permits stable container addressing.
-4. In AWS `eu-north-1`, pre-create separate private media and backup buckets with
-   Block Public Access, Bucket Owner Enforced ownership, provider encryption,
-   and a policy denying non-TLS requests. Keep media versioning disabled so
-   product deletion remains final; allow CORS only from `PUBLIC_ORIGIN`. Enable
-   versioning only on the backup bucket and apply `backup/lifecycle-policy.json`
-   so current and non-current objects are permanently gone within 35 days. The
-   one-shot bootstrapper configures media CORS and staging/multipart lifecycle
-   rules. The backup credential also needs
-   version-list and permanent version/delete-marker deletion permissions under
-   `BACKUP_S3_PREFIX`. Assign the active backup passphrase a non-secret key ID
-   such as `2026-q3-01`; an ID is immutable and must never be reused for different
-   key material.
-5. Confirm that the OpenRouter key or account guardrail enforces Zero Data
-   Retention. The compose file acknowledges that external control only after the
-   operator has verified it.
-6. Create two external HTTPS monitors for `/health/ready` and
-   `/health/api-ready`. Put the backup monitor's secret HTTPS URL in
-   `backup_heartbeat_url`; use an hourly schedule with a 130-minute grace period.
+## Accepted MVP risks
 
-For an AWS-compatible CLI, backup-bucket protection can be applied with:
-
-```bash
-aws --region eu-north-1 s3api put-bucket-versioning \
-  --bucket hook2stream-alpha-ACCOUNT-pg-backups \
-  --versioning-configuration Status=Enabled
-aws --region eu-north-1 s3api put-bucket-lifecycle-configuration \
-  --bucket hook2stream-alpha-ACCOUNT-pg-backups \
-  --lifecycle-configuration file://backup/lifecycle-policy.json
-```
-
-The lifecycle policy matches the whole bucket, so do not apply it to a shared
-bucket.
-
-## External account configuration
-
-- Google OAuth: register `${PUBLIC_ORIGIN}/api/v1/auth/callback` as the exact
-  redirect URI.
-- Stripe: stay in test mode and create USD prices matching the application
-  contract: `art_credits_5` = $1, `mini_release` = $5, `release_pack` = $9.90,
-  `clean_cover` = $2, and recurring `active_artist` = $29/month. Register
-  `${PUBLIC_ORIGIN}/api/v1/billing/stripe/webhook` for
-  `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-  `checkout.session.expired`, `checkout.session.async_payment_failed`,
-  `invoice.paid`, and `charge.refunded`.
-- OpenRouter: allow only `openai/whisper-large-v3`,
-  `bytedance-seed/seedream-4.5`, and `openai/gpt-oss-120b`; enforce Zero Data
-  Retention, disable prompt logging/data collection, and set an initial
-  $20/month account budget. Verify all three with one short, licensed MP3 before
-  admitting alpha users.
-- Monitoring: create Better Stack monitors for the two readiness URLs and one
-  hourly backup heartbeat. Email alerts must go to an inbox watched by the
-  operator.
-
-## Build and preflight
-
-CI should build from a clean commit, scan each runtime image, emit an SBOM, push
-the commit-SHA tags, and resolve those tags to registry digests. Production
-`.env` values should use `image@sha256:...`, not mutable tags. The browser uses
-relative API paths behind Caddy, so the same web image can move between
-same-origin environments without rebuilding it for a hostname.
-
-`scripts/validate-deployment.sh` syntax-checks every deployment shell script,
-runs the focused tests under `tests/`, parses the lifecycle policy, validates
-both Caddy configurations, and renders external, MinIO, build, and Vault
-Compose models with temporary placeholder secret files. Every rendered service
-must use an immutable `image@sha256` reference. The repository workflow runs it
-as a dedicated CI step; it can also be run locally before pushing when Docker
-Compose v2 and Node 24 are available.
-
-The verify job also boots the audited MinIO image and the production MinIO
-Caddyfile, runs the real initializer twice, checks quotas/versioning/lifecycle
-and IAM denials, and exercises HTTPS CORS plus signed single-part and multipart
-uploads through the public S3 origin.
-
-On a successful `main` publish, CI emits the artifact
-`release-images-<commit-sha>/release-images.env`. Review it and copy the
-digest-pinned `API_IMAGE`, `WORKER_IMAGE`, `BOOTSTRAPPER_IMAGE`, `WEB_IMAGE`,
-`POSTGRES_BACKUP_IMAGE`, `MINIO_IMAGE`, and `RELEASE_VERSION` assignments into
-the selected environment file. This artifact is the release handoff; do not
-translate its digest references back to mutable tags. `MINIO_IMAGE` is ignored
-in external mode.
-Resolve and pin `CADDY_IMAGE`, `POSTGRES_IMAGE`, and `PGBOUNCER_IMAGE` by digest
-as well. MinIO mode additionally requires a reviewed `MINIO_MC_IMAGE` digest
-for the one-shot initializer. The release preflight rejects every mutable
-application or infrastructure image reference that the selected mode uses.
-
-The optional build overlay builds the four application artifacts and backup
-sidecar from the repository root:
-
-```bash
-compose_env=${HOOK2STREAM_ENV_FILE:-.env}
-compose_files=(-f compose.yaml)
-if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
-  compose_files+=(-f compose.minio.yaml)
-fi
-compose_files+=(-f compose.build.yaml)
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  build api worker-media bootstrapper web postgres-backup
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  push api worker-media bootstrapper web postgres-backup
-```
-
-Before every deployment, validate the fully interpolated model and inspect its
-image list. This catches missing required values without printing secret file
-contents:
-
-```bash
-compose_env=${HOOK2STREAM_ENV_FILE:-.env}
-compose_files=(-f compose.yaml)
-if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
-  compose_files+=(-f compose.minio.yaml)
-fi
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  --profile tools config --quiet
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  --profile tools config --images
-```
-
-The mode check is intentional: raw Compose commands do not automatically load
-`compose.minio.yaml`. Keep the same `compose_files` selection for every manual
-staging inspection or incident command.
-
-The release preflight rejects non-HTTPS application and custom backup S3
-endpoints. For native AWS S3, leave `BACKUP_S3_ENDPOINT` empty so the AWS CLI
-uses the regional endpoint selected by `BACKUP_S3_REGION`.
-It also rejects mutable application and infrastructure image tags; replace all
-eight base image values and, in MinIO mode, both additional image values with
-reviewed `image@sha256:<digest>` references first.
-Exported variables that could override Compose inputs are rejected as well;
-make deployment changes in the selected `.env` file so preflight validates the
-same values that Compose will use.
-
-## Initial deployment and releases
-
-Use the idempotent release command for both the first install and upgrades:
-
-```bash
-sudo ./scripts/deploy-release.sh
-```
-
-Use `--no-pull` only for images just built on that host. The script serializes
-deployments, validates Compose, records the last successful environment, pulls
-all images and, in MinIO mode, starts and checks object storage and runs its
-idempotent initializer first. It then starts PostgreSQL/PgBouncer, requires an
-encrypted pre-migration backup, runs the bootstrapper exactly once, updates leaf
-workers → control → API → web/Caddy, waits on role readiness, and smokes web,
-API, and public MinIO readiness through HTTPS. It also requires the persistent
-backup daemon to become healthy before recording the release as successful.
-Re-running it with the same environment is safe.
-
-Workers receive a 150-second shutdown grace period, longer than the 120-second
-lease. Jobs are retryable and fenced, but this Compose topology does not promise
-zero-downtime rolling replacement. Drain paid work or schedule a maintenance
-window before replacing render/export workers. Database changes must follow
-expand/contract compatibility so the previous application images can still run.
-
-After rollout, check service health, the internal dependency-ready endpoint, and
-the public web endpoint:
-
-```bash
-compose_env=${HOOK2STREAM_ENV_FILE:-.env}
-compose_files=(-f compose.yaml)
-if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
-  compose_files+=(-f compose.minio.yaml)
-fi
-docker compose --env-file "$compose_env" "${compose_files[@]}" ps
-docker compose --env-file "$compose_env" "${compose_files[@]}" exec api \
-  /bin/sh /opt/hook2stream/http-healthcheck.sh
-curl --fail --silent --show-error https://app.example.com/health/ready
-curl --fail --silent --show-error https://app.example.com/health/api-ready
-```
-
-Then run an OAuth/session smoke and one short MP3 flow through upload, all five
-worker pools, SSE reconnect, preview/render, ZIP export, and a Stripe test event.
-Watch 5xx rate, queue age, retries, render duration, and backup freshness for at
-least 30 minutes. The external monitors must alert independently on web and API
-availability; the success heartbeat must alert when the recovery-point age
-exceeds 130 minutes. Leave OTLP disabled for the alpha unless an approved EU
-collector and its data-retention policy are configured.
-
-For the temporary staging profile, acceptance also requires all of the
-following before it can be called ready:
-
-- the media bucket accepts HTTPS presigned single-part and multipart uploads
-  from the exact application origin, exposes `ETag`, supports read/delete, and
-  applies its staging-object expiry rule;
-- the backup bucket is versioned, has the seven-day lifecycle and 20 GiB quota,
-  while the media bucket is non-versioned with a 180 GiB quota; the console and
-  MinIO admin/metrics routes are unavailable publicly;
-- Google login → licensed short MP3 → all five worker pools → OpenRouter
-  transcription/artwork/campaign → preview → 18 renders → ZIP completes;
-  Stripe test checkout succeeds and replaying the same webhook does not grant a
-  second entitlement;
-- a second identical deploy succeeds, a VPS reboot returns every persistent
-  service to healthy, the previous digest snapshot rolls back without a
-  down-migration, and one encrypted dump restores into a new empty database;
-- no container is OOM-killed and at least 20% of the filesystem remains free
-  throughout the 30-minute observation window.
-
-## Backup, restore, and rollback
-
-`postgres-backup` performs an hourly `pg_dump` in custom format and encrypts it
-client-side with AES-256-CBC/PBKDF2-HMAC-SHA-256. Every completed recovery point
-has three objects whose basename contains its validated encryption key ID:
-`.dump.enc`, `.dump.enc.sha256`, and `.dump.enc.manifest.json`. The manifest
-records the key ID, cipher/KDF parameters, encrypted-dump checksum, and exact
-object keys; it contains no passphrase. It is uploaded last and is the completion
-record for the set.
-
-After every upload the backup process lists every object version and delete
-marker under its prefix and permanently deletes entries approaching 35 days;
-the two-hour safety margin ensures an hourly healthy scheduler removes them
-before the boundary. The bucket lifecycle is defense in depth: current versions
-expire after 34 days, non-current versions one day later, and expired delete
-markers are removed. This avoids the common `35 days current + 35 days
-non-current = 70 days` mistake. Monitor health from outside the host; a monitor
-on the same failed VM is insufficient.
-
-The freshness marker is replaced atomically only after the dump, checksum, and
-manifest uploads and the version/delete-marker purge all succeed. The external
-success heartbeat is sent only after that marker is committed; heartbeat
-delivery failure is logged but does not invalidate the recovery point. The
-endpoint must return a direct 2xx response; redirects count as delivery
-failures. The marker records the timestamp and key ID. A later failure preserves
-the previous
-complete cycle, but the healthcheck fails immediately when the configured key
-ID differs from the last successful backup. The marker lives on tmpfs, so a
-restarted backup container must complete a fresh cycle before becoming healthy.
-
-Treat each encryption key ID as an immutable lookup key. The mutable Vault
-record `hook2stream-kv/data/production/backup-encryption/current` contains the
-active ID and passphrase rendered for the backup process. Before CAS-updating
-that record, archive the same key material at the create-once path
-`hook2stream-kv/data/production/backup-encryption/keys/<key_id>` and never update
-that key path. With the file provider, archive a
-root-owned `0600` copy under the same ID before replacing the two active files.
-Retain each historical passphrase for at least **49 days after the last backup
-made with it**: the 35-day backup window plus a 14-day restore/operations margin.
-Vault KV v2 version count is not sufficient protection because exceeding
-`max_versions` permanently destroys the oldest version. The runtime renderer
-may read only `current`; a separate break-glass restore identity may read
-`backup-encryption/keys/+`. Before destroying any historical key, prove that no
-retained manifest references its ID.
-
-Once a month, restore a selected recovery point into a **new, empty database**:
-
-1. Download its `.manifest.json` first and validate `schemaVersion`,
-   `kind`, object prefix, and the SHA-256-shaped digest.
-2. Read `encryption.keyId` and fetch that exact immutable passphrase from Vault
-   or the protected file-provider archive. Never decrypt an old backup with the
-   current/latest key by assumption.
-3. Download the manifest's `encryptedDump.objectKey` and `checksum.objectKey`,
-   run `sha256sum -c`, and also compare the ciphertext digest with
-   `encryptedDump.sha256`.
-4. Decrypt with the manifest's cipher/KDF/iteration values, run
-   `pg_restore --exit-on-error --no-owner`, and start a temporary API against the
-   restored database.
-
-Verify users, projects, entitlements, queued jobs, object references, and
-reapplied deletion tombstones; record actual RPO/RTO. Every key rotation drill
-must restore one recovery point from before the rotation and one from after it.
-Never test `--clean` against the production database.
-
-After each success, the release script stores `last-successful.env` under
-`HOOK2STREAM_RELEASE_STATE_DIR` (or under local `.release-state` when that
-setting is omitted). Before the next release it snapshots that file.
-For a staging/production application rollback, first verify the migrated schema
-is expand/contract compatible, then dispatch `.github/workflows/rollback.yml`
-with the target SHA previously recorded as successful on that host. The SSH
-forced command is:
-
-```bash
-rollback <40-character-successful-release-sha> H2SEv1
-```
-
-The host synthesizes an active environment from the current successful
-environment: only `API_IMAGE`, `WORKER_IMAGE`, `WEB_IMAGE`, and
-`RELEASE_VERSION` come from the target. Current bootstrapper, Caddy, PostgreSQL,
-PgBouncer, backup and egress digests remain unchanged. The rollback pulls and
-recreates only API, every worker and web with `--no-deps`; it never invokes the
-bootstrapper, migrations, or an infrastructure-service mutation. It requires
-health, public smoke, authenticated E2E and exact running-digest verification
-before updating `last-successful.env`. If a migration itself is defective, stop
-writes and follow the documented database recovery decision: forward-fix first,
-or restore the verified pre-deploy recovery point with explicit data-loss
-approval.
-
-Useful incident checks:
-
-```bash
-compose_env=${HOOK2STREAM_ENV_FILE:-.env}
-compose_files=(-f compose.yaml)
-if grep -qx 'STORAGE_MODE=minio' "$compose_env"; then
-  compose_files+=(-f compose.minio.yaml)
-fi
-docker compose --env-file "$compose_env" "${compose_files[@]}" ps
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  logs --since 30m api pgbouncer postgres
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  logs --since 30m \
-  worker-media worker-analysis worker-control worker-render worker-export
-docker compose --env-file "$compose_env" "${compose_files[@]}" \
-  logs --since 2h postgres-backup
-```
-
-Docker JSON logs rotate locally. For this alpha, use external web/API synthetics
-and the backup heartbeat with email alerts. Persistent centralized logs,
-metrics/traces, host-volume snapshots, and recorded off-host restore evidence
-remain operator responsibilities.
+Production is one shared-CPU `NL1-4` VPS in Amsterdam; staging is one permanent
+shared-CPU `MTL1-3` VPS in Montreal. The MVP does not configure or rely on
+IPv6, provider backup, snapshots, monitoring agents, provider firewalling,
+provider DDoS protection, or private-network routing.
+PostgreSQL is self-managed without
+PITR, and Storj media has no independent application-level replica or EU-only
+placement guarantee. Both permanent VPS instances renew from the provider
+wallet; keep at least two full pair budgets funded and review invoices before
+their due dates. Regular-vCPU FFmpeg use remains a written-support and soak-test
+gate. This 90-day closed-pilot exception expires after the first paid user.
+Before public signup, use managed 35-day PostgreSQL PITR, at least two app
+instances behind a load balancer, and an independent media and backup copy.

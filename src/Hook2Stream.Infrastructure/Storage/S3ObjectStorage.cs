@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using Amazon;
 using Amazon.Runtime;
@@ -13,7 +14,12 @@ internal interface IRawObjectStorage
     Task EnsureBucketAsync(CancellationToken cancellationToken);
     Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken);
     Task DownloadAsync(string objectKey, string destinationPath, CancellationToken cancellationToken);
-    Task UploadAsync(string objectKey, string sourcePath, string contentType, CancellationToken cancellationToken);
+    Task UploadAsync(
+        string objectKey,
+        string sourcePath,
+        string contentType,
+        DateTimeOffset? expiresAt,
+        CancellationToken cancellationToken);
     Task CopyToAsync(string objectKey, Stream destination, long offset, long length, CancellationToken cancellationToken);
     Task DeleteAsync(string objectKey, CancellationToken cancellationToken);
     Task DeleteProjectObjectsAsync(ProjectStorageScope scope, CancellationToken cancellationToken);
@@ -44,9 +50,21 @@ public sealed class S3ObjectStorage(
             exception.StatusCode == HttpStatusCode.NotFound ||
             string.Equals(exception.ErrorCode, "NoSuchBucket", StringComparison.Ordinal))
         {
+            if (_options.ProvisioningMode == StorageProvisioningMode.VerifyOnly)
+            {
+                throw new InvalidOperationException(
+                    $"Object-storage bucket '{_options.Bucket}' does not exist; VerifyOnly mode forbids creating it.",
+                    exception);
+            }
+
             await internalClient.PutBucketAsync(
                 new PutBucketRequest { BucketName = _options.Bucket },
                 cancellationToken);
+        }
+
+        if (_options.ProvisioningMode == StorageProvisioningMode.VerifyOnly)
+        {
+            return;
         }
 
         if (!_options.ConfigureBucketCors)
@@ -91,7 +109,6 @@ public sealed class S3ObjectStorage(
             await ConfigureLifecycleAsync(cancellationToken);
         }
     }
-
 
     public async Task<StorageObjectInfo?> HeadAsync(string objectKey, CancellationToken cancellationToken)
     {
@@ -140,17 +157,26 @@ public sealed class S3ObjectStorage(
         string objectKey,
         string sourcePath,
         string contentType,
+        DateTimeOffset? expiresAt,
         CancellationToken cancellationToken)
     {
+        var request = new PutObjectRequest
+        {
+            BucketName = _options.Bucket,
+            Key = objectKey,
+            FilePath = sourcePath,
+            ContentType = contentType,
+            AutoCloseStream = true
+        };
+        if (_options.ObjectExpirationMode == StorageObjectExpirationMode.Storj && expiresAt is { } expiration)
+        {
+            request.Metadata["Object-Expires"] = expiration
+                .ToUniversalTime()
+                .ToString("O", CultureInfo.InvariantCulture);
+        }
+
         await internalClient.PutObjectAsync(
-            new PutObjectRequest
-            {
-                BucketName = _options.Bucket,
-                Key = objectKey,
-                FilePath = sourcePath,
-                ContentType = contentType,
-                AutoCloseStream = true
-            },
+            request,
             cancellationToken);
     }
 
@@ -254,7 +280,19 @@ public sealed class S3ObjectStorage(
                 Configuration = S3LifecycleConfigurationBuilder.Build(_options, _policy)
             },
             cancellationToken);
+}
 
+internal static class StorageObjectExpirationPolicy
+{
+    internal static DateTimeOffset? GetExpiration(
+        string objectKey,
+        StorageOptions storageOptions,
+        OperationalPolicyOptions policyOptions,
+        TimeProvider timeProvider) =>
+        storageOptions.ObjectExpirationMode == StorageObjectExpirationMode.Storj &&
+        objectKey.StartsWith("staging/", StringComparison.Ordinal)
+            ? timeProvider.GetUtcNow().AddHours(policyOptions.StagingHours)
+            : null;
 }
 
 internal static class S3ClientFactory

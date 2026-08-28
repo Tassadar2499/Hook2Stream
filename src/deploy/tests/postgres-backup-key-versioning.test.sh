@@ -33,39 +33,48 @@ cat > "${stub_bin}/pg_dump" <<'EOF'
 printf '%s\n' 'deterministic-postgres-dump'
 EOF
 
-cat > "${stub_bin}/age" <<'EOF'
+cat > "${stub_bin}/hook2stream-storage-tool" <<'EOF'
 #!/bin/sh
 set -eu
+operation=$1
+shift
 output_file=
 recipient=
+source_file=
+destination=
+endpoint=
+region=
+bucket=
+access_key_file=
+secret_key_file=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --output)
-            output_file=$2
-            shift 2
-            ;;
-        --recipient)
-            recipient=$2
-            shift 2
-            ;;
+        --output) output_file=$2; shift 2 ;;
+        --recipient) recipient=$2; shift 2 ;;
+        --body) source_file=$2; shift 2 ;;
+        --key) destination=$2; shift 2 ;;
+        --endpoint) endpoint=$2; shift 2 ;;
+        --region) region=$2; shift 2 ;;
+        --bucket) bucket=$2; shift 2 ;;
+        --access-key-file) access_key_file=$2; shift 2 ;;
+        --secret-key-file) secret_key_file=$2; shift 2 ;;
         *) shift ;;
     esac
 done
-[ -n "$output_file" ] && [ -n "$recipient" ]
-printf '%s' "$recipient" > "${TEST_STATE_DIR}/used-recipient"
-cat > "$output_file"
-EOF
-
-cat > "${stub_bin}/aws" <<'EOF'
-#!/bin/sh
-set -eu
-printf '%s' "$AWS_ACCESS_KEY_ID" > "${TEST_STATE_DIR}/used-access-key-id"
-printf '%s' "$AWS_SECRET_ACCESS_KEY" > "${TEST_STATE_DIR}/used-secret-access-key"
-
-case "${1:-}:${2:-}" in
-    s3:cp)
-        source_file=$4
-        destination=$5
+case "$operation" in
+    encrypt-age-x25519)
+        [ -n "$output_file" ] && [ -n "$recipient" ] || exit 44
+        printf '%s' "$recipient" > "${TEST_STATE_DIR}/used-recipient"
+        cat > "$output_file"
+        ;;
+    put-object)
+        [ "$endpoint" = https://gateway.storjshare.io ] || exit 45
+        [ "$region" = test-region-1 ] && [ "$bucket" = test-backups ] || exit 46
+        [ -z "${AWS_ACCESS_KEY_ID+x}" ] && [ -z "${AWS_SECRET_ACCESS_KEY+x}" ] || exit 47
+        [ -n "$access_key_file" ] && [ -n "$secret_key_file" ] || exit 48
+        cat "$access_key_file" > "${TEST_STATE_DIR}/used-access-key-id"
+        cat "$secret_key_file" > "${TEST_STATE_DIR}/used-secret-access-key"
+        [ -n "$source_file" ] && [ -n "$destination" ] || exit 48
         case "$destination" in
             *.manifest.json)
                 [ "${TEST_FAIL_MANIFEST:-false}" != true ] || exit 42
@@ -73,13 +82,15 @@ case "${1:-}:${2:-}" in
         esac
         cp "$source_file" "${TEST_UPLOAD_DIR}/$(basename "$destination")"
         printf '%s\n' "$destination" >> "${TEST_STATE_DIR}/upload-order"
-        ;;
-    s3api:list-object-versions)
-        [ "${TEST_FAIL_RETENTION:-false}" != true ] || exit 43
-        printf '%s\n' '{"Versions":[],"DeleteMarkers":[]}'
+        version_counter_file=${TEST_STATE_DIR}/version-counter
+        version_counter=0
+        [ ! -f "$version_counter_file" ] || version_counter=$(cat "$version_counter_file")
+        version_counter=$((version_counter + 1))
+        printf '%s\n' "$version_counter" > "$version_counter_file"
+        printf '{"versionId":"version-%s"}\n' "$version_counter"
         ;;
     *)
-        printf '%s\n' "unexpected aws command: $*" >&2
+        printf '%s\n' "unexpected storage helper command: $operation" >&2
         exit 1
         ;;
 esac
@@ -88,15 +99,19 @@ EOF
 cat > "${stub_bin}/curl" <<'EOF'
 #!/bin/sh
 set -eu
-printf '%s\n' "$*" >> "${TEST_STATE_DIR}/heartbeat-invocations"
-[ "${TEST_FAIL_HEARTBEAT:-false}" != true ] || exit 44
-printf '%s' "${TEST_HEARTBEAT_STATUS:-204}"
+printf '%s\n' "$*" >> "${TEST_STATE_DIR}/unexpected-http-invocations"
+exit 47
 EOF
 
 cat > "${stub_bin}/jq" <<'EOF'
 #!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args[0] === "-r") process.exit(0);
+if (args[0] === "-er") {
+  const response = JSON.parse(require("node:fs").readFileSync(args.at(-1), "utf8"));
+  if (typeof response.versionId !== "string" || response.versionId.length === 0) process.exit(1);
+  process.stdout.write(`${response.versionId}\n`);
+  process.exit(0);
+}
 if (args[0] !== "-n") throw new Error(`unexpected jq arguments: ${args.join(" ")}`);
 
 const values = {};
@@ -112,7 +127,7 @@ for (let index = 1; index < args.length - 1;) {
 }
 
 process.stdout.write(JSON.stringify({
-  schemaVersion: 2,
+  schemaVersion: 3,
   kind: values.kind,
   createdAt: values.createdAt,
   database: values.database,
@@ -123,10 +138,16 @@ process.stdout.write(JSON.stringify({
   },
   encryptedDump: {
     objectKey: values.dumpObjectKey,
+    versionId: values.dumpVersionId,
     sha256: values.ciphertextSha256,
   },
   checksum: {
     objectKey: values.checksumObjectKey,
+    versionId: values.checksumVersionId,
+  },
+  retention: {
+    mode: "storj-access-grant-max-object-ttl",
+    maxObjectTtlHours: values.maxObjectTtlHours,
   },
 }, null, 2));
 EOF
@@ -137,63 +158,49 @@ printf '%s\n' 'database-password' > "${secret_dir}/postgres_password"
 printf '%s\n' 'file-access-key-id' > "${secret_dir}/backup_s3_access_key"
 printf '%s\n' 'file-secret-access-key' > "${secret_dir}/backup_s3_secret_key"
 printf '%s\n' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' > "${secret_dir}/backup_age_recipient"
-printf '%s\n' 'https://heartbeat.example.test/super-secret-token' \
-    > "${secret_dir}/backup_heartbeat_url"
 
 run_backup() {
-    env \
+    env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
         PATH="${stub_bin}:${PATH}" \
         TEST_STATE_DIR="$state_dir" \
         TEST_UPLOAD_DIR="$upload_dir" \
         TEST_FAIL_MANIFEST="${TEST_FAIL_MANIFEST:-false}" \
-        TEST_FAIL_RETENTION="${TEST_FAIL_RETENTION:-false}" \
-        TEST_FAIL_HEARTBEAT="${TEST_FAIL_HEARTBEAT:-false}" \
-        TEST_HEARTBEAT_STATUS="${TEST_HEARTBEAT_STATUS:-204}" \
         POSTGRES_HOST=postgres \
         POSTGRES_PORT=5432 \
         POSTGRES_DB=testdb \
         POSTGRES_USER=testuser \
         POSTGRES_PASSWORD_FILE="${secret_dir}/postgres_password" \
-        BACKUP_S3_ENDPOINT= \
+        BACKUP_S3_ENDPOINT=https://gateway.storjshare.io \
         BACKUP_S3_REGION=test-region-1 \
         BACKUP_S3_BUCKET=test-backups \
         BACKUP_S3_PREFIX=rotation-test/postgres \
+        BACKUP_S3_FORCE_PATH_STYLE=true \
         BACKUP_S3_ACCESS_KEY_FILE="${secret_dir}/backup_s3_access_key" \
         BACKUP_S3_SECRET_KEY_FILE="${secret_dir}/backup_s3_secret_key" \
         BACKUP_AGE_RECIPIENT_FILE="${secret_dir}/backup_age_recipient" \
         BACKUP_INTERVAL_SECONDS=300 \
         BACKUP_MAX_AGE_SECONDS=7200 \
         BACKUP_RETENTION_DAYS=35 \
-        BACKUP_RETENTION_SAFETY_SECONDS=300 \
+        BACKUP_MAX_OBJECT_TTL_HOURS=840 \
         BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
-        BACKUP_HEARTBEAT_URL_FILE="${TEST_HEARTBEAT_URL_FILE-${secret_dir}/backup_heartbeat_url}" \
         "$backup_script" backup-once
 }
 
 run_backup >"${state_dir}/first-backup-output" 2>&1
-
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 1 ] \
-    || fail "successful backup did not send exactly one heartbeat"
-grep -q -- "--proto =https" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not restrict requests to HTTPS"
-grep -q -- "--connect-timeout 3" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not use the expected short connection timeout"
-grep -q -- "--max-time 10" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not use the expected total timeout"
-grep -q -- "--retry 2" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not use the expected retry limit"
-grep -q -- "--retry-max-time 20" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not bound the retry window"
-grep -q -- "--write-out %{http_code}" "${state_dir}/heartbeat-invocations" \
-    || fail "heartbeat client did not inspect the HTTP response status"
-if grep -q 'super-secret-token' "${state_dir}/first-backup-output"; then
-    fail "backup logs exposed the heartbeat URL"
-fi
+[ ! -e "${state_dir}/unexpected-http-invocations" ] \
+    || fail "backup attempted an external HTTP notification"
 
 [ "$(cat "${state_dir}/used-access-key-id")" = 'file-access-key-id' ] \
     || fail "backup did not load the S3 access-key ID from its file"
 [ "$(cat "${state_dir}/used-secret-access-key")" = 'file-secret-access-key' ] \
     || fail "backup did not load the S3 secret access key from its file"
+grep -Fq 'options.UsePathStyle = true' "$deployment_dir/backup/storage-tool/main.go" \
+    || fail "backup does not force path-style S3 addressing"
+grep -Fq 'RequestChecksumCalculationWhenRequired' "$deployment_dir/backup/storage-tool/main.go" \
+    && grep -Fq 'ResponseChecksumValidationWhenRequired' "$deployment_dir/backup/storage-tool/main.go" \
+    || fail "backup does not use the Storj-compatible checksum mode"
+grep -Fq 'flock -w "$BACKUP_LOCK_TIMEOUT_SECONDS" 9' "$backup_script" \
+    || fail "backup-once and daemon runs are not serialized on shared scratch"
 [ "$(cat "${state_dir}/used-recipient")" = 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' ] \
     || fail "backup did not use the configured age recipient"
 
@@ -220,7 +227,7 @@ const [manifestPath, dumpPath] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const ciphertext = fs.readFileSync(dumpPath);
 
-assert.equal(manifest.schemaVersion, 2);
+assert.equal(manifest.schemaVersion, 3);
 assert.equal(manifest.kind, "hook2stream-postgresql-logical-backup");
 assert.equal(manifest.database, "testdb");
 assert.match(manifest.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
@@ -230,6 +237,7 @@ assert.deepEqual(manifest.encryption, {
   recipientFingerprint: crypto.createHash("sha256").update("age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq").digest("hex").slice(0, 16),
 });
 assert.match(manifest.encryptedDump.objectKey, /-age-[0-9a-f]{16}\.dump\.age$/);
+assert.match(manifest.encryptedDump.versionId, /^version-\d+$/);
 assert.equal(
   manifest.encryptedDump.sha256,
   crypto.createHash("sha256").update(ciphertext).digest("hex"),
@@ -238,6 +246,11 @@ assert.equal(
   manifest.checksum.objectKey,
   `${manifest.encryptedDump.objectKey}.sha256`,
 );
+assert.match(manifest.checksum.versionId, /^version-\d+$/);
+assert.deepEqual(manifest.retention, {
+  mode: "storj-access-grant-max-object-ttl",
+  maxObjectTtlHours: 840,
+});
 EOF
 
 [ "$(wc -l < "${state_dir}/upload-order" | tr -d ' ')" -eq 3 ] \
@@ -258,6 +271,9 @@ esac
 expected_recipient_fingerprint=$(printf '%s' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' | sha256sum | cut -c1-16)
 [ "$(sed -n '2p' "${state_dir}/last-successful-backup")" = "$expected_recipient_fingerprint" ] \
     || fail "freshness marker does not record the age recipient fingerprint"
+[ -n "$(sed -n '3p' "${state_dir}/last-successful-backup")" ] \
+    && [ -n "$(sed -n '4p' "${state_dir}/last-successful-backup")" ] \
+    || fail "freshness marker does not record the completion manifest key and VersionId"
 
 env \
     BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
@@ -272,8 +288,6 @@ set -- "${upload_dir}"/*.manifest.json
     || fail "the first backup manifest disappeared after a retry"
 [ "$(wc -l < "${state_dir}/upload-order" | tr -d ' ')" -eq 6 ] \
     || fail "the second successful backup did not upload its own three objects"
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
-    || fail "the second successful backup did not send its own heartbeat"
 
 printf '%s\n' 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppp' > "${secret_dir}/backup_age_recipient"
 if env \
@@ -290,71 +304,10 @@ if TEST_FAIL_MANIFEST=true run_backup >"${state_dir}/manifest-failure-output" 2>
 fi
 [ "$(cat "${state_dir}/last-successful-backup")" = "$marker_before_failed_upload" ] \
     || fail "failed manifest upload replaced the last successful freshness marker"
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
-    || fail "failed backup sent a success heartbeat"
 
-if TEST_FAIL_RETENTION=true run_backup >"${state_dir}/retention-failure-output" 2>&1; then
-    fail "backup succeeded when the retention cycle failed"
+if grep -Eq 'delete-object|list-object-versions|s3 cp' "${state_dir}/upload-order"; then
+    fail "backup used a delete/list retention operation or multipart-capable high-level upload"
 fi
-[ "$(cat "${state_dir}/last-successful-backup")" = "$marker_before_failed_upload" ] \
-    || fail "failed retention cycle replaced the last successful freshness marker"
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 2 ] \
-    || fail "failed retention cycle sent a success heartbeat"
-
-printf '%s\n' 'age1pppppppppppppppppppppppppppppppppppppppppppppppppppppppp' > "${secret_dir}/backup_age_recipient"
-if ! TEST_FAIL_HEARTBEAT=true run_backup \
-    >"${state_dir}/heartbeat-failure-output" 2>&1; then
-    fail "heartbeat delivery failure turned a successful backup into a failure"
-fi
-grep -q 'warning: success heartbeat delivery failed' \
-    "${state_dir}/heartbeat-failure-output" \
-    || fail "heartbeat delivery failure did not produce a warning"
-if grep -q 'super-secret-token' "${state_dir}/heartbeat-failure-output"; then
-    fail "heartbeat delivery warning exposed the heartbeat URL"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 3 ] \
-    || fail "failing heartbeat client was not invoked exactly once"
-
-if ! TEST_HEARTBEAT_STATUS=302 run_backup \
-    >"${state_dir}/heartbeat-redirect-output" 2>&1; then
-    fail "heartbeat redirect turned a successful backup into a failure"
-fi
-grep -q 'warning: success heartbeat delivery failed' \
-    "${state_dir}/heartbeat-redirect-output" \
-    || fail "heartbeat redirect was incorrectly accepted as delivery"
-if grep -q 'super-secret-token' "${state_dir}/heartbeat-redirect-output"; then
-    fail "heartbeat redirect warning exposed the heartbeat URL"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "redirecting heartbeat client was not invoked exactly once"
-
-printf '%s\n' 'http://heartbeat.example.test/super-secret-token' \
-    > "${secret_dir}/backup_heartbeat_url"
-if ! run_backup >"${state_dir}/insecure-heartbeat-output" 2>&1; then
-    fail "insecure heartbeat URL turned a successful backup into a failure"
-fi
-grep -q 'warning: heartbeat URL must use HTTPS' \
-    "${state_dir}/insecure-heartbeat-output" \
-    || fail "insecure heartbeat URL did not produce a warning"
-if grep -q 'super-secret-token' "${state_dir}/insecure-heartbeat-output"; then
-    fail "insecure heartbeat warning exposed the heartbeat URL"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "backup contacted an insecure heartbeat URL"
-
-if ! TEST_HEARTBEAT_URL_FILE= run_backup \
-    >"${state_dir}/disabled-heartbeat-output" 2>&1; then
-    fail "backup failed when heartbeat monitoring was disabled"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "disabled heartbeat monitoring still invoked the HTTP client"
-
-: > "${secret_dir}/backup_heartbeat_url"
-if ! run_backup >"${state_dir}/empty-heartbeat-output" 2>&1; then
-    fail "empty optional heartbeat secret turned a successful backup into a failure"
-fi
-[ "$(wc -l < "${state_dir}/heartbeat-invocations" | tr -d ' ')" -eq 4 ] \
-    || fail "empty optional heartbeat secret invoked the HTTP client"
 
 printf '%s\n' '../invalid-recipient' > "${secret_dir}/backup_age_recipient"
 if run_backup >"${state_dir}/invalid-key-output" 2>&1; then

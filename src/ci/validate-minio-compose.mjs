@@ -175,9 +175,10 @@ for (const workerName of [
 ]) {
   const worker = services[workerName];
   assert(worker, `missing worker pool ${workerName}`);
+  const replicas = worker.deploy?.replicas;
   assert(
-    worker.scale == null && worker.deploy?.replicas == null,
-    `${workerName} must remain a single instance without scale or replicas`,
+    worker.scale == null && (replicas == null || Number(replicas) === 1),
+    `${workerName} must remain a single instance without scale or more than one replica`,
   );
 }
 const initMemory = bytes(minioInit.deploy?.resources?.limits?.memory);
@@ -371,7 +372,6 @@ assert(
 );
 
 const internalEndpoint = "http://minio:9000";
-const publicEndpoint = "https://s3-staging.example.invalid";
 for (const serviceName of [
   "api",
   "worker-media",
@@ -388,18 +388,59 @@ for (const serviceName of [
     `${serviceName} internal S3 endpoint must be exactly ${internalEndpoint}`,
   );
   assert(
-    environmentValue(service, "Storage__PublicServiceUrl") === publicEndpoint,
-    `${serviceName} public S3 endpoint must be exactly ${publicEndpoint}`,
+    environmentValue(service, "Storage__PublicServiceUrl") === undefined,
+    `${serviceName} must not configure the removed public S3 endpoint`,
+  );
+  assert(
+    environmentValue(service, "Storage__ObjectExpirationMode") === "None",
+    `${serviceName} must not send Storj-specific TTL metadata to MinIO`,
   );
   assert(
     String(environmentValue(service, "Storage__ForcePathStyle")).toLowerCase() === "true",
     `${serviceName} must use path-style S3 addressing in MinIO mode`,
   );
+  assert(
+    environmentValue(service, "NO_PROXY") ===
+      "127.0.0.1,localhost,postgres,pgbouncer,api,web,minio",
+    `${serviceName} must bypass Squid only for the local Compose peers including MinIO`,
+  );
 }
+assert(
+  environmentValue(services.bootstrapper, "Storage__ProvisioningMode") === "Manage" &&
+    environmentValue(services.bootstrapper, "Storage__ObjectExpirationMode") === "None",
+  "the disposable MinIO bootstrapper must explicitly manage buckets without Storj TTL metadata",
+);
 assert(
   environmentValue(services["postgres-backup"] ?? {}, "BACKUP_S3_ENDPOINT") ===
     internalEndpoint,
   `postgres-backup endpoint must be exactly ${internalEndpoint}`,
+);
+assert(
+  environmentValue(services["postgres-backup"] ?? {}, "NO_PROXY") ===
+    "127.0.0.1,localhost,postgres,minio",
+  "postgres-backup must bypass Squid for local PostgreSQL and MinIO",
+);
+assert(
+  environmentValue(services["storage-probe"] ?? {}, "S3_ENDPOINT") === internalEndpoint &&
+    environmentValue(services["storage-probe"] ?? {}, "NO_PROXY") ===
+      "127.0.0.1,localhost,minio",
+  "storage-probe must reach local MinIO directly instead of sending HTTP through Squid",
+);
+for (const serviceName of ["postgres-backup", "storage-probe", "storage-janitor"]) {
+  assert(
+    networkNames(services[serviceName] ?? {}).includes("storage"),
+    `${serviceName} must join the internal storage network in local/CI MinIO mode`,
+  );
+  assert(
+    services[serviceName]?.depends_on?.minio?.condition === "service_healthy",
+    `${serviceName} must wait for healthy local MinIO`,
+  );
+}
+assert(
+  environmentValue(services["storage-janitor"] ?? {}, "S3_ENDPOINT") === internalEndpoint &&
+    environmentValue(services["storage-janitor"] ?? {}, "NO_PROXY") ===
+      "127.0.0.1,localhost,minio",
+  "storage-janitor must reach local MinIO directly instead of sending HTTP through Squid",
 );
 assert(
   String(environmentValue(services.bootstrapper, "Storage__ConfigureBucketCors")).toLowerCase() ===

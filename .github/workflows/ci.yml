@@ -12,28 +12,43 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:17.10-alpine3.24
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       HOOK2STREAM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Build audited MinIO acceptance dependency
+      - name: Build hardened PostgreSQL integration dependency
+        run: docker build --file src/deploy/postgres/Dockerfile --tag hook2stream-postgres:ci .
+
+      - name: Start hardened PostgreSQL integration dependency
+        shell: bash
+        run: |
+          docker run --detach \
+            --name hook2stream-ci-postgres \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_PASSWORD=postgres \
+            hook2stream-postgres:ci
+          for attempt in {1..30}; do
+            if docker exec hook2stream-ci-postgres pg_isready -q -U postgres -d postgres; then
+              test "$(docker exec hook2stream-ci-postgres psql -At -U postgres -d postgres -c 'show server_version')" = 17.11
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs hook2stream-ci-postgres >&2
+          exit 1
+
+      - name: Build pinned quarantined MinIO acceptance dependency
         run: docker build --file src/deploy/minio/Dockerfile --tag hook2stream-minio:ci .
 
       - name: Start and verify MinIO/Caddy acceptance dependency
         run: src/ci/start-minio-acceptance.sh "$GITHUB_ENV"
+
+      - name: Build hardened backup acceptance image
+        run: docker build --file src/deploy/backup/Dockerfile --tag hook2stream-postgres-backup:acceptance .
+
+      - name: Verify storage helper against real MinIO
+        run: src/ci/test-storage-tool-minio.sh hook2stream-postgres-backup:acceptance
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
@@ -56,6 +71,8 @@ jobs:
         run: |
           bash src/ci/tests/release-candidate.test.sh
           node src/ci/tests/workflow-contract.test.mjs
+          node src/ci/tests/tailscale-wif-contract.test.mjs
+          node src/ci/tests/pages-contract.test.mjs
       - run: src/ci/verify.sh
 
       - run: npx --prefix src/web playwright install --with-deps chromium firefox webkit
@@ -66,6 +83,14 @@ jobs:
         run: |
           docker logs hook2stream-ci-minio || true
           docker logs hook2stream-ci-caddy || true
+
+      - name: Dump PostgreSQL integration logs on failure
+        if: failure()
+        run: docker logs hook2stream-ci-postgres || true
+
+      - name: Stop PostgreSQL integration dependency
+        if: always()
+        run: docker rm --force hook2stream-ci-postgres || true
 
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -126,31 +151,43 @@ jobs:
             dockerfile: src/Hook2Stream.Api/Dockerfile
             runtime: dotnet
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: worker
             dockerfile: src/Hook2Stream.Worker/Dockerfile
             runtime: dotnet
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: bootstrapper
             dockerfile: src/Hook2Stream.Bootstrapper/Dockerfile
             runtime: dotnet
             secret_consumer: true
+            deployable: true
             build_args: ""
           - name: web
             dockerfile: src/web/Dockerfile
             runtime: node
             secret_consumer: false
+            deployable: true
             build_args: --build-arg NEXT_PUBLIC_AUTH_MODE=oauth
           - name: postgres-backup
             dockerfile: src/deploy/backup/Dockerfile
             runtime: postgres
             secret_consumer: true
+            deployable: true
+            build_args: ""
+          - name: postgres
+            dockerfile: src/deploy/postgres/Dockerfile
+            runtime: postgres
+            secret_consumer: false
+            deployable: true
             build_args: ""
           - name: minio
             dockerfile: src/deploy/minio/Dockerfile
             runtime: minio
             secret_consumer: false
+            deployable: false
             build_args: ""
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -161,6 +198,23 @@ jobs:
         run: docker run --rm --entrypoint node "hook2stream-${{ matrix.name }}:ci" --version
       - if: matrix.runtime == 'postgres'
         run: docker run --rm --entrypoint pg_dump "hook2stream-${{ matrix.name }}:ci" --version
+      - name: Verify hardened PostgreSQL privilege drop
+        if: matrix.name == 'postgres'
+        run: |
+          docker run --rm --entrypoint /bin/sh hook2stream-postgres:ci -ec '
+            test "$(readlink -f /usr/local/bin/gosu)" = /sbin/su-exec
+            test "$(gosu postgres id -u)" = "$(id -u postgres)"
+            postgres --version | grep -F "17.11"
+          '
+      - name: Verify narrow backup runtime
+        if: matrix.name == 'postgres-backup'
+        run: |
+          docker run --rm --entrypoint /bin/sh "hook2stream-${{ matrix.name }}:ci" -ec '
+            command -v hook2stream-storage-tool
+            ! command -v aws
+            ! command -v age
+            ! command -v python3
+          '
       - if: matrix.runtime == 'minio'
         run: docker run --rm --entrypoint minio "hook2stream-${{ matrix.name }}:ci" --version
       - name: Verify supplemental-group secret access
@@ -186,13 +240,35 @@ jobs:
             echo "runtime image can read the group-only secret without group_add" >&2
             exit 1
           fi
-      - name: Scan container for high and critical vulnerabilities
+      - name: Scan deployable container for high and critical vulnerabilities
+        if: matrix.deployable == true
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: hook2stream-${{ matrix.name }}:ci
           fail-build: true
           severity-cutoff: high
+          only-fixed: false
           output-format: table
+      - name: Inventory quarantined local/CI MinIO vulnerabilities
+        if: matrix.name == 'minio' && matrix.deployable == false
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: hook2stream-${{ matrix.name }}:ci
+          fail-build: false
+          severity-cutoff: high
+          only-fixed: false
+          output-format: table
+      - name: Record MinIO quarantine policy
+        if: matrix.name == 'minio' && matrix.deployable == false
+        shell: bash
+        run: |
+          echo "::warning title=Local-only MinIO security inventory::This archived upstream image is never published, bundled, staged, or deployed; review the inventory in the preceding step."
+          {
+            echo "### Quarantined local/CI MinIO"
+            echo
+            echo "This archived upstream image is acceptance-test infrastructure only."
+            echo "It is excluded from publish and release candidates; its vulnerability inventory is not a deployment waiver."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -226,6 +302,10 @@ jobs:
             dockerfile: src/deploy/backup/Dockerfile
             build_args: ""
             deploy_var: POSTGRES_BACKUP_IMAGE
+          - name: postgres
+            dockerfile: src/deploy/postgres/Dockerfile
+            build_args: ""
+            deploy_var: POSTGRES_IMAGE
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -314,9 +394,6 @@ jobs:
           - name: caddy
             source: caddy:2.11.4-alpine
             deploy_var: CADDY_IMAGE
-          - name: postgres
-            source: postgres:17.10-alpine3.24
-            deploy_var: POSTGRES_IMAGE
           - name: pgbouncer
             source: edoburu/pgbouncer:v1.25.2-p0
             deploy_var: PGBOUNCER_IMAGE
@@ -415,116 +492,5 @@ jobs:
         with:
           name: ${{ steps.identity.outputs.artifact_name }}
           path: release-candidate
-          if-no-files-found: error
-          retention-days: 90
-
-  deploy-staging:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: release-candidate
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    environment: staging
-    concurrency:
-      group: hook2stream-staging
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
-      artifact-metadata: write
-    env:
-      CANDIDATE_NAME: ${{ needs.release-candidate.outputs.artifact-name }}
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_USER: hook2stream-deploy
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Download release candidate
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.CANDIDATE_NAME }}
-          path: release-candidate
-
-      - name: Revalidate candidate before deployment
-        run: |
-          node src/ci/release-candidate.mjs validate \
-            --candidate release-candidate \
-            --repository "$GITHUB_REPOSITORY" \
-            --sha "$GITHUB_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT"
-
-      - name: Connect ephemeral staging runner to Tailscale
-        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          audience: ${{ secrets.TS_AUDIENCE }}
-          tags: tag:hook2stream-ci-staging
-          ping: ${{ secrets.DEPLOY_HOST }}
-
-      - name: Configure strict SSH identity
-        shell: bash
-        env:
-          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
-        run: |
-          install -d -m 0700 "$RUNNER_TEMP/hook2stream-ssh"
-          printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
-          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
-          chmod 0600 "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
-          ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" >/dev/null
-          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" >/dev/null
-
-      - name: Deploy candidate and run host smoke/E2E
-        shell: bash
-        run: |
-          mkdir -p transfer/candidate
-          cp release-candidate/* transfer/candidate/
-          tar -C transfer -cf - . | ssh \
-            -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "deploy $CANDIDATE_NAME" | tee "$RUNNER_TEMP/deploy-output.log"
-          encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log" | tail -n 1)"
-          test -n "$encoded_result"
-          printf '%s' "$encoded_result" | base64 --decode > remote-result.json
-
-      - name: Create successful staging receipt
-        run: |
-          node src/ci/staging-receipt.mjs create \
-            --candidate release-candidate \
-            --remote-result remote-result.json \
-            --output staging-receipt.json
-
-      - name: Sign staging receipt for production host verification
-        shell: bash
-        env:
-          STAGING_RECEIPT_SIGNING_KEY: ${{ secrets.STAGING_RECEIPT_SIGNING_KEY }}
-        run: |
-          printf '%s\n' "$STAGING_RECEIPT_SIGNING_KEY" > "$RUNNER_TEMP/staging-receipt-signing-key"
-          chmod 0600 "$RUNNER_TEMP/staging-receipt-signing-key"
-          ssh-keygen -Y sign \
-            -f "$RUNNER_TEMP/staging-receipt-signing-key" \
-            -n hook2stream-staging-receipt \
-            staging-receipt.json
-          mv staging-receipt.json.sig staging-receipt.sig
-
-      - name: Sign staging receipt
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
-        with:
-          subject-path: |
-            staging-receipt.json
-            staging-receipt.sig
-
-      - name: Upload staging receipt
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: staging-receipt-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            staging-receipt.json
-            staging-receipt.sig
           if-no-files-found: error
           retention-days: 90

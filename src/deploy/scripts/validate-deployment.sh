@@ -33,8 +33,6 @@ for secret_name in \
     postgres_password \
     s3_runtime_access_key \
     s3_runtime_secret_key \
-    s3_bootstrap_access_key \
-    s3_bootstrap_secret_key \
     google_client_secret \
     stripe_secret_key \
     stripe_webhook_secret \
@@ -44,14 +42,14 @@ for secret_name in \
     backup_s3_access_key \
     backup_s3_secret_key \
     backup_age_recipient \
-    backup_heartbeat_url \
     minio_root_user \
-    minio_root_password; do
+    minio_root_password \
+    s3_bootstrap_access_key \
+    s3_bootstrap_secret_key; do
     printf '%s\n' "ci-placeholder-not-a-production-secret" \
         > "${secret_dir}/${secret_name}"
 done
 printf '%s\n' "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" > "${secret_dir}/backup_age_recipient"
-: > "${secret_dir}/backup_heartbeat_url"
 
 for script_path in "$deployment_dir"/scripts/*.sh; do
     sh -n "$script_path"
@@ -59,10 +57,6 @@ done
 for test_path in "$deployment_dir"/tests/*.test.sh; do
     sh "$test_path"
 done
-node -e \
-    'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' \
-    "$deployment_dir/backup/lifecycle-policy.json"
-
 validation_caddy_image=$(awk -F= '
     $1 == "CADDY_IMAGE" { print substr($0, index($0, "=") + 1) }
 ' "$deployment_dir/.env.example")
@@ -106,7 +100,7 @@ BOOTSTRAPPER_IMAGE=registry.example/hook2stream-bootstrapper@sha256:$validation_
 WEB_IMAGE=registry.example/hook2stream-web@sha256:$validation_digest
 POSTGRES_BACKUP_IMAGE=registry.example/hook2stream-postgres-backup@sha256:$validation_digest
 CADDY_IMAGE=registry.example/caddy@sha256:$validation_digest
-POSTGRES_IMAGE=registry.example/postgres@sha256:$validation_digest
+POSTGRES_IMAGE=registry.example/hook2stream-postgres@sha256:$validation_digest
 PGBOUNCER_IMAGE=registry.example/pgbouncer@sha256:$validation_digest
 EGRESS_PROXY_IMAGE=registry.example/squid@sha256:$validation_digest
 VAULT_AGENT_IMAGE=registry.example/vault@sha256:$validation_digest
@@ -147,7 +141,6 @@ STORAGE_MODE=minio \
 MINIO_IMAGE=$validation_minio_image \
 MINIO_MC_IMAGE=$validation_minio_mc_image \
 S3_SERVICE_URL=http://minio:9000 \
-S3_PUBLIC_SERVICE_URL=https://s3-staging.example.invalid \
 S3_PUBLIC_DOMAIN=s3-staging.example.invalid \
 S3_REGION=us-east-1 \
 S3_MEDIA_BUCKET=hook2stream-staging-media \
@@ -155,8 +148,10 @@ S3_FORCE_PATH_STYLE=true \
 BACKUP_S3_BUCKET=hook2stream-staging-pg-backups \
 BACKUP_S3_ENDPOINT=http://minio:9000 \
 BACKUP_S3_REGION=us-east-1 \
+BACKUP_S3_FORCE_PATH_STYLE=true \
 BACKUP_S3_PREFIX=hook2stream/staging/postgres \
 BACKUP_RETENTION_DAYS=7 \
+BACKUP_MAX_OBJECT_TTL_HOURS=168 \
 S3_CONFIGURE_MULTIPART_ABORT_LIFECYCLE=false \
 MINIO_MEDIA_QUOTA_GIB=180 \
 MINIO_BACKUP_QUOTA_GIB=20 \
@@ -192,4 +187,4 @@ node "$deployment_dir/../ci/validate-compose-images.mjs" \
     "$temporary_dir/vault-compose.json"
 
 printf '%s\n' \
-    "deployment validation: shell tests, lifecycle JSON, Caddyfiles, digest images, and base/build/MinIO/Vault Compose models are valid"
+    "deployment validation: shell tests, Caddyfiles, digest images, and base/build/local-MinIO/Vault Compose models are valid"

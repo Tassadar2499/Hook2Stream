@@ -1,0 +1,22 @@
+pubkeyauthentication yes
+passwordauthentication yes
+kbdinteractiveauthentication no
+authenticationmethods any
+hostbasedauthentication no
+gssapiauthentication no
+kerberosauthentication no
+permitemptypasswords no
+permitrootlogin yes
+allowusers root hook2stream-operator hook2stream-deploy
+authorizedkeysfile .ssh/authorized_keys
+authorizedkeyscommand none
+authorizedkeyscommanduser none
+trustedusercakeys none
+strictmodes yes
+permituserenvironment no
+permituserrc no
+forcecommand none
+disableforwarding yes
+hostkey /etc/ssh/ssh_host_ed25519_key
+acceptenv LANG
+acceptenv LC_*

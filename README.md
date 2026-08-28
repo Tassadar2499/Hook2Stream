@@ -70,7 +70,7 @@ Hook2Stream продаёт не генерацию отдельного виде
 
 ## Tech stack
 
-MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, PostgreSQL, S3-compatible storage, OpenRouter API, Stripe Checkout и FFmpeg/ffprobe. В production-пути нет локальных neural-model weights и прямых интеграций с отдельными AI-провайдерами.
+MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, PostgreSQL, Storj S3 Gateway, OpenRouter API, Stripe Checkout и FFmpeg/ffprobe. MinIO используется только локально и в CI. В production-пути нет локальных neural-model weights и прямых интеграций с отдельными AI-провайдерами.
 
 ## Документация
 
@@ -79,6 +79,8 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, Po
 - [Функциональные требования](doc/func-requirements/README.md)
 - [Нефункциональные требования](doc/non-func-requirements/README.md)
 - [Архитектура и запуск исходного кода](src/README.md)
+- [MVP runbook: Servers.Guru и Storj](docs/operations/hook2stream-mvp-runbook.md)
+- [Servers.Guru provider operations](deploy/providers/serversguru/README.md)
 
 ## Реализовано
 
@@ -87,16 +89,16 @@ MVP stack: Next.js, React, TypeScript, ASP.NET Core API/workers, .NET Aspire, Po
 - англоязычный landing, Google onboarding, dashboard, release setup и brand kit;
 - ASP.NET Core API с tenant isolation, ETag concurrency, rate limiting и безопасными ошибками;
 - PostgreSQL schema и additive migration для workspaces, releases, revisioned workflow, assets, uploads, jobs, outbox/inbox и audit events;
-- прямые single/multipart uploads в S3-compatible storage;
+- same-origin single/multipart upload gateway с H2SE v1 encryption перед записью в S3-compatible storage;
 - MP3-first quick-upload API, workflow lanes, ETag/idempotency gates и editors для transcript/artwork/hooks/campaign;
 - durable PostgreSQL job queue с capability routing, lease fencing и workers для FFmpeg/ffprobe ingest и fixture/external providers;
 - проверка magic bytes, duration, dimensions и создание browser-safe derivatives;
 - SSE progress с polling fallback;
-- .NET Aspire topology для PostgreSQL, MinIO, bootstrapper, API, worker и Next.js;
+- локальная .NET Aspire topology для PostgreSQL, MinIO, bootstrapper, API, worker и Next.js;
 - OpenAPI contract и сгенерированные TypeScript-типы;
 - unit, API integration, AppHost topology и Playwright smoke tests.
 
-Текущий срез реализует MP3-first orchestration, revision contracts, UI review surfaces, OpenRouter adapters для transcription/artwork/campaign, детерминированный audio analysis и FFmpeg clean render, а также валидируемую ZIP assembly. Production требует `OPENROUTER_API_KEY` со строгим ZDR, Stripe catalog/webhooks, infrastructure configuration и staging/golden-media validation. Локальные fixture providers используются только в development/tests и никогда не подменяют production AI-результат. Deployment bundle также содержит изолированный single-user MinIO-профиль для временного VPS staging; он не заменяет внешний S3 в публичном или production-контуре.
+Текущий срез реализует MP3-first orchestration, revision contracts, UI review surfaces, OpenRouter adapters для transcription/artwork/campaign, детерминированный audio analysis и FFmpeg clean render, а также валидируемую ZIP assembly. Production требует `OPENROUTER_API_KEY` со строгим ZDR, Stripe catalog/webhooks, постоянный app-only Servers.Guru `NL1-4` в Amsterdam, постоянный app-only staging `MTL1-3` в Montreal и два изолированных Storj project. Оба VPS используют Ubuntu 24.04 и независимые credentials; staging не создаётся и не удаляется на каждый релиз. Локальные fixture providers используются только в development/tests и никогда не подменяют production AI-результат. Release candidate содержит только app deployment bundle и immutable image digests; MinIO overlay предназначен исключительно для local/CI и в staging/production не разворачивается.
 
 ## Быстрый запуск
 
@@ -112,7 +114,7 @@ npm ci --prefix src/web
 
 Скрипт сохраняет HTTPS для Aspire, если локальный .NET development certificate доверен. Если сертификат не доверен, скрипт автоматически включает unsecured transport только для локального запуска Aspire; явно заданный `ASPIRE_ALLOW_UNSECURED_TRANSPORT` имеет приоритет. Чтобы использовать HTTPS, доверьте сертификат командой `dotnet dev-certs https --trust`.
 
-Aspire автоматически создаёт PostgreSQL и MinIO, генерирует и сохраняет их локальные credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. CORS для прямой browser upload в MinIO задаётся AppHost.
+Aspire автоматически создаёт PostgreSQL и локальный MinIO, генерирует и сохраняет их credentials в .NET user secrets и повторно использует volumes с именами, привязанными к пути AppHost. Поэтому разные clones/worktrees не делят одну базу или object storage. Bucket CORS отключён: upload проходит через same-origin API и не выдаёт браузеру S3 credentials или presigned URL.
 
 При запуске через AppHost без `Google:ClientId`/`Google:ClientSecret` автоматически включается фиксированный локальный пользователь. Режим доступен только в Development, принимает запросы только через loopback и использует новый случайный bearer token при каждом запуске. Workspace и данные сохраняются между запусками. Чтобы проверить настоящий Google OAuth flow, задайте оба ключа:
 

@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 data/
+egress/rendered/
 .release-state/
 secrets/*
 !secrets/README.md

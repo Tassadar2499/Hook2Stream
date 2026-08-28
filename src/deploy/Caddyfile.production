@@ -6,22 +6,6 @@
 	}
 }
 
-www.hook2stream.com {
-	redir https://hook2stream.com{uri} 308
-
-	log {
-		output stdout
-		format filter {
-			wrap json
-			fields {
-				request>headers>Authorization delete
-				request>headers>Cookie delete
-				request>uri query replace redacted
-			}
-		}
-	}
-}
-
 hook2stream.com {
 	tls {
 		protocols tls1.2 tls1.3

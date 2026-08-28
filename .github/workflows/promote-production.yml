@@ -1,80 +1,205 @@
 name: Promote production
-run-name: Promote CI run ${{ inputs.source_ci_run_id }} to production
+run-name: Promote staging run ${{ inputs.source_staging_run_id }} to production
 
 on:
   workflow_dispatch:
     inputs:
-      source_ci_run_id:
-        description: Successful main CI run ID whose staging-tested candidate will be promoted
+      source_staging_run_id:
+        description: Successful Stage candidate workflow run ID whose signed receipt will be promoted
         required: true
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: hook2stream-production
+  cancel-in-progress: false
+
 jobs:
   verify-source:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       actions: read
       attestations: read
       contents: read
     outputs:
+      staging-run-id: ${{ inputs.source_staging_run_id }}
+      staging-run-attempt: ${{ steps.staging.outputs.attempt }}
+      source-ci-run-id: ${{ steps.source.outputs.ci_run_id }}
+      source-ci-attempt: ${{ steps.source.outputs.ci_attempt }}
       source-sha: ${{ steps.source.outputs.sha }}
       candidate-name: ${{ steps.source.outputs.candidate_name }}
     env:
       GH_TOKEN: ${{ github.token }}
-      SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_STAGING_RUN_ID: ${{ inputs.source_staging_run_id }}
+      POLICY_SHA: ${{ github.workflow_sha }}
     steps:
-      - name: Verify successful main CI source
-        id: source
+      - name: Bind workflow policy to the current protected-main dispatch
         shell: bash
         run: |
-          case "$SOURCE_CI_RUN_ID" in
-            ''|*[!0-9]*) echo "source_ci_run_id must be numeric" >&2; exit 1 ;;
-          esac
-          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID")"
-          test "$(jq -r .name <<<"$run_json")" = CI
-          test "$(jq -r .event <<<"$run_json")" = push
-          test "$(jq -r .head_branch <<<"$run_json")" = main
-          test "$(jq -r .status <<<"$run_json")" = completed
-          test "$(jq -r .conclusion <<<"$run_json")" = success
-          sha="$(jq -r .head_sha <<<"$run_json")"
-          attempt="$(jq -r .run_attempt <<<"$run_json")"
-          case "$sha" in
-            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-            *) echo "source CI returned an invalid head SHA" >&2; exit 1 ;;
-          esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
-          echo "candidate_name=release-candidate-${sha}-${SOURCE_CI_RUN_ID}-${attempt}" >> "$GITHUB_OUTPUT"
-          echo "receipt_name=staging-receipt-${sha}-${SOURCE_CI_RUN_ID}-${attempt}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ steps.source.outputs.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
-      - name: Download candidate and staging receipt from source run
+      - name: Verify successful staging workflow source
+        id: staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$SOURCE_STAGING_RUN_ID" in
+            ''|0|0*|*[!0-9]*) echo "source_staging_run_id must be a canonical positive integer" >&2; exit 1 ;;
+          esac
+
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_STAGING_RUN_ID")"
+          test "$(jq -r .name <<<"$run_json")" = "Stage candidate"
+          test "$(jq -r .event <<<"$run_json")" = workflow_dispatch
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          test "$(jq -r '.head_repository.full_name // empty' <<<"$run_json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+
+          workflow_id="$(jq -r .workflow_id <<<"$run_json")"
+          workflow_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id")"
+          test "$(jq -r .path <<<"$workflow_json")" = .github/workflows/stage-candidate.yml
+          test "$(jq -r .state <<<"$workflow_json")" = active
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+
+          staging_sha="$(jq -r .head_sha <<<"$run_json")"
+          staging_attempt="$(jq -r .run_attempt <<<"$run_json")"
+          case "$staging_sha" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "staging workflow returned an invalid head SHA" >&2; exit 1 ;;
+          esac
+          case "$staging_attempt" in ''|*[!0-9]*|0) echo "staging workflow returned an invalid run attempt" >&2; exit 1 ;; esac
+          test "$staging_sha" = "$POLICY_SHA" \
+            || { echo "staging workflow policy SHA is not the current production policy SHA" >&2; exit 1; }
+          echo "sha=$staging_sha" >> "$GITHUB_OUTPUT"
+          echo "attempt=$staging_attempt" >> "$GITHUB_OUTPUT"
+
+      - name: Download signed receipt from exact staging run
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir promotion approval
+          receipt_name="staging-receipt-${SOURCE_STAGING_RUN_ID}-${{ steps.staging.outputs.attempt }}"
+          gh run download "$SOURCE_STAGING_RUN_ID" --name "$receipt_name" --dir approval
+          test "$(find approval -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)" = \
+            $'staging-receipt.json\nstaging-receipt.sig'
+          test "$(find approval -mindepth 1 -maxdepth 1 ! -type f -print -quit)" = ""
+
+      - name: Verify staging workflow attestations before reading receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          attestation_policy=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/stage-candidate.yml"
+            --source-ref refs/heads/main
+            --source-digest "${{ steps.staging.outputs.sha }}"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify approval/staging-receipt.json "${attestation_policy[@]}"
+          gh attestation verify approval/staging-receipt.sig "${attestation_policy[@]}"
+
+      - name: Resolve and verify source CI identity from receipt
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e --arg repository "$GITHUB_REPOSITORY" \
+            --arg policySha "$POLICY_SHA" \
+            --argjson stagingRunId "$SOURCE_STAGING_RUN_ID" \
+            --argjson stagingRunAttempt "${{ steps.staging.outputs.attempt }}" '
+            .schemaVersion == 1 and
+            .kind == "hook2stream-staging-receipt" and
+            .environment == "staging" and
+            .result == "success" and
+            .repository == $repository and
+            .policySha == $policySha and
+            .stagingWorkflowRunId == $stagingRunId and
+            .stagingWorkflowRunAttempt == $stagingRunAttempt and
+            (.commitSha | type) == "string" and
+            (.commitSha | test("^[0-9a-f]{40}$")) and
+            (.ciRunId | type) == "number" and
+            .ciRunId > 0 and (.ciRunId | floor) == .ciRunId and
+            (.ciRunAttempt | type) == "number" and
+            .ciRunAttempt > 0 and (.ciRunAttempt | floor) == .ciRunAttempt
+          ' approval/staging-receipt.json >/dev/null
+
+          ci_run_id="$(jq -r '.ciRunId | tostring' approval/staging-receipt.json)"
+          ci_attempt="$(jq -r '.ciRunAttempt | tostring' approval/staging-receipt.json)"
+          sha="$(jq -r .commitSha approval/staging-receipt.json)"
+          candidate_name="release-candidate-${sha}-${ci_run_id}-${ci_attempt}"
+          test "$(jq -r .candidateArtifact approval/staging-receipt.json)" = "$candidate_name"
+
+          run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id")"
+          test "$(jq -r .name <<<"$run_json")" = CI
+          test "$(jq -r .event <<<"$run_json")" = push
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          test "$(jq -r '.head_repository.full_name // empty' <<<"$run_json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .head_sha <<<"$run_json")" = "$sha"
+          test "$(jq -r .run_attempt <<<"$run_json")" = "$ci_attempt"
+
+          workflow_id="$(jq -r .workflow_id <<<"$run_json")"
+          workflow_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id")"
+          test "$(jq -r .path <<<"$workflow_json")" = .github/workflows/ci.yml
+          test "$(jq -r .state <<<"$workflow_json")" = active
+          compare_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${sha}...main" --jq .status)"
+          case "$compare_status" in
+            identical|ahead) ;;
+            *) echo "receipt CI commit is no longer an ancestor of protected main" >&2; exit 1 ;;
+          esac
+
+          echo "ci_run_id=$ci_run_id" >> "$GITHUB_OUTPUT"
+          echo "ci_attempt=$ci_attempt" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_name=$candidate_name" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Verified production promotion"
+            echo
+            echo "- Staging run: \`$SOURCE_STAGING_RUN_ID\`"
+            echo "- Source CI run: \`$ci_run_id\` (attempt \`$ci_attempt\`)"
+            echo "- Commit: \`$sha\`"
+            echo "- Candidate: \`$candidate_name\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download exact candidate from receipt source CI run
         shell: bash
         env:
           CANDIDATE_NAME: ${{ steps.source.outputs.candidate_name }}
-          RECEIPT_NAME: ${{ steps.source.outputs.receipt_name }}
+          SOURCE_CI_RUN_ID: ${{ steps.source.outputs.ci_run_id }}
         run: |
-          mkdir -p promotion/candidate promotion/approval
+          set -euo pipefail
+          mkdir promotion/candidate
           gh run download "$SOURCE_CI_RUN_ID" --name "$CANDIDATE_NAME" --dir promotion/candidate
-          gh run download "$SOURCE_CI_RUN_ID" --name "$RECEIPT_NAME" --dir promotion/approval
 
-      - name: Verify candidate contract and GitHub attestations
+      - name: Verify candidate, CI attestations, and staging receipt
         shell: bash
+        env:
+          SOURCE_CI_RUN_ID: ${{ steps.source.outputs.ci_run_id }}
+          STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STAGING_RECEIPT_ALLOWED_SIGNERS }}
         run: |
+          set -euo pipefail
           node src/ci/release-candidate.mjs validate \
             --candidate promotion/candidate \
             --repository "$GITHUB_REPOSITORY" \
             --sha "${{ steps.source.outputs.sha }}" \
             --run-id "$SOURCE_CI_RUN_ID" \
-            --run-attempt "${{ steps.source.outputs.attempt }}"
+            --run-attempt "${{ steps.source.outputs.ci_attempt }}"
           attestation_policy=(
             --repo "$GITHUB_REPOSITORY"
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml"
@@ -85,30 +210,37 @@ jobs:
           while read -r _ file; do
             gh attestation verify "promotion/candidate/$file" "${attestation_policy[@]}"
           done < promotion/candidate/SHA256SUMS
-          gh attestation verify promotion/approval/staging-receipt.json "${attestation_policy[@]}"
-          gh attestation verify promotion/approval/staging-receipt.sig "${attestation_policy[@]}"
-
-      - name: Verify staging receipt contract and deployment signature
-        shell: bash
-        env:
-          STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STAGING_RECEIPT_ALLOWED_SIGNERS }}
-        run: |
+          receipt_minimum_release_sha="$(jq -r '.remoteResult.minimumRollbackReleaseSha // empty' approval/staging-receipt.json)"
+          [[ "$receipt_minimum_release_sha" =~ ^[0-9a-f]{40}$ ]]
+          floor_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${receipt_minimum_release_sha}...${{ steps.source.outputs.sha }}" --jq .status)"
+          case "$floor_status" in identical|ahead) ;; *) echo "staging candidate predates its signed rollback floor" >&2; exit 1 ;; esac
           node src/ci/staging-receipt.mjs validate \
             --candidate promotion/candidate \
-            --receipt promotion/approval/staging-receipt.json \
+            --receipt approval/staging-receipt.json \
             --repository "$GITHUB_REPOSITORY" \
             --sha "${{ steps.source.outputs.sha }}" \
             --run-id "$SOURCE_CI_RUN_ID" \
-            --run-attempt "${{ steps.source.outputs.attempt }}"
+            --run-attempt "${{ steps.source.outputs.ci_attempt }}" \
+            --staging-run-id "$SOURCE_STAGING_RUN_ID" \
+            --staging-run-attempt "${{ steps.staging.outputs.attempt }}" \
+            --policy-sha "$POLICY_SHA" \
+            --minimum-release-sha "$receipt_minimum_release_sha"
+          test -n "$STAGING_RECEIPT_ALLOWED_SIGNERS"
           printf '%s\n' "$STAGING_RECEIPT_ALLOWED_SIGNERS" > "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          chmod 0600 "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          . src/deploy/scripts/lib/forced-command-trust.sh
+          hook2stream_validate_exact_allowed_signer \
+            "$RUNNER_TEMP/staging-receipt-allowed-signers" hook2stream-staging
           ssh-keygen -Y verify \
             -f "$RUNNER_TEMP/staging-receipt-allowed-signers" \
             -I hook2stream-staging \
             -n hook2stream-staging-receipt \
-            -s promotion/approval/staging-receipt.sig \
-            < promotion/approval/staging-receipt.json
+            -s approval/staging-receipt.sig \
+            < approval/staging-receipt.json
+          mv approval promotion/approval
 
       - name: Seal verified promotion payload
+        shell: bash
         run: tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf promotion-payload.tar.gz promotion
 
       - name: Upload verified promotion payload
@@ -124,21 +256,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: production
-    concurrency:
-      group: hook2stream-production
-      cancel-in-progress: false
     permissions:
+      actions: read
       contents: read
       id-token: write
     env:
       CANDIDATE_NAME: ${{ needs.verify-source.outputs.candidate-name }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      MIN_ROLLBACK_RELEASE_SHA: ${{ vars.MIN_ROLLBACK_RELEASE_SHA }}
+      POLICY_SHA: ${{ github.workflow_sha }}
+      SOURCE_CI_RUN_ID: ${{ needs.verify-source.outputs.source-ci-run-id }}
+      SOURCE_STAGING_RUN_ID: ${{ needs.verify-source.outputs.staging-run-id }}
+      SOURCE_STAGING_RUN_ATTEMPT: ${{ needs.verify-source.outputs.staging-run-attempt }}
       SOURCE_SHA: ${{ needs.verify-source.outputs.source-sha }}
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: hook2stream-deploy
     steps:
+      - name: Revalidate live protected-main policy after production Environment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          [[ "$MIN_ROLLBACK_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          floor_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}" --jq .status)"
+          case "$floor_status" in identical|ahead) ;; *) echo "production candidate predates the configured rollback floor" >&2; exit 1 ;; esac
+
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.verify-source.outputs.source-sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Download verified promotion payload
@@ -146,20 +297,72 @@ jobs:
         with:
           name: verified-production-promotion-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Revalidate payload after approval boundary
+      - name: Revalidate payload after production approval boundary
         shell: bash
+        env:
+          STAGING_RECEIPT_ALLOWED_SIGNERS: ${{ vars.STAGING_RECEIPT_ALLOWED_SIGNERS }}
         run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$POLICY_SHA"
+          [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          staging_run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_STAGING_RUN_ID")"
+          test "$(jq -r .name <<<"$staging_run_json")" = "Stage candidate"
+          test "$(jq -r .event <<<"$staging_run_json")" = workflow_dispatch
+          test "$(jq -r .head_branch <<<"$staging_run_json")" = main
+          test "$(jq -r '.head_repository.full_name // empty' <<<"$staging_run_json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .status <<<"$staging_run_json")" = completed
+          test "$(jq -r .conclusion <<<"$staging_run_json")" = success
+          test "$(jq -r .head_sha <<<"$staging_run_json")" = "$POLICY_SHA"
+          test "$(jq -r .run_attempt <<<"$staging_run_json")" = "$SOURCE_STAGING_RUN_ATTEMPT"
+          staging_workflow_id="$(jq -r .workflow_id <<<"$staging_run_json")"
+          staging_workflow_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$staging_workflow_id")"
+          test "$(jq -r .path <<<"$staging_workflow_json")" = .github/workflows/stage-candidate.yml
+          test "$(jq -r .state <<<"$staging_workflow_json")" = active
+          test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
           mkdir promotion-payload
           tar -xzf promotion-payload.tar.gz --strip-components=1 -C promotion-payload
+          test "$(find promotion-payload/approval -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)" = \
+            $'staging-receipt.json\nstaging-receipt.sig'
+          test "$(find promotion-payload/approval -mindepth 1 -maxdepth 1 ! -type f -print -quit)" = ""
           node src/ci/release-candidate.mjs validate \
             --candidate promotion-payload/candidate \
             --repository "$GITHUB_REPOSITORY" \
-            --sha "$SOURCE_SHA"
+            --sha "$SOURCE_SHA" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ needs.verify-source.outputs.source-ci-attempt }}"
           node src/ci/staging-receipt.mjs validate \
             --candidate promotion-payload/candidate \
             --receipt promotion-payload/approval/staging-receipt.json \
             --repository "$GITHUB_REPOSITORY" \
-            --sha "$SOURCE_SHA"
+            --sha "$SOURCE_SHA" \
+            --run-id "$SOURCE_CI_RUN_ID" \
+            --run-attempt "${{ needs.verify-source.outputs.source-ci-attempt }}" \
+            --staging-run-id "${{ needs.verify-source.outputs.staging-run-id }}" \
+            --staging-run-attempt "${{ needs.verify-source.outputs.staging-run-attempt }}" \
+            --policy-sha "$POLICY_SHA" \
+            --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"
+          test -n "$STAGING_RECEIPT_ALLOWED_SIGNERS"
+          printf '%s\n' "$STAGING_RECEIPT_ALLOWED_SIGNERS" > "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          chmod 0600 "$RUNNER_TEMP/staging-receipt-allowed-signers"
+          . src/deploy/scripts/lib/forced-command-trust.sh
+          hook2stream_validate_exact_allowed_signer \
+            "$RUNNER_TEMP/staging-receipt-allowed-signers" hook2stream-staging
+          ssh-keygen -Y verify \
+            -f "$RUNNER_TEMP/staging-receipt-allowed-signers" \
+            -I hook2stream-staging \
+            -n hook2stream-staging-receipt \
+            -s promotion-payload/approval/staging-receipt.sig \
+            < promotion-payload/approval/staging-receipt.json
+
+      - name: Validate stable production MagicDNS identity
+        shell: bash
+        run: |
+          [[ "$DEPLOY_HOST" =~ ^h2s-app-production\.[a-z0-9-]+\.ts\.net$ ]] \
+            || { echo "production deploy host must be the stable full MagicDNS name" >&2; exit 1; }
 
       - name: Connect ephemeral production runner to Tailscale
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888 # v4.1.3
@@ -175,16 +378,35 @@ jobs:
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
           install -d -m 0700 "$RUNNER_TEMP/hook2stream-ssh"
           printf '%s\n' "$DEPLOY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/hook2stream-ssh/id_ed25519"
           printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
           chmod 0600 "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" "$RUNNER_TEMP/hook2stream-ssh/known_hosts"
-          ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" >/dev/null
-          ssh-keygen -F "$DEPLOY_HOST" -f "$RUNNER_TEMP/hook2stream-ssh/known_hosts" >/dev/null
+          case "$(ssh-keygen -y -f "$RUNNER_TEMP/hook2stream-ssh/id_ed25519")" in
+            "ssh-ed25519 "*) ;;
+            *) echo "deploy identity must be ED25519" >&2; exit 1 ;;
+          esac
+          awk -v host="$DEPLOY_HOST" '
+            /^[[:space:]]*($|#)/ { next }
+            {
+              records++
+              if ($1 != host || $2 != "ssh-ed25519" || NF != 3) bad=1
+            }
+            END { exit (records == 1 && !bad) ? 0 : 1 }
+          ' "$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
+            || { echo "production known_hosts must contain only one exact ED25519 host-key record" >&2; exit 1; }
 
       - name: Promote exact staging-tested candidate without rebuild
         shell: bash
         run: |
+          set -euo pipefail
+          umask 077
+          main_json="$(gh api "/repos/$GITHUB_REPOSITORY/branches/main")"
+          test "$(jq -r .protected <<<"$main_json")" = true
+          test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
+          floor_status="$(gh api "/repos/$GITHUB_REPOSITORY/compare/${MIN_ROLLBACK_RELEASE_SHA}...${SOURCE_SHA}" --jq .status)"
+          case "$floor_status" in identical|ahead) ;; *) echo "production candidate predates the configured rollback floor" >&2; exit 1 ;; esac
           tar -C promotion-payload -cf - . | ssh \
             -i "$RUNNER_TEMP/hook2stream-ssh/id_ed25519" \
             -o BatchMode=yes \
@@ -192,11 +414,12 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o "UserKnownHostsFile=$RUNNER_TEMP/hook2stream-ssh/known_hosts" \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "deploy $CANDIDATE_NAME" | tee "$RUNNER_TEMP/deploy-output.log"
+            "deploy $CANDIDATE_NAME" > "$RUNNER_TEMP/deploy-output.log" 2>&1
           encoded_result="$(sed -n 's/^HOOK2STREAM_REMOTE_RECEIPT=//p' "$RUNNER_TEMP/deploy-output.log" | tail -n 1)"
           test -n "$encoded_result"
           printf '%s' "$encoded_result" | base64 --decode > production-result.json
           node src/ci/remote-deploy-result.mjs validate \
             --candidate promotion-payload/candidate \
             --result production-result.json \
-            --environment production
+            --environment production \
+            --minimum-release-sha "$MIN_ROLLBACK_RELEASE_SHA"

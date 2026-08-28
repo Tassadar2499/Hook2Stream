@@ -1,0 +1,13 @@
+# Install as /etc/systemd/system/hook2stream-encrypted-swap.service.
+# Start it only after the operator has manually unlocked and mounted the volume.
+[Unit]
+Description=Hook2Stream encrypted swap
+RequiresMountsFor=/srv/hook2stream
+After=srv-hook2stream.mount
+ConditionPathIsMountPoint=/srv/hook2stream
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/swapon /srv/hook2stream/swap/hook2stream.swap
+ExecStop=/sbin/swapoff /srv/hook2stream/swap/hook2stream.swap

@@ -6,6 +6,7 @@ overlay=${deployment_dir}/compose.minio.yaml
 base_compose=${deployment_dir}/compose.yaml
 caddyfile=${deployment_dir}/Caddyfile.minio
 minio_dir=${deployment_dir}/minio
+minio_dockerfile=${minio_dir}/Dockerfile
 
 fail() {
     printf '%s\n' "MinIO overlay contract test: $*" >&2
@@ -34,6 +35,27 @@ assert_contains() {
 
 [ -r "$overlay" ] || fail "compose.minio.yaml is missing"
 [ -r "$caddyfile" ] || fail "Caddyfile.minio is missing"
+[ -r "$minio_dockerfile" ] || fail "local/CI MinIO Dockerfile is missing"
+grep -Eq '^ARG GO_IMAGE=docker\.io/library/golang:1\.27\.0-alpine3\.24@sha256:[0-9a-f]{64}$' \
+    "$minio_dockerfile" \
+    || fail "MinIO builder must pin Go 1.27.0 on Alpine 3.24 by digest"
+grep -Eq '^ARG ALPINE_IMAGE=docker\.io/library/alpine:3\.24@sha256:[0-9a-f]{64}$' \
+    "$minio_dockerfile" \
+    || fail "MinIO runtime must pin Alpine 3.24 by digest"
+grep -Fq 'ARG MINIO_RELEASE=RELEASE.2025-10-15T17-29-55Z' "$minio_dockerfile" \
+    || fail "MinIO must use the final pinned Community source release"
+grep -Fq 'ARG MINIO_COMMIT=9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a' "$minio_dockerfile" \
+    || fail "MinIO source commit is not pinned"
+grep -Fq 'libcrypto3=3.5.8-r0' "$minio_dockerfile" \
+    || fail "MinIO runtime libcrypto3 is not patched and pinned"
+grep -Fq 'libssl3=3.5.8-r0' "$minio_dockerfile" \
+    || fail "MinIO runtime libssl3 is not patched and pinned"
+grep -Fq 'com.hook2stream.minio.security-policy="inventory-only-never-deploy"' \
+    "$minio_dockerfile" \
+    || fail "MinIO image does not declare its local/CI quarantine policy"
+if grep -Eq 'go (get|mod edit)' "$minio_dockerfile"; then
+    fail "MinIO build must not disguise ad-hoc dependency overrides as the upstream release"
+fi
 sh -n "$minio_dir/minio-entrypoint.sh" "$minio_dir/minio-init.sh"
 
 entrypoint_test_root=$(mktemp -d)
@@ -61,6 +83,9 @@ media_worker=$(service_block worker-media)
 analysis_worker=$(service_block worker-analysis)
 render_worker=$(service_block worker-render)
 minio_service=$(service_block minio)
+backup_service=$(service_block postgres-backup)
+storage_probe_service=$(service_block storage-probe)
+storage_janitor_service=$(service_block storage-janitor)
 
 assert_contains "$caddy_service" \
     'S3_MEDIA_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}' \
@@ -68,6 +93,12 @@ assert_contains "$caddy_service" \
 assert_contains "$bootstrap_service" \
     'Storage__ConfigureBucketCors: "false"' \
     "the MinIO bootstrapper must not call unsupported PutBucketCors"
+assert_contains "$bootstrap_service" \
+    'Storage__ProvisioningMode: Manage' \
+    "the disposable MinIO bootstrapper must explicitly use Manage mode"
+assert_contains "$bootstrap_service" \
+    'Storage__ObjectExpirationMode: None' \
+    "the MinIO overlay must not send Storj-specific TTL metadata"
 assert_contains "$bootstrap_service" \
     'Storage__ConfigureMultipartAbortLifecycle: "false"' \
     "the MinIO bootstrapper must not submit the unsupported abort lifecycle rule"
@@ -117,6 +148,34 @@ assert_contains "$render_worker" 'memory: 3G' \
 if grep -Eq '^[[:space:]]+replicas:' "$overlay"; then
     fail "the 16 GiB staging profile must not scale worker replicas"
 fi
+
+for minio_consumer in api worker-media worker-analysis worker-control worker-render worker-export bootstrapper; do
+    consumer_block=$(service_block "$minio_consumer")
+    assert_contains "$consumer_block" \
+        'NO_PROXY: 127.0.0.1,localhost,postgres,pgbouncer,api,web,minio' \
+        "$minio_consumer sends local MinIO HTTP through the deny-by-default S3 proxy"
+done
+assert_contains "$backup_service" \
+    'NO_PROXY: 127.0.0.1,localhost,postgres,minio' \
+    "postgres-backup sends local MinIO HTTP through the deny-by-default S3 proxy"
+assert_contains "$storage_probe_service" \
+    'NO_PROXY: 127.0.0.1,localhost,minio' \
+    "storage-probe sends local MinIO HTTP through the deny-by-default S3 proxy"
+assert_contains "$storage_probe_service" \
+    'condition: service_healthy' \
+    "storage-probe does not wait for healthy local MinIO"
+assert_contains "$storage_probe_service" \
+    '- storage' \
+    "storage-probe cannot reach the internal MinIO network"
+assert_contains "$storage_janitor_service" \
+    'S3_ENDPOINT: http://minio:9000' \
+    "storage-janitor does not use the exact local MinIO endpoint"
+assert_contains "$storage_janitor_service" \
+    'NO_PROXY: 127.0.0.1,localhost,minio' \
+    "storage-janitor sends local MinIO HTTP through the deny-by-default S3 proxy"
+assert_contains "$storage_janitor_service" \
+    '- storage' \
+    "storage-janitor cannot reach the internal MinIO network"
 
 node - "$minio_dir/backup-lifecycle.json" "$minio_dir/policies" <<'NODE'
 const fs = require("node:fs");
