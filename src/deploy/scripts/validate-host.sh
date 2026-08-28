@@ -64,7 +64,7 @@ esac
     || fail "Ubuntu 24.04 is required"
 case "$(uname -m)" in x86_64|amd64) ;; *) fail "amd64 is required" ;; esac
 
-for tool in awk cat cryptsetup cvtsudoers date df docker ffprobe findmnt getent getfacl grep id jq losetup lsblk passwd python3 ss sshd ssh-keygen stat swapon systemctl tailscale timeout ufw visudo; do
+for tool in awk cat cryptsetup cvtsudoers date df docker ffprobe findmnt getconf getent getfacl grep id jq losetup lsblk passwd python3 ss sshd ssh-keygen stat swapon systemctl tailscale timeout ufw visudo; do
     require_command "$tool"
 done
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
@@ -184,24 +184,25 @@ for volume_name in caddy_data caddy_config postgres_data api_scratch worker_medi
 done
 
 swap_total_kib=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
-[ "${swap_total_kib:-0}" -ge 4194304 ] || fail "at least 4 GiB encrypted swap is required"
-swap_paths=$(swapon --noheadings --show=NAME) \
+# The kernel excludes mkswap metadata from SwapTotal, so an exact 4 GiB file
+# reports one page less here. Prove activity here and usable capacity below.
+[ "${swap_total_kib:-0}" -gt 0 ] || fail "active encrypted swap is required"
+swap_record=$(swapon --bytes --noheadings --show=NAME,SIZE) \
     || fail "cannot enumerate active swap"
-[ -n "$swap_paths" ] || fail "no active swap was reported"
-while IFS= read -r swap_path; do
-    [ -n "$swap_path" ] || continue
-    case "$swap_path" in
-        "$host_root"/*) ;;
-        *) fail "every active swap must be a file below the encrypted role mount $host_root" ;;
-    esac
-    [ -f "$swap_path" ] && [ ! -L "$swap_path" ] \
-        && [ "$(stat -c '%a' "$swap_path")" = 600 ] \
-        || fail "swap file $swap_path must be a regular non-symlink mode 0600 file"
-    [ "$(findmnt -n -o SOURCE --target "$swap_path")" = "$mount_source" ] \
-        || fail "swap file $swap_path does not resolve to the encrypted role mount"
-done <<EOF
-$swap_paths
-EOF
+[ -n "$swap_record" ] || fail "no active swap was reported"
+expected_swap_path=$host_root/swap/hook2stream.swap
+swap_nominal_bytes=$((4 * 1024 * 1024 * 1024))
+swap_page_bytes=$(getconf PAGESIZE) || fail "cannot determine the system page size"
+hook2stream_validate_active_swap_record \
+    "$swap_record" "$expected_swap_path" "$swap_nominal_bytes" "$swap_page_bytes" \
+    || fail "the only active swap must be the canonical 4 GiB encrypted swap"
+[ -f "$expected_swap_path" ] && [ ! -L "$expected_swap_path" ] \
+    || fail "swap file $expected_swap_path must be a regular non-symlink file"
+swap_metadata=$(stat -c '%u:%g:%a:%s:%b:%B' "$expected_swap_path")
+hook2stream_validate_backing_metadata "$swap_metadata" 4 \
+    || fail "swap file $expected_swap_path must be root:root 0600, fully allocated, and exactly 4 GiB"
+[ "$(findmnt -n -o SOURCE --target "$expected_swap_path")" = "$mount_source" ] \
+    || fail "swap file $expected_swap_path does not resolve to the encrypted role mount"
 
 ufw_status=$(LC_ALL=C ufw status verbose) || fail "cannot read UFW status"
 hook2stream_validate_ufw_status "$role" "$ufw_status" \

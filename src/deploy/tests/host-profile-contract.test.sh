@@ -68,6 +68,31 @@ if hook2stream_validate_backing_metadata "0:0:600:${size_48}:${blocks_48}:512" 6
     fail_test "undersized staging backing file was accepted for production"
 fi
 
+swap_path=/srv/hook2stream/swap/hook2stream.swap
+swap_nominal_bytes=$((4 * 1024 * 1024 * 1024))
+swap_page_bytes=4096
+swap_usable_bytes=$((swap_nominal_bytes - swap_page_bytes))
+hook2stream_validate_active_swap_record \
+    "$swap_path $swap_usable_bytes" "$swap_path" \
+    "$swap_nominal_bytes" "$swap_page_bytes" \
+    || fail_test "canonical active 4 GiB swap record was rejected"
+if hook2stream_validate_active_swap_record \
+    "$swap_path $((1024 * 1024 * 1024 - swap_page_bytes))" "$swap_path" \
+    "$swap_nominal_bytes" "$swap_page_bytes"; then
+    fail_test "a reduced 1 GiB swap area inside the canonical 4 GiB file was accepted"
+fi
+if hook2stream_validate_active_swap_record \
+    "$swap_path $swap_usable_bytes
+$swap_path $swap_usable_bytes" "$swap_path" \
+    "$swap_nominal_bytes" "$swap_page_bytes"; then
+    fail_test "multiple active swap records were accepted"
+fi
+if hook2stream_validate_active_swap_record \
+    "/unexpected.swap $swap_usable_bytes" "$swap_path" \
+    "$swap_nominal_bytes" "$swap_page_bytes"; then
+    fail_test "an active swap at the wrong path was accepted"
+fi
+
 luks_status='hook2stream-data is active and is in use.
   type:    LUKS2
   cipher:  aes-xts-plain64
@@ -272,9 +297,9 @@ grep -Fq 'require_minimum_free_percent / "root filesystem"' \
 grep -Fq 'require_minimum_free_percent "$host_root" "encrypted filesystem"' \
     "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "encrypted filesystem free-space gate is missing"
-grep -Fq 'every active swap must be a file below the encrypted role mount' \
+grep -Fq 'hook2stream_validate_active_swap_record' \
     "$deployment_dir/scripts/validate-host.sh" \
-    || fail_test "active swap is not restricted to a file inside the provider host LUKS mount"
+    || fail_test "active swap path and usable capacity are not validated"
 grep -Fq '$4 != "nosuid,nodev,noexec,hidepid=2"' \
     "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "host validator does not require the canonical persistent proc hidepid options"
@@ -284,12 +309,15 @@ grep -Fq 'exactly one canonical persistent hidepid=2 proc mount' \
 [ "$(cat "$deployment_dir/host/proc-hidepid.fstab.example")" = \
     'proc /proc proc nosuid,nodev,noexec,hidepid=2 0 0' ] \
     || fail_test "canonical proc hidepid fstab template is missing or malformed"
-grep -Fq '[ "${swap_total_kib:-0}" -ge 4194304 ]' \
+grep -Fq '[ "${swap_total_kib:-0}" -gt 0 ]' \
     "$deployment_dir/scripts/validate-host.sh" \
-    || fail_test "the provider host validator accepts less than 4 GiB of active swap"
-grep -Fq 'swap_paths=$(swapon --noheadings --show=NAME)' \
+    || fail_test "the provider host validator accepts inactive swap"
+grep -Fq 'hook2stream_validate_backing_metadata "$swap_metadata" 4' \
     "$deployment_dir/scripts/validate-host.sh" \
-    || fail_test "swapon enumeration failures are not captured fail-closed"
+    || fail_test "the provider host validator does not require an exact fully allocated 4 GiB swap file"
+grep -Fq 'swap_record=$(swapon --bytes --noheadings --show=NAME,SIZE)' \
+    "$deployment_dir/scripts/validate-host.sh" \
+    || fail_test "swapon usable-capacity enumeration is missing"
 grep -Fq '|| fail "cannot enumerate active swap"' \
     "$deployment_dir/scripts/validate-host.sh" \
     || fail_test "swapon enumeration failure does not stop host validation"
