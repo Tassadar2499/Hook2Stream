@@ -46,6 +46,17 @@ assert(!ci.includes("deploy-staging:") && !ci.includes("environment: staging") &
 const publishSection = ci.slice(ci.indexOf("  publish:"), ci.indexOf("  runtime-images:"));
 assert(!/name:\s*minio\b/.test(publishSection) && !publishSection.includes("MINIO_IMAGE"),
   "application publish must not publish or record a deployable MinIO image");
+assert(/^\s*-\s+name:\s*postgres\s*$/m.test(publishSection) && publishSection.includes("src/deploy/postgres/Dockerfile") &&
+  publishSection.includes("deploy_var: POSTGRES_IMAGE"),
+  "application publish must build and record the hardened PostgreSQL image");
+const containerSection = ci.slice(ci.indexOf("  containers:"), ci.indexOf("  publish:"));
+assert(/^\s*-\s+name:\s*postgres\s*$/m.test(containerSection) && containerSection.includes("src/deploy/postgres/Dockerfile") &&
+  containerSection.includes("Verify hardened PostgreSQL privilege drop"),
+  "container checks must build, scan, and verify the hardened PostgreSQL image");
+const runtimeSection = ci.slice(ci.indexOf("  runtime-images:"), ci.indexOf("  release-candidate:"));
+assert(!/^\s*-\s+name:\s*postgres\s*$/m.test(runtimeSection) && !runtimeSection.includes("POSTGRES_IMAGE"),
+  "official PostgreSQL must not be recorded as a reviewed runtime image");
+assert(!ci.includes("postgres:17.10"), "CI must not retain PostgreSQL 17.10");
 for (const removedPath of [
   ".github/workflows/storage-ci.yml",
   ".github/workflows/promote-storage-production.yml",

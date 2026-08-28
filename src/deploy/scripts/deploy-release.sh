@@ -234,6 +234,11 @@ done
 current_stage=remote-storage-probe
 compose_tools run --rm --no-deps storage-probe
 
+if [ -r "$last_successful_environment" ]; then
+    current_stage=pre-replacement-backup
+    compose_tools run --rm --no-deps postgres-backup backup-once
+fi
+
 current_stage=database-start
 compose up -d postgres pgbouncer
 wait_for_service postgres || fail "PostgreSQL did not become healthy"

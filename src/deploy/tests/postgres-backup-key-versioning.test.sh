@@ -33,52 +33,47 @@ cat > "${stub_bin}/pg_dump" <<'EOF'
 printf '%s\n' 'deterministic-postgres-dump'
 EOF
 
-cat > "${stub_bin}/age" <<'EOF'
+cat > "${stub_bin}/hook2stream-storage-tool" <<'EOF'
 #!/bin/sh
 set -eu
+operation=$1
+shift
 output_file=
 recipient=
+source_file=
+destination=
+endpoint=
+region=
+bucket=
+access_key_file=
+secret_key_file=
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --output)
-            output_file=$2
-            shift 2
-            ;;
-        --recipient)
-            recipient=$2
-            shift 2
-            ;;
+        --output) output_file=$2; shift 2 ;;
+        --recipient) recipient=$2; shift 2 ;;
+        --body) source_file=$2; shift 2 ;;
+        --key) destination=$2; shift 2 ;;
+        --endpoint) endpoint=$2; shift 2 ;;
+        --region) region=$2; shift 2 ;;
+        --bucket) bucket=$2; shift 2 ;;
+        --access-key-file) access_key_file=$2; shift 2 ;;
+        --secret-key-file) secret_key_file=$2; shift 2 ;;
         *) shift ;;
     esac
 done
-[ -n "$output_file" ] && [ -n "$recipient" ]
-printf '%s' "$recipient" > "${TEST_STATE_DIR}/used-recipient"
-cat > "$output_file"
-EOF
-
-cat > "${stub_bin}/aws" <<'EOF'
-#!/bin/sh
-set -eu
-[ -f "$AWS_CONFIG_FILE" ] \
-    && grep -Fx '    addressing_style = path' "$AWS_CONFIG_FILE" >/dev/null \
-    && grep -Fx 'request_checksum_calculation = when_required' "$AWS_CONFIG_FILE" >/dev/null \
-    && grep -Fx 'response_checksum_validation = when_required' "$AWS_CONFIG_FILE" >/dev/null \
-    || exit 45
-[ "$AWS_SHARED_CREDENTIALS_FILE" = /dev/null ] || exit 46
-printf '%s' "$AWS_ACCESS_KEY_ID" > "${TEST_STATE_DIR}/used-access-key-id"
-printf '%s' "$AWS_SECRET_ACCESS_KEY" > "${TEST_STATE_DIR}/used-secret-access-key"
-
-case "${1:-}:${2:-}" in
-    s3api:put-object)
-        source_file=
-        destination=
-        while [ "$#" -gt 0 ]; do
-            case "$1" in
-                --body) source_file=$2; shift 2 ;;
-                --key) destination=$2; shift 2 ;;
-                *) shift ;;
-            esac
-        done
+case "$operation" in
+    encrypt-age-x25519)
+        [ -n "$output_file" ] && [ -n "$recipient" ] || exit 44
+        printf '%s' "$recipient" > "${TEST_STATE_DIR}/used-recipient"
+        cat > "$output_file"
+        ;;
+    put-object)
+        [ "$endpoint" = https://gateway.storjshare.io ] || exit 45
+        [ "$region" = test-region-1 ] && [ "$bucket" = test-backups ] || exit 46
+        [ -z "${AWS_ACCESS_KEY_ID+x}" ] && [ -z "${AWS_SECRET_ACCESS_KEY+x}" ] || exit 47
+        [ -n "$access_key_file" ] && [ -n "$secret_key_file" ] || exit 48
+        cat "$access_key_file" > "${TEST_STATE_DIR}/used-access-key-id"
+        cat "$secret_key_file" > "${TEST_STATE_DIR}/used-secret-access-key"
         [ -n "$source_file" ] && [ -n "$destination" ] || exit 48
         case "$destination" in
             *.manifest.json)
@@ -92,10 +87,10 @@ case "${1:-}:${2:-}" in
         [ ! -f "$version_counter_file" ] || version_counter=$(cat "$version_counter_file")
         version_counter=$((version_counter + 1))
         printf '%s\n' "$version_counter" > "$version_counter_file"
-        printf '{"VersionId":"version-%s"}\n' "$version_counter"
+        printf '{"versionId":"version-%s"}\n' "$version_counter"
         ;;
     *)
-        printf '%s\n' "unexpected aws command: $*" >&2
+        printf '%s\n' "unexpected storage helper command: $operation" >&2
         exit 1
         ;;
 esac
@@ -113,8 +108,8 @@ cat > "${stub_bin}/jq" <<'EOF'
 const args = process.argv.slice(2);
 if (args[0] === "-er") {
   const response = JSON.parse(require("node:fs").readFileSync(args.at(-1), "utf8"));
-  if (typeof response.VersionId !== "string" || response.VersionId.length === 0) process.exit(1);
-  process.stdout.write(`${response.VersionId}\n`);
+  if (typeof response.versionId !== "string" || response.versionId.length === 0) process.exit(1);
+  process.stdout.write(`${response.versionId}\n`);
   process.exit(0);
 }
 if (args[0] !== "-n") throw new Error(`unexpected jq arguments: ${args.join(" ")}`);
@@ -165,7 +160,7 @@ printf '%s\n' 'file-secret-access-key' > "${secret_dir}/backup_s3_secret_key"
 printf '%s\n' 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' > "${secret_dir}/backup_age_recipient"
 
 run_backup() {
-    env \
+    env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
         PATH="${stub_bin}:${PATH}" \
         TEST_STATE_DIR="$state_dir" \
         TEST_UPLOAD_DIR="$upload_dir" \
@@ -175,7 +170,7 @@ run_backup() {
         POSTGRES_DB=testdb \
         POSTGRES_USER=testuser \
         POSTGRES_PASSWORD_FILE="${secret_dir}/postgres_password" \
-        BACKUP_S3_ENDPOINT= \
+        BACKUP_S3_ENDPOINT=https://gateway.storjshare.io \
         BACKUP_S3_REGION=test-region-1 \
         BACKUP_S3_BUCKET=test-backups \
         BACKUP_S3_PREFIX=rotation-test/postgres \
@@ -199,10 +194,10 @@ run_backup >"${state_dir}/first-backup-output" 2>&1
     || fail "backup did not load the S3 access-key ID from its file"
 [ "$(cat "${state_dir}/used-secret-access-key")" = 'file-secret-access-key' ] \
     || fail "backup did not load the S3 secret access key from its file"
-grep -Fq 'addressing_style = path' "$backup_script" \
+grep -Fq 'options.UsePathStyle = true' "$deployment_dir/backup/storage-tool/main.go" \
     || fail "backup does not force path-style S3 addressing"
-grep -Fq 'request_checksum_calculation = when_required' "$backup_script" \
-    && grep -Fq 'response_checksum_validation = when_required' "$backup_script" \
+grep -Fq 'RequestChecksumCalculationWhenRequired' "$deployment_dir/backup/storage-tool/main.go" \
+    && grep -Fq 'ResponseChecksumValidationWhenRequired' "$deployment_dir/backup/storage-tool/main.go" \
     || fail "backup does not use the Storj-compatible checksum mode"
 grep -Fq 'flock -w "$BACKUP_LOCK_TIMEOUT_SECONDS" 9' "$backup_script" \
     || fail "backup-once and daemon runs are not serialized on shared scratch"

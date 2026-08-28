@@ -40,6 +40,21 @@ public sealed class AppHostTopologyTests
         Assert.Equal("UserSecretsParameterDefault", minioPassword.Default!.GetType().Name);
         Assert.IsType<GenerateParameterDefault>(localAuthToken.Default);
 
+        var postgresImage = Assert.Single(
+            resources["postgres"].Annotations.OfType<ContainerImageAnnotation>());
+        Assert.Equal("17.11-alpine3.24", postgresImage.Tag);
+        var postgresBuild = Assert.Single(
+            resources["postgres"].Annotations.OfType<DockerfileBuildAnnotation>());
+        Assert.True(Path.IsPathRooted(postgresBuild.ContextPath));
+        Assert.True(File.Exists(Path.Combine(postgresBuild.ContextPath, "global.json")));
+        var expectedPostgresDockerfile = Path.GetFullPath(
+            Path.Combine(postgresBuild.ContextPath, "src/deploy/postgres/Dockerfile"));
+        var actualPostgresDockerfile = Path.GetFullPath(
+            Path.IsPathRooted(postgresBuild.DockerfilePath)
+                ? postgresBuild.DockerfilePath
+                : Path.Combine(postgresBuild.ContextPath, postgresBuild.DockerfilePath));
+        Assert.Equal(expectedPostgresDockerfile, actualPostgresDockerfile);
+
         var executionContext = new DistributedApplicationExecutionContext(
             DistributedApplicationOperation.Publish);
         var apiConfiguration = await ExecutionConfigurationBuilder

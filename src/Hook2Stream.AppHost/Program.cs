@@ -92,7 +92,10 @@ var postgresPassword = builder.AddParameter(
     secret: true,
     persist: !isE2e);
 
-var postgres = builder.AddPostgres("postgres", password: postgresPassword);
+var postgres = builder
+    .AddPostgres("postgres", password: postgresPassword)
+    .WithImageTag("17.11-alpine3.24")
+    .WithDockerfile("../..", "src/deploy/postgres/Dockerfile");
 if (!isE2e)
 {
     postgres.WithDataVolume();

@@ -426,6 +426,22 @@ assert(
       "127.0.0.1,localhost,minio",
   "storage-probe must reach local MinIO directly instead of sending HTTP through Squid",
 );
+for (const serviceName of ["postgres-backup", "storage-probe", "storage-janitor"]) {
+  assert(
+    networkNames(services[serviceName] ?? {}).includes("storage"),
+    `${serviceName} must join the internal storage network in local/CI MinIO mode`,
+  );
+  assert(
+    services[serviceName]?.depends_on?.minio?.condition === "service_healthy",
+    `${serviceName} must wait for healthy local MinIO`,
+  );
+}
+assert(
+  environmentValue(services["storage-janitor"] ?? {}, "S3_ENDPOINT") === internalEndpoint &&
+    environmentValue(services["storage-janitor"] ?? {}, "NO_PROXY") ===
+      "127.0.0.1,localhost,minio",
+  "storage-janitor must reach local MinIO directly instead of sending HTTP through Squid",
+);
 assert(
   String(environmentValue(services.bootstrapper, "Storage__ConfigureBucketCors")).toLowerCase() ===
     "false",

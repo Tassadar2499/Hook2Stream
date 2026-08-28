@@ -63,6 +63,7 @@ render_worker=$(service_block worker-render)
 minio_service=$(service_block minio)
 backup_service=$(service_block postgres-backup)
 storage_probe_service=$(service_block storage-probe)
+storage_janitor_service=$(service_block storage-janitor)
 
 assert_contains "$caddy_service" \
     'S3_MEDIA_BUCKET: ${S3_MEDIA_BUCKET:?Set S3_MEDIA_BUCKET}' \
@@ -138,6 +139,21 @@ assert_contains "$backup_service" \
 assert_contains "$storage_probe_service" \
     'NO_PROXY: 127.0.0.1,localhost,minio' \
     "storage-probe sends local MinIO HTTP through the deny-by-default S3 proxy"
+assert_contains "$storage_probe_service" \
+    'condition: service_healthy' \
+    "storage-probe does not wait for healthy local MinIO"
+assert_contains "$storage_probe_service" \
+    '- storage' \
+    "storage-probe cannot reach the internal MinIO network"
+assert_contains "$storage_janitor_service" \
+    'S3_ENDPOINT: http://minio:9000' \
+    "storage-janitor does not use the exact local MinIO endpoint"
+assert_contains "$storage_janitor_service" \
+    'NO_PROXY: 127.0.0.1,localhost,minio' \
+    "storage-janitor sends local MinIO HTTP through the deny-by-default S3 proxy"
+assert_contains "$storage_janitor_service" \
+    '- storage' \
+    "storage-janitor cannot reach the internal MinIO network"
 
 node - "$minio_dir/backup-lifecycle.json" "$minio_dir/policies" <<'NODE'
 const fs = require("node:fs");

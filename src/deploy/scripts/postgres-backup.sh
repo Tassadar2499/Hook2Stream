@@ -26,12 +26,16 @@ read_age_recipient() {
     printf '%s' "$age_recipient"
 }
 
-aws_command() {
-    if [ -n "$BACKUP_S3_ENDPOINT" ]; then
-        aws --endpoint-url "$BACKUP_S3_ENDPOINT" "$@"
-    else
-        aws "$@"
-    fi
+storage_command() {
+    storage_operation=$1
+    shift
+    hook2stream-storage-tool "$storage_operation" \
+        --endpoint "$BACKUP_S3_ENDPOINT" \
+        --region "$BACKUP_S3_REGION" \
+        --bucket "$BACKUP_S3_BUCKET" \
+        --access-key-file "$BACKUP_S3_ACCESS_KEY_FILE" \
+        --secret-key-file "$BACKUP_S3_SECRET_KEY_FILE" \
+        "$@"
 }
 
 cleanup() {
@@ -44,15 +48,10 @@ cleanup() {
         "${success_marker_tmp:-}"
 }
 
-cleanup_process() {
-    cleanup
-    rm -f "${aws_config_file:-}"
-}
-
 on_signal() {
     signal_status=$1
     trap - EXIT HUP INT TERM
-    cleanup_process
+    cleanup
     exit "$signal_status"
 }
 
@@ -60,12 +59,10 @@ put_versioned_object() {
     put_body=$1
     put_key=$2
     put_response_file=/tmp/hook2stream-backup-put-response.json
-    aws_command s3api put-object \
-        --bucket "$BACKUP_S3_BUCKET" \
+    storage_command put-object \
         --key "$put_key" \
-        --body "$put_body" \
-        --output json > "$put_response_file"
-    put_version_id=$(jq -er '.VersionId | select(type == "string" and length > 0)' \
+        --body "$put_body" > "$put_response_file"
+    put_version_id=$(jq -er '.versionId | select(type == "string" and length > 0)' \
         "$put_response_file") \
         || fail "versioned backup bucket did not return a VersionId for ${put_key}"
     rm -f "$put_response_file"
@@ -123,7 +120,9 @@ perform_backup() {
         --compress 9 \
         --no-owner \
         --no-privileges \
-        | age --recipient "$age_recipient" --output "$encrypted_file"
+        | hook2stream-storage-tool encrypt-age-x25519 \
+            --recipient "$age_recipient" \
+            --output "$encrypted_file"
 
     [ -s "$encrypted_file" ] || fail "pg_dump produced an empty backup"
     (
@@ -192,7 +191,7 @@ perform_backup() {
 : "${POSTGRES_DB:=hook2stream}"
 : "${POSTGRES_USER:=hook2stream}"
 : "${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE is required}"
-: "${BACKUP_S3_ENDPOINT:=}"
+: "${BACKUP_S3_ENDPOINT:?BACKUP_S3_ENDPOINT is required}"
 : "${BACKUP_S3_REGION:?BACKUP_S3_REGION is required}"
 : "${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required}"
 : "${BACKUP_S3_PREFIX:=hook2stream/production/postgres}"
@@ -229,31 +228,16 @@ esac
 [ "$BACKUP_S3_FORCE_PATH_STYLE" = true ] \
     || fail "BACKUP_S3_FORCE_PATH_STYLE must be true for backup object storage"
 command -v flock >/dev/null 2>&1 || fail "flock is required"
+command -v hook2stream-storage-tool >/dev/null 2>&1 \
+    || fail "hook2stream-storage-tool is required"
+
+for backup_credential_file in "$BACKUP_S3_ACCESS_KEY_FILE" "$BACKUP_S3_SECRET_KEY_FILE"; do
+    [ -r "$backup_credential_file" ] && [ -s "$backup_credential_file" ] \
+        || fail "required S3 credential file is missing or empty: $backup_credential_file"
+done
 
 umask 077
-aws_config_file=$(mktemp /tmp/hook2stream-backup-aws-config.XXXXXX)
-AWS_CONFIG_FILE=$aws_config_file
-export AWS_CONFIG_FILE
-printf '%s\n' \
-    '[default]' \
-    "region = $BACKUP_S3_REGION" \
-    'request_checksum_calculation = when_required' \
-    'response_checksum_validation = when_required' \
-    's3 =' \
-    '    addressing_style = path' > "$AWS_CONFIG_FILE"
-AWS_SHARED_CREDENTIALS_FILE=/dev/null
-export AWS_SHARED_CREDENTIALS_FILE
-
-export AWS_ACCESS_KEY_ID
-AWS_ACCESS_KEY_ID=$(read_secret "$BACKUP_S3_ACCESS_KEY_FILE")
-export AWS_SECRET_ACCESS_KEY
-AWS_SECRET_ACCESS_KEY=$(read_secret "$BACKUP_S3_SECRET_KEY_FILE")
-export AWS_DEFAULT_REGION="$BACKUP_S3_REGION"
-export AWS_REGION="$BACKUP_S3_REGION"
-export AWS_EC2_METADATA_DISABLED=true
-export AWS_PAGER=
-
-trap cleanup_process EXIT
+trap cleanup EXIT
 trap 'on_signal 129' HUP
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM

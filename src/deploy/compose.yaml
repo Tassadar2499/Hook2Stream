@@ -545,7 +545,7 @@ services:
           memory: ${PGBOUNCER_MEMORY_RESERVATION:-64M}
 
   postgres:
-    image: ${POSTGRES_IMAGE:-postgres:17.10-alpine3.24}
+    image: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE to the immutable hardened release image}
     restart: unless-stopped
     group_add:
       - "${SECRETS_GID:-2000}"

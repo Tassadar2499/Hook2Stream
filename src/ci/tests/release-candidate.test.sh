@@ -25,7 +25,7 @@ for key in API_IMAGE WORKER_IMAGE BOOTSTRAPPER_IMAGE WEB_IMAGE POSTGRES_BACKUP_I
     WEB_IMAGE) image=ghcr.io/example/hook2stream-web ;;
     POSTGRES_BACKUP_IMAGE) image=ghcr.io/example/hook2stream-postgres-backup ;;
     CADDY_IMAGE) image=caddy ;;
-    POSTGRES_IMAGE) image=postgres ;;
+    POSTGRES_IMAGE) image=ghcr.io/example/hook2stream-postgres ;;
     PGBOUNCER_IMAGE) image=edoburu/pgbouncer ;;
     EGRESS_PROXY_IMAGE) image=ubuntu/squid ;;
   esac
@@ -47,6 +47,25 @@ GITHUB_REPOSITORY_OWNER=ambient-owner node "$ci_dir/release-candidate.mjs" valid
   --sha "$sha" \
   --run-id "$run_id" \
   --run-attempt "$run_attempt"
+
+cp -a "$candidate" "$scratch/official-postgres-candidate"
+sed -i \
+  's#ghcr.io/example/hook2stream-postgres@#docker.io/library/postgres@#g' \
+  "$scratch/official-postgres-candidate/release-images.env" \
+  "$scratch/official-postgres-candidate/release-metadata.json"
+(
+  cd "$scratch/official-postgres-candidate"
+  sha256sum deploy-bundle.tar.gz release-images.env release-metadata.json > SHA256SUMS
+)
+if node "$ci_dir/release-candidate.mjs" validate \
+  --candidate "$scratch/official-postgres-candidate" \
+  --repository "$repository" \
+  --sha "$sha" \
+  --run-id "$run_id" \
+  --run-attempt "$run_attempt" >/dev/null 2>&1; then
+  echo "candidate validator accepted the unhardened official PostgreSQL image" >&2
+  exit 1
+fi
 
 bundle_listing="$scratch/bundle-listing.txt"
 tar -tzf "$candidate/deploy-bundle.tar.gz" > "$bundle_listing"

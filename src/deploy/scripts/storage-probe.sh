@@ -15,8 +15,8 @@ fail() { printf '%s\n' "storage probe: $*" >&2; exit 1; }
 
 [ "$STORAGE_PROTOCOL_VERSION" = 1 ] || fail "only storage protocol version 1 is supported"
 printf '%s\n' "$S3_ENDPOINT" \
-    | grep -Eq '^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' \
-    || fail "storage endpoint must be a credential-free HTTPS origin"
+    | grep -Eq '^(https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?|http://minio:9000)$' \
+    || fail "storage endpoint must be a credential-free HTTPS origin or exact local/CI MinIO origin"
 [ "$STORAGE_CONTRACT_KEY" = .hook2stream/contracts/storage-v1.json ] \
     || fail "STORAGE_CONTRACT_KEY must be the canonical storage-v1 marker key"
 printf '%s\n' "$STORAGE_CONTRACT_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
@@ -41,7 +41,7 @@ validate_single_line_secret() {
 validate_single_line_secret "$S3_ACCESS_KEY_FILE"
 validate_single_line_secret "$S3_SECRET_KEY_FILE"
 
-for probe_tool in aws cmp date grep jq mktemp sha256sum; do
+for probe_tool in hook2stream-storage-tool cmp date grep jq mktemp sha256sum; do
     command -v "$probe_tool" >/dev/null 2>&1 || fail "$probe_tool is required"
 done
 
@@ -50,51 +50,34 @@ probe_dir=$(mktemp -d)
 probe_key=".hook2stream-storage-probe/${DEPLOYMENT_ENVIRONMENT:-unknown}/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 object_created=false
 
-AWS_CONFIG_FILE=$probe_dir/aws-config
-export AWS_CONFIG_FILE
-printf '%s\n' \
-    '[default]' \
-    "region = $S3_REGION" \
-    'request_checksum_calculation = when_required' \
-    'response_checksum_validation = when_required' \
-    's3 =' \
-    '    addressing_style = path' > "$AWS_CONFIG_FILE"
-AWS_SHARED_CREDENTIALS_FILE=/dev/null
-export AWS_SHARED_CREDENTIALS_FILE
-
-export AWS_ACCESS_KEY_ID
-export AWS_SECRET_ACCESS_KEY
-AWS_ACCESS_KEY_ID=$(cat "$S3_ACCESS_KEY_FILE")
-AWS_SECRET_ACCESS_KEY=$(cat "$S3_SECRET_KEY_FILE")
-[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] \
-    || fail "S3 credential files contain no value"
-export AWS_DEFAULT_REGION="$S3_REGION"
-export AWS_REGION="$S3_REGION"
-export AWS_EC2_METADATA_DISABLED=true
-export AWS_PAGER=
-
-aws_probe() {
-    aws --endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" "$@"
+storage_probe() {
+    probe_operation=$1
+    shift
+    hook2stream-storage-tool "$probe_operation" \
+        --endpoint "$S3_ENDPOINT" \
+        --region "$S3_REGION" \
+        --bucket "$S3_BUCKET" \
+        --access-key-file "$S3_ACCESS_KEY_FILE" \
+        --secret-key-file "$S3_SECRET_KEY_FILE" \
+        "$@"
 }
 
 cleanup() {
     cleanup_status=$?
     trap - EXIT
     if [ "$object_created" = true ]; then
-        aws_probe s3api delete-object \
-            --bucket "$S3_BUCKET" --key "$probe_key" >/dev/null 2>&1 || true
+        storage_probe delete-object --key "$probe_key" >/dev/null 2>&1 || true
     fi
     rm -rf -- "$probe_dir"
-    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
     exit "$cleanup_status"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
 contract_body=$probe_dir/storage-v1.json
-aws_probe s3api get-object \
-    --bucket "$S3_BUCKET" --key "$STORAGE_CONTRACT_KEY" \
-    "$contract_body" >/dev/null \
+storage_probe get-object \
+    --key "$STORAGE_CONTRACT_KEY" \
+    --output "$contract_body" \
     || fail "authenticated storage contract download failed"
 actual_contract_sha256=$(sha256sum "$contract_body" | cut -d' ' -f1)
 [ "$actual_contract_sha256" = "$STORAGE_CONTRACT_SHA256" ] \
@@ -121,28 +104,25 @@ payload=$probe_dir/payload
 range_body=$probe_dir/range
 printf '%s' 'hook2stream-storage-probe-v1' > "$payload"
 
-aws_probe s3api put-object \
-    --bucket "$S3_BUCKET" --key "$probe_key" --body "$payload" >/dev/null \
+storage_probe put-object --key "$probe_key" --body "$payload" >/dev/null \
     || fail "authenticated PUT probe failed"
 object_created=true
 
-content_length=$(aws_probe s3api head-object \
-    --bucket "$S3_BUCKET" --key "$probe_key" \
-    --query ContentLength --output text) \
+content_length=$(storage_probe head-object --key "$probe_key" \
+    | jq -er '.contentLength | select(type == "number")') \
     || fail "authenticated HEAD probe failed"
 [ "$content_length" = 28 ] || fail "HEAD returned an unexpected object length"
 
-aws_probe s3api get-object \
-    --bucket "$S3_BUCKET" --key "$probe_key" \
-    --range bytes=12-18 "$range_body" >/dev/null \
+storage_probe get-object \
+    --key "$probe_key" \
+    --range bytes=12-18 \
+    --output "$range_body" \
     || fail "authenticated single-Range probe failed"
 printf '%s' storage | cmp -s - "$range_body" \
     || fail "single-Range probe returned unexpected bytes"
 
-aws_probe s3api delete-object \
-    --bucket "$S3_BUCKET" --key "$probe_key" >/dev/null \
+storage_probe delete-object --key "$probe_key" >/dev/null \
     || fail "authenticated DELETE probe failed"
 object_created=false
 
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
 printf '%s\n' "storage probe: pinned Storj contract v1 and authenticated PUT/HEAD/single-Range/DELETE passed"

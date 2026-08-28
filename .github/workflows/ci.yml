@@ -12,28 +12,43 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:17.10-alpine3.24
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     env:
       HOOK2STREAM_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=postgres
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build hardened PostgreSQL integration dependency
+        run: docker build --file src/deploy/postgres/Dockerfile --tag hook2stream-postgres:ci .
+
+      - name: Start hardened PostgreSQL integration dependency
+        shell: bash
+        run: |
+          docker run --detach \
+            --name hook2stream-ci-postgres \
+            --publish 127.0.0.1:5432:5432 \
+            --env POSTGRES_PASSWORD=postgres \
+            hook2stream-postgres:ci
+          for attempt in {1..30}; do
+            if docker exec hook2stream-ci-postgres pg_isready -q -U postgres -d postgres; then
+              test "$(docker exec hook2stream-ci-postgres psql -At -U postgres -d postgres -c 'show server_version')" = 17.11
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs hook2stream-ci-postgres >&2
+          exit 1
 
       - name: Build audited MinIO acceptance dependency
         run: docker build --file src/deploy/minio/Dockerfile --tag hook2stream-minio:ci .
 
       - name: Start and verify MinIO/Caddy acceptance dependency
         run: src/ci/start-minio-acceptance.sh "$GITHUB_ENV"
+
+      - name: Build hardened backup acceptance image
+        run: docker build --file src/deploy/backup/Dockerfile --tag hook2stream-postgres-backup:acceptance .
+
+      - name: Verify storage helper against real MinIO
+        run: src/ci/test-storage-tool-minio.sh hook2stream-postgres-backup:acceptance
 
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
@@ -68,6 +83,14 @@ jobs:
         run: |
           docker logs hook2stream-ci-minio || true
           docker logs hook2stream-ci-caddy || true
+
+      - name: Dump PostgreSQL integration logs on failure
+        if: failure()
+        run: docker logs hook2stream-ci-postgres || true
+
+      - name: Stop PostgreSQL integration dependency
+        if: always()
+        run: docker rm --force hook2stream-ci-postgres || true
 
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -149,6 +172,11 @@ jobs:
             runtime: postgres
             secret_consumer: true
             build_args: ""
+          - name: postgres
+            dockerfile: src/deploy/postgres/Dockerfile
+            runtime: postgres
+            secret_consumer: false
+            build_args: ""
           - name: minio
             dockerfile: src/deploy/minio/Dockerfile
             runtime: minio
@@ -163,6 +191,23 @@ jobs:
         run: docker run --rm --entrypoint node "hook2stream-${{ matrix.name }}:ci" --version
       - if: matrix.runtime == 'postgres'
         run: docker run --rm --entrypoint pg_dump "hook2stream-${{ matrix.name }}:ci" --version
+      - name: Verify hardened PostgreSQL privilege drop
+        if: matrix.name == 'postgres'
+        run: |
+          docker run --rm --entrypoint /bin/sh hook2stream-postgres:ci -ec '
+            test "$(readlink -f /usr/local/bin/gosu)" = /sbin/su-exec
+            test "$(gosu postgres id -u)" = "$(id -u postgres)"
+            postgres --version | grep -F "17.11"
+          '
+      - name: Verify narrow backup runtime
+        if: matrix.name == 'postgres-backup'
+        run: |
+          docker run --rm --entrypoint /bin/sh "hook2stream-${{ matrix.name }}:ci" -ec '
+            command -v hook2stream-storage-tool
+            ! command -v aws
+            ! command -v age
+            ! command -v python3
+          '
       - if: matrix.runtime == 'minio'
         run: docker run --rm --entrypoint minio "hook2stream-${{ matrix.name }}:ci" --version
       - name: Verify supplemental-group secret access
@@ -228,6 +273,10 @@ jobs:
             dockerfile: src/deploy/backup/Dockerfile
             build_args: ""
             deploy_var: POSTGRES_BACKUP_IMAGE
+          - name: postgres
+            dockerfile: src/deploy/postgres/Dockerfile
+            build_args: ""
+            deploy_var: POSTGRES_IMAGE
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -316,9 +365,6 @@ jobs:
           - name: caddy
             source: caddy:2.11.4-alpine
             deploy_var: CADDY_IMAGE
-          - name: postgres
-            source: postgres:17.10-alpine3.24
-            deploy_var: POSTGRES_IMAGE
           - name: pgbouncer
             source: edoburu/pgbouncer:v1.25.2-p0
             deploy_var: PGBOUNCER_IMAGE

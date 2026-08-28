@@ -51,65 +51,55 @@ secret_dir=$temporary_dir/secrets
 state_dir=$temporary_dir/state
 mkdir -p "$mock_bin" "$secret_dir" "$state_dir"
 
-cat > "$mock_bin/aws" <<'EOF'
+cat > "$mock_bin/hook2stream-storage-tool" <<'EOF'
 #!/bin/sh
 set -eu
-[ -f "$AWS_CONFIG_FILE" ] \
-    && grep -Fq 'addressing_style = path' "$AWS_CONFIG_FILE" \
-    && grep -Fq 'request_checksum_calculation = when_required' "$AWS_CONFIG_FILE" \
-    && grep -Fq 'response_checksum_validation = when_required' "$AWS_CONFIG_FILE" \
-    || exit 41
-operation=
-previous=
-key=
-upload_id=
-for argument in "$@"; do
-    [ "$previous" != s3api ] || operation=$argument
-    [ "$previous" != --key ] || key=$argument
-    [ "$previous" != --upload-id ] || upload_id=$argument
-    previous=$argument
+operation=$1
+shift
+endpoint=
+region=
+bucket=
+access_key_file=
+secret_key_file=
+older_than_seconds=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --endpoint) endpoint=$2; shift 2 ;;
+        --region) region=$2; shift 2 ;;
+        --bucket) bucket=$2; shift 2 ;;
+        --access-key-file) access_key_file=$2; shift 2 ;;
+        --secret-key-file) secret_key_file=$2; shift 2 ;;
+        --older-than-seconds) older_than_seconds=$2; shift 2 ;;
+        *) shift ;;
+    esac
 done
+[ "$operation" = abort-multipart-older-than ] || exit 41
+[ "$endpoint" = https://gateway.storjshare.io ] || exit 42
+[ "$region" = global ] && [ "$bucket" = hook2stream-com-staging-media ] || exit 43
+[ "$(cat "$access_key_file")" = media-access ] || exit 44
+[ "$(cat "$secret_key_file")" = media-secret ] || exit 45
+[ "$older_than_seconds" = 86400 ] || exit 46
 printf '%s\n' "$operation" >> "$JANITOR_OPERATION_LOG"
-case "$operation" in
-    list-multipart-uploads)
-        printf '%s\n' '{"IsTruncated":false,"Uploads":[{"Key":"staging/old.h2se/data","UploadId":"old-upload","Initiated":"2020-01-01T00:00:00Z"},{"Key":"staging/new.h2se/data","UploadId":"new-upload","Initiated":"2999-01-01T00:00:00Z"}]}'
-        ;;
-    abort-multipart-upload)
-        printf '%s\t%s\n' "$key" "$upload_id" >> "$JANITOR_ABORT_LOG"
-        ;;
-    *) exit 42 ;;
-esac
+printf '%s\n' '{"aborted":1}'
 EOF
 
 cat > "$mock_bin/jq" <<'EOF'
 #!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-const page = JSON.parse(fs.readFileSync(args.at(-1), "utf8"));
-const expression = args.at(-2);
-if (args.includes("--argjson")) {
-  const cutoff = Number(args[args.indexOf("--argjson") + 2]);
-  for (const upload of page.Uploads ?? []) {
-    if (Date.parse(upload.Initiated) / 1000 <= cutoff) {
-      process.stdout.write(`${upload.Key}\t${upload.UploadId}\n`);
-    }
-  }
-} else if (expression.includes("IsTruncated")) {
-  process.stdout.write(`${page.IsTruncated ?? false}\n`);
-} else {
-  process.exit(43);
-}
+if (args[0] !== "-er") process.exit(47);
+const result = JSON.parse(fs.readFileSync(0, "utf8"));
+if (!Number.isInteger(result.aborted) || result.aborted < 0) process.exit(48);
+process.stdout.write(`${result.aborted}\n`);
 EOF
-chmod 0755 "$mock_bin/aws" "$mock_bin/jq"
+chmod 0755 "$mock_bin/hook2stream-storage-tool" "$mock_bin/jq"
 
 printf '%s\n' media-access > "$secret_dir/access"
 printf '%s\n' media-secret > "$secret_dir/secret"
 : > "$state_dir/operations"
-: > "$state_dir/aborts"
 
 PATH="$mock_bin:$PATH" \
 JANITOR_OPERATION_LOG=$state_dir/operations \
-JANITOR_ABORT_LOG=$state_dir/aborts \
 S3_ENDPOINT=https://gateway.storjshare.io \
 S3_REGION=global \
 S3_BUCKET=hook2stream-com-staging-media \
@@ -120,11 +110,7 @@ MEDIA_JANITOR_INTERVAL_SECONDS=86400 \
 MEDIA_JANITOR_SUCCESS_MARKER=$state_dir/last-success \
     sh "$janitor" run-once >/dev/null
 
-expected_abort=$(printf 'staging/old.h2se/data\told-upload')
-[ "$(cat "$state_dir/aborts")" = "$expected_abort" ] \
-    || fail "janitor did not abort only the incomplete multipart older than 24 hours"
-[ "$(cat "$state_dir/operations")" = "list-multipart-uploads
-abort-multipart-upload" ] \
+[ "$(cat "$state_dir/operations")" = abort-multipart-older-than ] \
     || fail "janitor performed unexpected S3 operations"
 MEDIA_JANITOR_SUCCESS_MARKER=$state_dir/last-success \
 MEDIA_JANITOR_MAX_AGE_SECONDS=93600 \
@@ -132,7 +118,6 @@ MEDIA_JANITOR_MAX_AGE_SECONDS=93600 \
 
 if PATH="$mock_bin:$PATH" \
     JANITOR_OPERATION_LOG=$state_dir/operations \
-    JANITOR_ABORT_LOG=$state_dir/aborts \
     S3_ENDPOINT=https://gateway.storjshare.io \
     S3_REGION=global \
     S3_BUCKET=hook2stream-com-staging-media \

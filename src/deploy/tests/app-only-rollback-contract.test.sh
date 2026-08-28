@@ -35,7 +35,7 @@ WEB_IMAGE=registry.example/hook2stream-web@sha256:$app_digest
 BOOTSTRAPPER_IMAGE=registry.example/hook2stream-bootstrapper@sha256:$infra_digest
 POSTGRES_BACKUP_IMAGE=registry.example/hook2stream-postgres-backup@sha256:$infra_digest
 CADDY_IMAGE=registry.example/caddy@sha256:$infra_digest
-POSTGRES_IMAGE=registry.example/postgres@sha256:$infra_digest
+POSTGRES_IMAGE=registry.example/hook2stream-postgres@sha256:$infra_digest
 PGBOUNCER_IMAGE=registry.example/pgbouncer@sha256:$infra_digest
 EGRESS_PROXY_IMAGE=registry.example/squid@sha256:$infra_digest
 EOF
@@ -89,7 +89,7 @@ if [ "${1:-}" = inspect ] && [ "${2:-}" = --format ]; then
                     printf '%s\n' "registry.example/caddy@sha256:$ROLLBACK_CURRENT_INFRA_DIGEST"
                     ;;
                 postgres)
-                    printf '%s\n' "registry.example/postgres@sha256:$ROLLBACK_CURRENT_INFRA_DIGEST"
+                    printf '%s\n' "registry.example/hook2stream-postgres@sha256:$ROLLBACK_CURRENT_INFRA_DIGEST"
                     ;;
                 pgbouncer)
                     printf '%s\n' "registry.example/pgbouncer@sha256:$ROLLBACK_CURRENT_INFRA_DIGEST"

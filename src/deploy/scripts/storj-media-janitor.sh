@@ -3,16 +3,6 @@ set -eu
 
 fail() { printf '%s\n' "Storj media janitor: $*" >&2; exit 1; }
 
-read_secret() {
-    janitor_secret_path=$1
-    [ -r "$janitor_secret_path" ] && [ -s "$janitor_secret_path" ] \
-        || fail "required secret file is missing or empty: $janitor_secret_path"
-    janitor_secret=$(sed -e 's/[[:space:]]*$//' "$janitor_secret_path")
-    [ -n "$janitor_secret" ] || fail "required secret file is empty: $janitor_secret_path"
-    case "$janitor_secret" in *[[:space:]]*) fail "credential files must contain one unpadded line" ;; esac
-    printf '%s' "$janitor_secret"
-}
-
 : "${S3_ENDPOINT:?S3_ENDPOINT is required}"
 : "${S3_REGION:?S3_REGION is required}"
 : "${S3_BUCKET:?S3_BUCKET is required}"
@@ -30,83 +20,36 @@ done
 [ "$MEDIA_JANITOR_INTERVAL_SECONDS" -ge 3600 ] \
     || fail "media janitor interval must be at least one hour"
 printf '%s\n' "$S3_ENDPOINT" \
-    | grep -Eq '^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' \
-    || fail "S3 endpoint must be a credential-free HTTPS origin"
+    | grep -Eq '^(https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?|http://minio:9000)$' \
+    || fail "S3 endpoint must be a credential-free HTTPS origin or exact local/CI MinIO origin"
 
-umask 077
-janitor_dir=$(mktemp -d)
-cleanup() {
-    rm -rf -- "$janitor_dir"
-    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
-}
-trap cleanup EXIT HUP INT TERM
+for janitor_credential_file in "$S3_ACCESS_KEY_FILE" "$S3_SECRET_KEY_FILE"; do
+    [ -r "$janitor_credential_file" ] && [ -s "$janitor_credential_file" ] \
+        || fail "required credential file is missing or empty: $janitor_credential_file"
+done
+command -v hook2stream-storage-tool >/dev/null 2>&1 \
+    || fail "hook2stream-storage-tool is required"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
 
-AWS_CONFIG_FILE=$janitor_dir/aws-config
-AWS_SHARED_CREDENTIALS_FILE=/dev/null
-export AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
-printf '%s\n' \
-    '[default]' \
-    "region = $S3_REGION" \
-    'request_checksum_calculation = when_required' \
-    'response_checksum_validation = when_required' \
-    's3 =' \
-    '    addressing_style = path' > "$AWS_CONFIG_FILE"
-AWS_ACCESS_KEY_ID=$(read_secret "$S3_ACCESS_KEY_FILE")
-AWS_SECRET_ACCESS_KEY=$(read_secret "$S3_SECRET_KEY_FILE")
-AWS_DEFAULT_REGION=$S3_REGION
-AWS_REGION=$S3_REGION
-AWS_EC2_METADATA_DISABLED=true
-AWS_PAGER=
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_REGION AWS_EC2_METADATA_DISABLED AWS_PAGER
-
-aws_janitor() {
-    aws --endpoint-url "$S3_ENDPOINT" --region "$S3_REGION" "$@"
+storage_janitor() {
+    janitor_operation=$1
+    shift
+    hook2stream-storage-tool "$janitor_operation" \
+        --endpoint "$S3_ENDPOINT" \
+        --region "$S3_REGION" \
+        --bucket "$S3_BUCKET" \
+        --access-key-file "$S3_ACCESS_KEY_FILE" \
+        --secret-key-file "$S3_SECRET_KEY_FILE" \
+        "$@"
 }
 
 run_janitor() {
-    cutoff_epoch=$(($(date -u +%s) - MEDIA_MULTIPART_MAX_AGE_SECONDS))
-    key_marker=
-    upload_id_marker=
-    aborted=0
-
-    while :; do
-        page=$janitor_dir/multipart-page.json
-        if [ -n "$key_marker" ]; then
-            aws_janitor s3api list-multipart-uploads \
-                --bucket "$S3_BUCKET" \
-                --key-marker "$key_marker" \
-                --upload-id-marker "$upload_id_marker" \
-                --output json > "$page"
-        else
-            aws_janitor s3api list-multipart-uploads \
-                --bucket "$S3_BUCKET" \
-                --output json > "$page"
-        fi
-
-        jq -r --argjson cutoff "$cutoff_epoch" '
-            (.Uploads // [])[]
-            | select((.Initiated | fromdateiso8601) <= $cutoff)
-            | [.Key, .UploadId]
-            | @tsv
-        ' "$page" > "$janitor_dir/expired.tsv"
-        tab=$(printf '\t')
-        while IFS="$tab" read -r multipart_key multipart_upload_id; do
-            [ -n "$multipart_key" ] || continue
-            [ -n "$multipart_upload_id" ] || fail "Storj returned an empty multipart upload ID"
-            aws_janitor s3api abort-multipart-upload \
-                --bucket "$S3_BUCKET" \
-                --key "$multipart_key" \
-                --upload-id "$multipart_upload_id" >/dev/null
-            aborted=$((aborted + 1))
-        done < "$janitor_dir/expired.tsv"
-
-        is_truncated=$(jq -r '.IsTruncated // false' "$page")
-        [ "$is_truncated" = true ] || break
-        key_marker=$(jq -er '.NextKeyMarker | select(type == "string" and length > 0)' "$page") \
-            || fail "truncated multipart response omitted NextKeyMarker"
-        upload_id_marker=$(jq -er '.NextUploadIdMarker | select(type == "string" and length > 0)' "$page") \
-            || fail "truncated multipart response omitted NextUploadIdMarker"
-    done
+    janitor_result=$(storage_janitor abort-multipart-older-than \
+        --older-than-seconds "$MEDIA_MULTIPART_MAX_AGE_SECONDS") \
+        || fail "could not abort expired incomplete multipart uploads"
+    aborted=$(printf '%s\n' "$janitor_result" \
+        | jq -er '.aborted | select(type == "number" and . >= 0)') \
+        || fail "storage helper returned an invalid multipart result"
 
     marker_tmp=${MEDIA_JANITOR_SUCCESS_MARKER}.tmp
     date -u +%s > "$marker_tmp"

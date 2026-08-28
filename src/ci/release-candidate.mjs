@@ -134,7 +134,7 @@ function validateImageRepositories(images, owner) {
     WEB_IMAGE: new RegExp(`^ghcr\\.io/${escapedOwner}/hook2stream-web@sha256:`),
     POSTGRES_BACKUP_IMAGE: new RegExp(`^ghcr\\.io/${escapedOwner}/hook2stream-postgres-backup@sha256:`),
     CADDY_IMAGE: /^(?:docker\.io\/library\/)?caddy@sha256:/,
-    POSTGRES_IMAGE: /^(?:docker\.io\/library\/)?postgres@sha256:/,
+    POSTGRES_IMAGE: new RegExp(`^ghcr\\.io/${escapedOwner}/hook2stream-postgres@sha256:`),
     PGBOUNCER_IMAGE: /^(?:docker\.io\/)?edoburu\/pgbouncer@sha256:/,
     EGRESS_PROXY_IMAGE: /^(?:docker\.io\/)?ubuntu\/squid@sha256:/,
   };
