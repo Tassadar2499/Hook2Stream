@@ -73,6 +73,39 @@ hook2stream_validate_backing_metadata() {
     [ "$hook2stream_backing_allocated_bytes" -ge "$hook2stream_backing_size" ]
 }
 
+hook2stream_validate_active_swap_record() {
+    [ "$#" -eq 4 ] || return 1
+    hook2stream_swap_record=$1
+    hook2stream_swap_expected_path=$2
+    hook2stream_swap_nominal_bytes=$3
+    hook2stream_swap_page_bytes=$4
+
+    case "$hook2stream_swap_nominal_bytes:$hook2stream_swap_page_bytes" in
+        *[!0-9:]*|:*|*:|*:*:*) return 1 ;;
+    esac
+    [ "$hook2stream_swap_page_bytes" -gt 0 ] \
+        && [ "$hook2stream_swap_nominal_bytes" -gt "$hook2stream_swap_page_bytes" ] \
+        || return 1
+    hook2stream_swap_minimum_bytes=$((
+        hook2stream_swap_nominal_bytes - hook2stream_swap_page_bytes
+    ))
+
+    printf '%s\n' "$hook2stream_swap_record" | awk \
+        -v expected_path="$hook2stream_swap_expected_path" \
+        -v minimum_bytes="$hook2stream_swap_minimum_bytes" \
+        -v nominal_bytes="$hook2stream_swap_nominal_bytes" '
+        NF == 0 { next }
+        {
+            count++
+            if (NF != 2 || $1 != expected_path || $2 !~ /^[0-9]+$/ ||
+                $2 < minimum_bytes || $2 > nominal_bytes) {
+                invalid = 1
+            }
+        }
+        END { exit count == 1 && !invalid ? 0 : 1 }
+    '
+}
+
 hook2stream_luks_loop_from_status() {
     hook2stream_luks_status=$1
     printf '%s\n' "$hook2stream_luks_status" | awk '
