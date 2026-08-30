@@ -145,3 +145,7 @@ npm run generate:api --prefix src/web
 ```
 
 Commercial validation идёт параллельно с разработкой: три demo packs на треках NEЯСЫТЬ, первые self-service Mini pilots по $5 и минимум пять оплат до масштабирования тяжёлого render pipeline.
+
+## Лицензия
+
+Оригинальный код Hook2Stream распространяется по лицензии [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). Сторонние компоненты сохраняют условия своих собственных лицензий.
