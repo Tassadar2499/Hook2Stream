@@ -7,7 +7,12 @@ import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
 import { UploadManager } from "@/components/upload-manager";
-import { ApiRequestError, Release, apiFetch } from "@/lib/api";
+import {
+  ApiRequestError,
+  Release,
+  apiFetch,
+  isStaleMutationError,
+} from "@/lib/api";
 import { buildApiUrl } from "@/lib/api-url";
 import {
   type ArtworkEditSpec,
@@ -231,6 +236,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
     if (!artwork || !selectedAssetId || !etag) return;
     setBusy(true);
     setError(undefined);
+    setNotice(undefined);
     try {
       const token = await requireToken();
       const result = await apiFetch<ArtworkRevision>(
@@ -253,7 +259,31 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
       setEtag(result.etag ?? `"${result.data.version}"`);
       setNotice("Cover composition saved. Approve it when the crop and typography are final.");
     } catch (caught) {
-      setError(messageFor(caught, "Could not save the cover composition."));
+      if (isStaleMutationError(caught)) {
+        const unsavedAssetId = selectedAssetId;
+        const unsavedEdit: ArtworkEditSpec = {
+          ...edit,
+          palette: [...edit.palette],
+        };
+        try {
+          await load();
+          setError(
+            "This artwork changed in another tab. Your selected candidate and cover edits are still open against the latest version; review and save again.",
+          );
+        } catch (refreshError) {
+          setError(
+            messageFor(
+              refreshError,
+              "This artwork changed, but the latest version could not be loaded. Your selected candidate and cover edits remain open; reload before saving again.",
+            ),
+          );
+        } finally {
+          setSelectedAssetId(unsavedAssetId);
+          setEdit(unsavedEdit);
+        }
+      } else {
+        setError(messageFor(caught, "Could not save the cover composition."));
+      }
     } finally {
       setBusy(false);
     }
@@ -401,7 +431,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
 
           {artwork ? (
             <>
-              <fieldset className="mt-6 grid gap-4 lg:grid-cols-3">
+              <fieldset className="mt-6 grid gap-4 lg:grid-cols-3" disabled={busy}>
                 <legend className="sr-only">Cover candidates</legend>
                 {candidateAssetIds.map((assetId, index) => (
                   <label
@@ -495,7 +525,8 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                 <div>
                   <p className="eyebrow text-[var(--violet)]">Controlled editor</p>
                   <h2 className="display mt-2 text-4xl">Finish the official cover.</h2>
-                  <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                  <fieldset className="mt-6 grid gap-4 sm:grid-cols-2" disabled={busy}>
+                    <legend className="sr-only">Cover composition controls</legend>
                     {([
                       ["cropX", "Horizontal crop"],
                       ["cropY", "Vertical crop"],
@@ -560,7 +591,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                         ))}
                       </div>
                     </div>
-                  </div>
+                  </fieldset>
                   <div className="mt-7 flex flex-wrap gap-2">
                     <button className="button-secondary" type="button" onClick={saveSelection} disabled={busy || !selectedAssetId}>Save composition</button>
                     <button className="button-primary" type="button" onClick={approveCover} disabled={approvalActionDisabled}>{approvalActionLabel}</button>

@@ -141,7 +141,15 @@ test.describe.serial("real PostgreSQL, MinIO and worker journey", () => {
     await expect(firstCandidate).toBeVisible({ timeout: 240_000 });
     await firstCandidate.check();
     await page.getByRole("button", { name: "Save composition" }).click();
-    await expect(page.getByText(/Cover composition saved/i)).toBeVisible();
+    const artworkSaved = page.getByText(/Cover composition saved/i);
+    const staleArtwork = page.getByText(
+      /selected candidate and cover edits are still open against the latest version/i,
+    );
+    await expect(artworkSaved.or(staleArtwork)).toBeVisible();
+    if (await staleArtwork.isVisible()) {
+      await page.getByRole("button", { name: "Save composition" }).click();
+    }
+    await expect(artworkSaved).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Approve official cover" }),
     ).toBeEnabled();
