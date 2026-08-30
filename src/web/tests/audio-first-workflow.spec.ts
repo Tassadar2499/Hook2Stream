@@ -1,4 +1,4 @@
-import { expect, Page, test } from "@playwright/test";
+import { expect, Locator, Page, test } from "@playwright/test";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
 const uploadSessionId = "22222222-2222-4222-8222-222222222222";
@@ -8,6 +8,7 @@ const previewJobId = "55555555-5555-4555-8555-555555555555";
 const previewRetryJobId = "66666666-6666-4666-8666-666666666666";
 const artworkRevisionId = "77777777-7777-4777-8777-777777777777";
 const approvedCoverAssetId = "88888888-8888-4888-8888-888888888881";
+const alternateCoverAssetId = "88888888-8888-4888-8888-888888888885";
 const campaignBackgroundIds = [
   "88888888-8888-4888-8888-888888888882",
   "88888888-8888-4888-8888-888888888883",
@@ -398,6 +399,208 @@ test("a rights concurrency conflict keeps checkbox drafts and retries with the l
 
   await expect(page.getByText(/Rights confirmed/i)).toBeVisible();
   expect(ifMatchHeaders).toEqual(['"7"', '"8"']);
+});
+
+test("an artwork concurrency conflict keeps the selected candidate and complete edit draft", async ({
+  page,
+}) => {
+  let artworkVersion = 2;
+  const initialComposition = {
+    cropX: 0.5,
+    cropY: 0.5,
+    cropScale: 1,
+    focalX: 0.17,
+    focalY: 0.83,
+    palette: ["#121212", "#fffaf2", "#ff5c35"],
+    showArtist: true,
+    showTitle: true,
+    fontFamily: "sans",
+    artistFontSize: 112,
+    titleFontSize: 188,
+    textX: 0,
+    textY: 1,
+  };
+  const competingComposition = {
+    ...initialComposition,
+    cropX: 0.91,
+    cropY: 0.09,
+    palette: ["#000000", "#ffffff", "#ff0000"],
+    fontFamily: "serif",
+  };
+  const expectedDraft = {
+    ...initialComposition,
+    cropX: 0.21,
+    cropY: 0.82,
+    cropScale: 1.44,
+    palette: ["#123456", "#abcdef", "#fedcba"],
+    showArtist: false,
+    showTitle: false,
+    fontFamily: "monospace",
+    artistFontSize: 176,
+    titleFontSize: 244,
+    textX: 0.64,
+    textY: 0.28,
+  };
+  const ifMatchHeaders: string[] = [];
+  const submittedCompositions: unknown[] = [];
+  let artworkGetCalls = 0;
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (request.method() === "GET" && path === `/api/v1/releases/${projectId}`) {
+      return json(route, releaseResponse([]), 200, '"7"');
+    }
+    if (request.method() === "GET" && path === "/api/v1/billing/summary") {
+      return json(route, {
+        workspaceArtworkCredits: 0,
+        activeSubscription: null,
+        entitlements: [],
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/artwork`
+    ) {
+      artworkGetCalls += 1;
+      return json(route, {
+        revisionId: artworkRevisionId,
+        number: 1,
+        operationNumber: 1,
+        state: "review",
+        version: artworkVersion,
+        prompt: "Fixture artwork",
+        candidateAssetIds: [approvedCoverAssetId, alternateCoverAssetId],
+        backgroundAssetIds: [],
+        selectedAssetId: approvedCoverAssetId,
+        approvedCoverAssetId: null,
+        compositionJson: JSON.stringify(
+          artworkVersion === 2 ? initialComposition : competingComposition,
+        ),
+        approvedAt: null,
+      }, 200, `"${artworkVersion}"`);
+    }
+    if (
+      request.method() === "GET" &&
+      path.startsWith(`/api/v1/releases/${projectId}/assets/`) &&
+      path.endsWith("/view-url")
+    ) {
+      const assetId = path.split("/").at(-2)!;
+      return json(route, {
+        assetId,
+        url: `/api/v1/releases/${projectId}/assets/${assetId}/content`,
+        expiresAt: "2030-01-01T00:10:00Z",
+      });
+    }
+    if (
+      request.method() === "PUT" &&
+      path === `/api/v1/releases/${projectId}/artwork/selection`
+    ) {
+      ifMatchHeaders.push(request.headers()["if-match"]);
+      const payload = request.postDataJSON() as {
+        packRevisionId: string;
+        selectedAssetId: string;
+        compositionJson: string;
+      };
+      expect(payload.packRevisionId).toBe(artworkRevisionId);
+      expect(payload.selectedAssetId).toBe(alternateCoverAssetId);
+      submittedCompositions.push(JSON.parse(payload.compositionJson));
+
+      if (ifMatchHeaders.length === 1) {
+        artworkVersion = 3;
+        return problem(
+          route,
+          409,
+          "concurrency.conflict",
+          "The artwork changed while the composition was being saved.",
+        );
+      }
+      if (ifMatchHeaders.length === 3) {
+        return problem(
+          route,
+          409,
+          "artwork.selection_locked",
+          "The selected artwork can no longer be changed.",
+        );
+      }
+
+      artworkVersion = 4;
+      return json(route, {
+        revisionId: artworkRevisionId,
+        number: 2,
+        operationNumber: 1,
+        state: "review",
+        version: artworkVersion,
+        prompt: "Fixture artwork",
+        candidateAssetIds: [approvedCoverAssetId, alternateCoverAssetId],
+        backgroundAssetIds: [],
+        selectedAssetId: alternateCoverAssetId,
+        approvedCoverAssetId: null,
+        compositionJson: payload.compositionJson,
+        approvedAt: null,
+      }, 200, `"${artworkVersion}"`);
+    }
+    return problem(route, 404, "test.unhandled_route", `${request.method()} ${path}`);
+  });
+
+  await page.goto(`/releases/${projectId}/artwork`);
+  const alternateCandidate = page.getByRole("radio", { name: "Candidate 2" });
+  await alternateCandidate.check();
+  await setControlValue(page.getByLabel("Horizontal crop"), "0.21");
+  await setControlValue(page.getByLabel("Vertical crop"), "0.82");
+  await setControlValue(page.getByLabel("Crop scale"), "1.44");
+  await page.getByLabel("Font family").selectOption("monospace");
+  await setControlValue(page.getByLabel(/Artist size/), "176");
+  await setControlValue(page.getByLabel(/Title size/), "244");
+  await setControlValue(page.getByLabel(/Text position X/), "0.64");
+  await setControlValue(page.getByLabel(/Text position Y/), "0.28");
+  await page.getByLabel("Show artist").uncheck();
+  await page.getByLabel("Show title").uncheck();
+  await setControlValue(page.getByLabel("Backdrop color"), "#123456");
+  await setControlValue(page.getByLabel("Title color"), "#abcdef");
+  await setControlValue(page.getByLabel("Artist color"), "#fedcba");
+  await page.getByRole("button", { name: "Save composition" }).click();
+
+  await expect(
+    page.getByText(/selected candidate and cover edits are still open against the latest version/i),
+  ).toBeVisible();
+  await expect(alternateCandidate).toBeChecked();
+  await expect(page.getByLabel("Horizontal crop")).toHaveValue("0.21");
+  await expect(page.getByLabel("Vertical crop")).toHaveValue("0.82");
+  await expect(page.getByLabel("Crop scale")).toHaveValue("1.44");
+  await expect(page.getByLabel("Font family")).toHaveValue("monospace");
+  await expect(page.getByLabel(/Artist size/)).toHaveValue("176");
+  await expect(page.getByLabel(/Title size/)).toHaveValue("244");
+  await expect(page.getByLabel(/Text position X/)).toHaveValue("0.64");
+  await expect(page.getByLabel(/Text position Y/)).toHaveValue("0.28");
+  await expect(page.getByLabel("Show artist")).not.toBeChecked();
+  await expect(page.getByLabel("Show title")).not.toBeChecked();
+  await expect(page.getByLabel("Backdrop color")).toHaveValue("#123456");
+  await expect(page.getByLabel("Title color")).toHaveValue("#abcdef");
+  await expect(page.getByLabel("Artist color")).toHaveValue("#fedcba");
+  expect(ifMatchHeaders).toEqual(['"2"']);
+  expect(submittedCompositions).toEqual([expectedDraft]);
+
+  await page.getByRole("button", { name: "Save composition" }).click();
+
+  await expect(page.getByText(/Cover composition saved/i)).toBeVisible();
+  expect(ifMatchHeaders).toEqual(['"2"', '"3"']);
+  expect(submittedCompositions).toEqual([expectedDraft, expectedDraft]);
+
+  const artworkGetCallsAfterRecovery = artworkGetCalls;
+  await page.getByRole("button", { name: "Save composition" }).click();
+
+  await expect(
+    page.getByText("The selected artwork can no longer be changed."),
+  ).toBeVisible();
+  expect(artworkGetCalls).toBe(artworkGetCallsAfterRecovery);
+  expect(ifMatchHeaders).toEqual(['"2"', '"3"', '"4"']);
+  expect(submittedCompositions).toEqual([
+    expectedDraft,
+    expectedDraft,
+    expectedDraft,
+  ]);
 });
 
 test("approved artwork can retry missing campaign backgrounds once locally", async ({
@@ -823,6 +1026,20 @@ function laneNames() {
 
 function uploadCompletedVersion(audioState: string) {
   return audioState === "succeeded" ? 2 : 1;
+}
+
+async function setControlValue(locator: Locator, value: string) {
+  await locator.evaluate((element, nextValue) => {
+    const input = element as HTMLInputElement;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (!valueSetter) throw new Error("The input value setter is unavailable.");
+    valueSetter.call(input, nextValue);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
 }
 
 async function json(
