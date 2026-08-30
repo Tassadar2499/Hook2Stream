@@ -6,7 +6,12 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
-import { ApiRequestError, Release, apiFetch } from "@/lib/api";
+import {
+  ApiRequestError,
+  Release,
+  apiFetch,
+  isStaleMutationError,
+} from "@/lib/api";
 import { buildApiUrl } from "@/lib/api-url";
 import {
   TranscriptPhrase,
@@ -38,6 +43,14 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
   const phraseDraftDirtyRef = useRef(false);
   const importTextDirtyRef = useRef(false);
   const draftDirtyRef = useRef(false);
+
+  const refreshProjectVersion = useCallback(async () => {
+    const token = await getToken();
+    if (!token) throw new Error("No session token.");
+    const result = await apiFetch<Release>(`/api/v1/releases/${projectId}`, token);
+    setRelease(result.data);
+    setProjectEtag(result.etag ?? `"${result.data.version}"`);
+  }, [getToken, projectId]);
 
   function markPhraseDraftDirty(dirty: boolean) {
     phraseDraftDirtyRef.current = dirty;
@@ -288,7 +301,24 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
       setNotice("Transcript revision saved. Approval is still required.");
       await load();
     } catch (caught) {
-      setError(messageFor(caught, "Could not save the transcript."));
+      if (isStaleMutationError(caught)) {
+        setProjectEtag(undefined);
+        try {
+          await refreshProjectVersion();
+          setError(
+            "The release changed in another tab. Your transcript edits are still open against the latest version; review and save again.",
+          );
+        } catch (refreshError) {
+          setError(
+            messageFor(
+              refreshError,
+              "The release changed, but the latest version could not be loaded. Your transcript edits remain open; reload before saving again.",
+            ),
+          );
+        }
+      } else {
+        setError(messageFor(caught, "Could not save the transcript."));
+      }
     } finally {
       setSaving(false);
     }
@@ -417,7 +447,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button className="button-quiet" type="button" onClick={regenerate} disabled={saving}>Run transcription again</button>
-                  <button className="button-secondary" type="button" onClick={() => save()} disabled={saving || !phraseDraftDirty || validation.length > 0}>Save revision</button>
+                  <button className="button-secondary" type="button" onClick={() => save()} disabled={saving || !projectEtag || !phraseDraftDirty || validation.length > 0}>Save revision</button>
                   {transcript ? (
                     <button className="button-primary" type="button" onClick={approve} disabled={saving || draftDirty || validation.length > 0 || unresolvedWarnings > 0}>{draftDirty ? "Save before approval" : "Approve transcript"}</button>
                   ) : null}
@@ -548,7 +578,7 @@ export function TranscriptReviewClient({ projectId }: { projectId: string }) {
                   Choose UTF-8 .txt
                 </label>
                 <button className="button-secondary" type="button" onClick={importPreparedLyrics} disabled={!importText.trim()}>Create timed draft</button>
-                <button className="button-primary" type="button" onClick={() => save()} disabled={saving || draftSource !== "imported" || !phraseDraftDirty || phrases.length === 0 || validation.length > 0}>Save imported revision</button>
+                <button className="button-primary" type="button" onClick={() => save()} disabled={saving || !projectEtag || draftSource !== "imported" || !phraseDraftDirty || phrases.length === 0 || validation.length > 0}>Save imported revision</button>
               </div>
             </details>
           ) : null}

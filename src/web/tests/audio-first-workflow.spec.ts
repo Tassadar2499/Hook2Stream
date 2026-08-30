@@ -179,6 +179,227 @@ test("advanced Audio-first setup accepts a WAV master", async ({
   await expect(page.getByLabel("Master audio file")).toHaveCount(0);
 });
 
+test("a stale transcript save keeps the draft and refreshes the project version", async ({
+  page,
+}) => {
+  let projectVersion = 7;
+  let transcriptVersion = 4;
+  let savedPhrases = [
+    {
+      id: "99999999-9999-4999-8999-999999999991",
+      order: 0,
+      text: "Keep this unsaved correction",
+      startMilliseconds: 0,
+      endMilliseconds: 10_000,
+      confidence: 0.5,
+      warningAcknowledged: false,
+    },
+  ];
+  const ifMatchHeaders: string[] = [];
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (request.method() === "GET" && path === `/api/v1/releases/${projectId}`) {
+      return json(
+        route,
+        { ...releaseResponse([]), version: projectVersion },
+        200,
+        `"${projectVersion}"`,
+      );
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/transcript`
+    ) {
+      return json(route, {
+        revisionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        number: 1,
+        language: "en",
+        isInstrumental: false,
+        source: "generated",
+        state: "review",
+        phrases: savedPhrases,
+        approvedAt: null,
+        version: transcriptVersion,
+      }, 200, `"${transcriptVersion}"`);
+    }
+    if (
+      request.method() === "PUT" &&
+      path === `/api/v1/releases/${projectId}/transcript`
+    ) {
+      ifMatchHeaders.push(request.headers()["if-match"]);
+      const payload = request.postDataJSON() as {
+        phrases: typeof savedPhrases;
+      };
+      expect(payload.phrases[0]).toMatchObject({
+        text: "Unsaved cross-tab-safe correction",
+        warningAcknowledged: true,
+      });
+      if (ifMatchHeaders.length === 1) {
+        projectVersion = 8;
+        return problem(
+          route,
+          412,
+          "concurrency.precondition_failed",
+          "The release changed.",
+        );
+      }
+
+      savedPhrases = payload.phrases;
+      transcriptVersion = 5;
+      return json(route, {
+        revisionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        number: 2,
+        language: "en",
+        isInstrumental: false,
+        source: "manual",
+        state: "review",
+        phrases: savedPhrases,
+        approvedAt: null,
+        version: transcriptVersion,
+      }, 200, `"${transcriptVersion}"`);
+    }
+    return problem(route, 404, "test.unhandled_route", `${request.method()} ${path}`);
+  });
+
+  await page.goto(`/releases/${projectId}/transcript`);
+  const warning = page.getByLabel("Looks correct");
+  const phrase = page.getByRole("textbox", { name: "Phrase 1", exact: true });
+  await phrase.fill("Unsaved cross-tab-safe correction");
+  await warning.check();
+  await page.getByRole("button", { name: "Save revision" }).click();
+
+  await expect(
+    page.getByText(/transcript edits are still open against the latest version/i),
+  ).toBeVisible();
+  await expect(phrase).toHaveValue("Unsaved cross-tab-safe correction");
+  await expect(warning).toBeChecked();
+  await expect(page.getByRole("button", { name: "Save revision" })).toBeEnabled();
+  expect(ifMatchHeaders).toEqual(['"7"']);
+
+  await page.getByRole("button", { name: "Save revision" }).click();
+
+  await expect(page.getByText(/Transcript revision saved/i)).toBeVisible();
+  expect(ifMatchHeaders).toEqual(['"7"', '"8"']);
+});
+
+test("a rights concurrency conflict keeps checkbox drafts and retries with the latest version", async ({
+  page,
+}) => {
+  let projectVersion = 7;
+  let rightsSaved = false;
+  const ifMatchHeaders: string[] = [];
+
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (request.method() === "GET" && path === `/api/v1/releases/${projectId}`) {
+      return json(
+        route,
+        { ...releaseResponse([readyAudioAsset()]), version: projectVersion },
+        200,
+        `"${projectVersion}"`,
+      );
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/readiness`
+    ) {
+      return json(route, {
+        ready: rightsSaved,
+        missing: rightsSaved ? [] : ["rights"],
+        readyVisuals: 0,
+        hasAudio: true,
+        hasCover: false,
+        hasLyricsOrInstrumental: true,
+        hasRightsAttestation: rightsSaved,
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/workflow`
+    ) {
+      return json(route, workflowResponse("succeeded", "confirmRights"));
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/rights`
+    ) {
+      if (!rightsSaved) {
+        return problem(route, 404, "rights.not_found", "Rights are not confirmed.");
+      }
+      return json(route, {
+        id: "99999999-9999-4999-8999-999999999992",
+        ownsAudioRights: true,
+        ownsLyricsRights: true,
+        ownsVisualRights: true,
+        allowsExternalAiArtwork: true,
+        allowsExternalAiProcessing: true,
+        syntheticContentStatus: "none",
+        policyVersion: "external-ai-zdr-v1",
+        acceptedAt: "2030-01-01T00:00:00Z",
+        audioAssetId: uploadAssetId,
+        audioFingerprint: "c".repeat(64),
+        projectVersion,
+      });
+    }
+    if (
+      request.method() === "PUT" &&
+      path === `/api/v1/releases/${projectId}/rights`
+    ) {
+      ifMatchHeaders.push(request.headers()["if-match"]);
+      expect(request.postDataJSON()).toMatchObject({
+        ownsAudioRights: true,
+        ownsLyricsRights: true,
+        ownsVisualRights: true,
+        allowsExternalAiProcessing: true,
+      });
+      if (ifMatchHeaders.length === 1) {
+        projectVersion = 8;
+        return problem(
+          route,
+          409,
+          "concurrency.conflict",
+          "The release changed while rights were being saved.",
+        );
+      }
+
+      projectVersion = 9;
+      rightsSaved = true;
+      return json(route, { projectVersion }, 200, `"${projectVersion}"`);
+    }
+    return problem(route, 404, "test.unhandled_route", `${request.method()} ${path}`);
+  });
+
+  await page.goto(`/releases/${projectId}`);
+  const audio = page.getByLabel(/right to process this audio/i);
+  const lyrics = page.getByLabel(/right to use the lyrics/i);
+  const visuals = page.getByLabel(/right to use any visuals/i);
+  const externalAi = page.getByLabel(/allow audio, text and the visual brief/i);
+  await audio.check();
+  await lyrics.check();
+  await visuals.check();
+  await externalAi.check();
+  await page.getByRole("button", { name: "Save rights confirmation" }).click();
+
+  await expect(
+    page.getByText(/latest rights state is loaded; review it and save again/i),
+  ).toBeVisible();
+  await expect(audio).toBeChecked();
+  await expect(lyrics).toBeChecked();
+  await expect(visuals).toBeChecked();
+  await expect(externalAi).toBeChecked();
+  expect(ifMatchHeaders).toEqual(['"7"']);
+
+  await page.getByRole("button", { name: "Save rights confirmation" }).click();
+
+  await expect(page.getByText(/Rights confirmed/i)).toBeVisible();
+  expect(ifMatchHeaders).toEqual(['"7"', '"8"']);
+});
+
 test("approved artwork can retry missing campaign backgrounds once locally", async ({
   page,
 }) => {

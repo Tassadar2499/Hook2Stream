@@ -4,7 +4,13 @@ import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { UploadManager } from "@/components/upload-manager";
 import { StatusPanel } from "@/components/status-panel";
-import { ApiRequestError, Release, RightsAttestation, apiFetch } from "@/lib/api";
+import {
+  ApiRequestError,
+  Release,
+  RightsAttestation,
+  apiFetch,
+  isStaleMutationError,
+} from "@/lib/api";
 import { createWorkflowCheckpointFormState } from "@/lib/release-workflow-form-state";
 import { Workflow, laneOrder, titleCase } from "@/lib/workflow";
 import { useAppAuth } from "@/components/app-auth-provider";
@@ -76,7 +82,7 @@ export function ReleaseWorkflowHub({
       setNotice("Release details confirmed. Artwork can start after rights are saved.");
       await onRefresh();
     } catch (caught) {
-      if (caught instanceof ApiRequestError && caught.status === 412) {
+      if (isStaleMutationError(caught)) {
         await onRefresh();
         setError(
           "This release changed in another tab. The latest version is loaded; review the fields and save again.",
@@ -113,7 +119,7 @@ export function ReleaseWorkflowHub({
       setNotice("Rights confirmed. OpenRouter transcription, artwork and campaign generation may now run.");
       await onRefresh();
     } catch (caught) {
-      if (caught instanceof ApiRequestError && caught.status === 412) {
+      if (isStaleMutationError(caught)) {
         await onRefresh();
         setError(
           "This release changed in another tab. The latest rights state is loaded; review it and save again.",

@@ -6,7 +6,12 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/app-shell";
 import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
-import { ApiRequestError, Release, apiFetch } from "@/lib/api";
+import {
+  ApiRequestError,
+  Release,
+  apiFetch,
+  isStaleMutationError,
+} from "@/lib/api";
 import { buildApiUrl } from "@/lib/api-url";
 import {
   Campaign,
@@ -361,7 +366,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       setNotice("Hook revision saved. The campaign is being refreshed for the new timings.");
       await load();
     } catch (caught) {
-      if (caught instanceof ApiRequestError && caught.status === 412) {
+      if (isStaleMutationError(caught)) {
         const unsavedDrafts = hookDrafts;
         await load();
         setHookDrafts(unsavedDrafts);
@@ -430,7 +435,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
           hookId: selectedItem.hookId,
         } : current);
         setError("Template and hook are fixed for this campaign slot. Your other composition edits are still open.");
-      } else if (caught instanceof ApiRequestError && caught.status === 412) {
+      } else if (isStaleMutationError(caught)) {
         await load();
         setError(
           "This campaign changed in another tab. Your card edits are still open against the latest version; review and save again.",
@@ -473,7 +478,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       setNotice("Preview retry queued. This does not consume another free preview.");
       await load();
     } catch (caught) {
-      if (caught instanceof ApiRequestError && caught.status === 412) {
+      if (isStaleMutationError(caught)) {
         await load();
         setError(
           "The release changed before the retry was queued. The latest preview state is loaded; retry again if it is still failed.",
