@@ -86,6 +86,17 @@ assert(ci.includes("Build hardened Caddy acceptance dependency") &&
 assert(!ci.includes("deploy-staging:") && !ci.includes("environment: staging") && !ci.includes("STAGING_RECEIPT_SIGNING_KEY"),
   "main CI must stop after publishing the immutable candidate and must not deploy staging");
 const publishSection = ci.slice(ci.indexOf("  publish:"), ci.indexOf("  runtime-images:"));
+const expectedImagePublishPermissions = "    permissions:\n" +
+  "      contents: read\n" +
+  "      packages: write\n" +
+  "      id-token: write\n" +
+  "      attestations: write\n";
+const publishPermissions = publishSection.slice(
+  publishSection.indexOf("    permissions:\n"),
+  publishSection.indexOf("    strategy:\n"),
+);
+assert(publishPermissions === expectedImagePublishPermissions && !publishSection.includes("artifact-metadata:"),
+  "application image publication must grant only the permissions needed for GHCR and digest attestations");
 assert(!/name:\s*minio\b/.test(publishSection) && !publishSection.includes("MINIO_IMAGE"),
   "application publish must not publish or record a deployable MinIO image");
 assert(/^\s*-\s+name:\s*postgres\s*$/m.test(publishSection) && publishSection.includes("src/deploy/postgres/Dockerfile") &&
@@ -223,6 +234,54 @@ assert(runtimeScan.includes("        uses: anchore/scan-action@e1165082ffb1fe366
 assert(JSON.stringify(canonicalYamlChildKeys(runtimeScan, 10, "runtime scan")) ===
   JSON.stringify(expectedScanInputs),
   "runtime scan must use exactly the reviewed Anchore inputs");
+const expectedImageAttestationInputs = [
+  "create-storage-record",
+  "push-to-registry",
+  "subject-digest",
+  "subject-name",
+];
+const publishAttestation = yamlNamedListItem(publishSection, 6, "Attest exact published image digest");
+assert(publishAttestation.includes(
+  "        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1") &&
+  publishAttestation.includes("          subject-name: ${{ steps.image.outputs.repository }}") &&
+  publishAttestation.includes("          subject-digest: ${{ steps.build.outputs.digest }}") &&
+  publishAttestation.includes("          push-to-registry: true") &&
+  publishAttestation.includes("          create-storage-record: false") &&
+  JSON.stringify(canonicalYamlChildKeys(publishAttestation, 8, "application image attestation step")) ===
+    JSON.stringify(["uses", "with"]) &&
+  JSON.stringify(canonicalYamlChildKeys(publishAttestation, 10, "application image attestation")) ===
+    JSON.stringify(expectedImageAttestationInputs),
+  "application images must receive an exact pinned digest attestation without org-only storage records");
+assert(publishSection.indexOf("Scan exact published digest") <
+  publishSection.indexOf("Attest exact published image digest") &&
+  publishSection.indexOf("Attest exact published image digest") <
+  publishSection.indexOf("Record digest-pinned release reference"),
+  "application image attestations must be created only after the blocking digest scan");
+const runtimePermissions = runtimeSection.slice(
+  runtimeSection.indexOf("    permissions:\n"),
+  runtimeSection.indexOf("    strategy:\n"),
+);
+assert(runtimePermissions === expectedImagePublishPermissions && !runtimeSection.includes("artifact-metadata:"),
+  "runtime image publication must grant only the permissions needed for GHCR and digest attestations");
+const runtimeAttestation = yamlNamedListItem(runtimeSection, 6, "Attest exact published runtime digest");
+assert(runtimeAttestation.includes(
+  "        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1") &&
+  runtimeAttestation.includes("          subject-name: ${{ steps.image.outputs.repository }}") &&
+  runtimeAttestation.includes("          subject-digest: ${{ steps.build.outputs.digest }}") &&
+  runtimeAttestation.includes("          push-to-registry: true") &&
+  runtimeAttestation.includes("          create-storage-record: false") &&
+  JSON.stringify(canonicalYamlChildKeys(runtimeAttestation, 8, "runtime image attestation step")) ===
+    JSON.stringify(["uses", "with"]) &&
+  JSON.stringify(canonicalYamlChildKeys(runtimeAttestation, 10, "runtime image attestation")) ===
+    JSON.stringify(expectedImageAttestationInputs),
+  "runtime images must receive an exact pinned digest attestation without org-only storage records");
+assert(runtimeSection.indexOf("Scan exact published runtime digest") <
+  runtimeSection.indexOf("Attest exact published runtime digest") &&
+  runtimeSection.indexOf("Attest exact published runtime digest") <
+  runtimeSection.indexOf("Record runtime digest"),
+  "runtime image attestations must be created only after the blocking digest scan");
+assert((ci.match(/actions\/attest@a1948c3f048ba23858d222213b7c278aabede763/g) ?? []).length === 3,
+  "CI must contain exactly two image digest attestations and one release-candidate attestation");
 for (const repository of ["hook2stream-caddy", "hook2stream-pgbouncer", "hook2stream-egress-proxy"]) {
   assert(candidateBuilder.includes(repository), `${repository} must be enforced by the candidate repository allowlist`);
 }

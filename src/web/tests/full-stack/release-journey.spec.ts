@@ -113,7 +113,15 @@ test.describe.serial("real PostgreSQL, MinIO and worker journey", () => {
     await expect(warning).toBeVisible({ timeout: 240_000 });
     await warning.check();
     await page.getByRole("button", { name: "Save revision" }).click();
-    await expect(page.getByText(/Transcript revision saved/i)).toBeVisible();
+    const transcriptSaved = page.getByText(/Transcript revision saved/i);
+    const staleTranscript = page.getByText(
+      /Your transcript edits are still open against the latest version; review and save again/i,
+    );
+    await expect(transcriptSaved.or(staleTranscript)).toBeVisible();
+    if (await staleTranscript.isVisible()) {
+      await page.getByRole("button", { name: "Save revision" }).click();
+    }
+    await expect(transcriptSaved).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Approve transcript" }),
     ).toBeEnabled();

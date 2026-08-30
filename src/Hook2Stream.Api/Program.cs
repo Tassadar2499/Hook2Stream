@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.RateLimiting;
@@ -136,19 +137,44 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddRateLimiter(options =>
 {
+    const int authenticatedReadPermitLimit = 600;
+    const int authenticatedMutationPermitLimit = 120;
+    const int anonymousPermitLimit = 120;
+    const int windowSeconds = 60;
+
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = static (context, _) =>
+    {
+        var seconds = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter)
+            ? Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds))
+            : windowSeconds;
+        context.HttpContext.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+
+        return ValueTask.CompletedTask;
+    };
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
     {
-        var partition = context.User.FindFirst("sub")?.Value
-            ?? context.Connection.RemoteIpAddress?.ToString()
-            ?? "anonymous";
+        var subject = context.User.FindFirst("sub")?.Value;
+        var authenticated = context.User.Identity?.IsAuthenticated == true &&
+            !string.IsNullOrWhiteSpace(subject);
+        var authenticatedRead = authenticated &&
+            (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method));
+        var partition = authenticated
+            ? $"subject:{subject}:{(authenticatedRead ? "read" : "mutation")}"
+            : $"ip:{context.Connection.RemoteIpAddress?.ToString() ?? "anonymous"}";
         return RateLimitPartition.GetSlidingWindowLimiter(
             partition,
             _ => new SlidingWindowRateLimiterOptions
             {
-                PermitLimit = 120,
+                // The release workspace deliberately loads several independent views in parallel.
+                // Give authenticated reads headroom without relaxing mutation or anonymous limits.
+                PermitLimit = authenticatedRead
+                    ? authenticatedReadPermitLimit
+                    : authenticated
+                        ? authenticatedMutationPermitLimit
+                        : anonymousPermitLimit,
                 SegmentsPerWindow = 6,
-                Window = TimeSpan.FromMinutes(1),
+                Window = TimeSpan.FromSeconds(windowSeconds),
                 QueueLimit = 0,
                 AutoReplenishment = true
             });

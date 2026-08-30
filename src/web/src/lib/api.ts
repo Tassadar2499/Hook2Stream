@@ -42,6 +42,13 @@ export class ApiRequestError extends Error {
   }
 }
 
+export function isStaleMutationError(caught: unknown): caught is ApiRequestError {
+  return caught instanceof ApiRequestError && (
+    caught.status === 412 ||
+    (caught.status === 409 && caught.code === "concurrency.conflict")
+  );
+}
+
 export async function apiFetch<T>(
   path: string,
   token: string,
