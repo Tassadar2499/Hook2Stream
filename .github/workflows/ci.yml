@@ -26,6 +26,11 @@ jobs:
           client_root=/opt/hook2stream-storj-s3-client-v1-boto3-1.35.99-1feba5d7c2f0
           client_module="$client_root/lib/python3.12/site-packages/boto3/__init__.py"
 
+          # GitHub-hosted runners expose /opt as group/other-writable for
+          # preinstalled tool caches. Normalize the ephemeral boundary to the
+          # production Ubuntu contract before exercising the root installer.
+          sudo chown root:root /opt
+          sudo chmod 0755 /opt
           sudo /usr/bin/env \
             PIP_REQUIREMENT=/tmp/hook2stream-pip-requirement-must-not-be-read \
             /bin/sh "$installer"
