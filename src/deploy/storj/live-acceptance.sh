@@ -85,10 +85,10 @@ cleanup() {
     cleanup_status=$?
     trap - EXIT HUP INT TERM
     if [ "$media_object_created" = true ]; then
-        media_aws s3api delete-object --bucket "$media_bucket" --key "$media_key" >/dev/null 2>&1 || true
+        media_s3 s3api delete-object --bucket "$media_bucket" --key "$media_key" >/dev/null 2>&1 || true
     fi
     if [ -n "$multipart_upload_id" ]; then
-        media_aws s3api abort-multipart-upload \
+        media_s3 s3api abort-multipart-upload \
             --bucket "$media_bucket" --key "$multipart_key" --upload-id "$multipart_upload_id" \
             >/dev/null 2>&1 || true
     fi
@@ -106,8 +106,6 @@ backup_credentials=$acceptance_dir/backup-credentials
 printf '%s\n' \
     '[default]' \
     "region = $STORJ_S3_REGION" \
-    'request_checksum_calculation = when_required' \
-    'response_checksum_validation = when_required' \
     's3 =' \
     '    addressing_style = path' > "$STORJ_AWS_CONFIG_FILE"
 
@@ -118,8 +116,8 @@ storj_write_aws_credentials_file \
     "$BACKUP_S3_ACCESS_KEY_FILE" "$BACKUP_S3_SECRET_KEY_FILE" \
     "$backup_credentials" backup || fail "backup credential validation failed"
 
-media_aws() { storj_run_aws "$media_credentials" "$@"; }
-backup_aws() { storj_run_aws "$backup_credentials" "$@"; }
+media_s3() { storj_run_s3_client "$media_credentials" "$@"; }
+backup_s3() { storj_run_s3_client "$backup_credentials" "$@"; }
 storj_jq() {
     "$STORJ_ENV_BIN" -i \
         PATH="$STORJ_TRUSTED_PATH" HOME="$STORJ_OPERATOR_HOME" \
@@ -144,17 +142,17 @@ expect_forbidden_put() {
     forbidden_bucket=$2
     forbidden_key=$3
     case "$forbidden_role" in
-        media) forbidden_aws=media_aws ;;
-        backup) forbidden_aws=backup_aws ;;
+        media) forbidden_s3=media_s3 ;;
+        backup) forbidden_s3=backup_s3 ;;
         *) fail "unknown credential role ${forbidden_role}" ;;
     esac
     forbidden_error=$acceptance_dir/forbidden-put.stderr
-    if "$forbidden_aws" s3api put-object \
+    if "$forbidden_s3" s3api put-object \
         --bucket "$forbidden_bucket" \
         --key "$forbidden_key" \
         --body "$payload" \
         --metadata Object-Expires=+1h >/dev/null 2>"$forbidden_error"; then
-        "$forbidden_aws" s3api delete-object \
+        "$forbidden_s3" s3api delete-object \
             --bucket "$forbidden_bucket" --key "$forbidden_key" \
             >/dev/null 2>&1 || true
         fail "${forbidden_role} credential can write forbidden bucket ${forbidden_bucket}"
@@ -169,12 +167,12 @@ expect_forbidden_head() {
     forbidden_bucket=$2
     forbidden_key=$3
     case "$forbidden_role" in
-        media) forbidden_aws=media_aws ;;
-        backup) forbidden_aws=backup_aws ;;
+        media) forbidden_s3=media_s3 ;;
+        backup) forbidden_s3=backup_s3 ;;
         *) fail "unknown credential role ${forbidden_role}" ;;
     esac
     forbidden_error=$acceptance_dir/forbidden-head.stderr
-    if "$forbidden_aws" s3api head-object \
+    if "$forbidden_s3" s3api head-object \
         --bucket "$forbidden_bucket" --key "$forbidden_key" \
         >/dev/null 2>"$forbidden_error"; then
         fail "${forbidden_role} credential can read forbidden bucket ${forbidden_bucket}"
@@ -189,12 +187,12 @@ expect_forbidden_delete() {
     forbidden_bucket=$2
     forbidden_key=$3
     case "$forbidden_role" in
-        media) forbidden_aws=media_aws ;;
-        backup) forbidden_aws=backup_aws ;;
+        media) forbidden_s3=media_s3 ;;
+        backup) forbidden_s3=backup_s3 ;;
         *) fail "unknown credential role ${forbidden_role}" ;;
     esac
     forbidden_error=$acceptance_dir/forbidden-delete.stderr
-    if "$forbidden_aws" s3api delete-object \
+    if "$forbidden_s3" s3api delete-object \
         --bucket "$forbidden_bucket" --key "$forbidden_key" \
         >/dev/null 2>"$forbidden_error"; then
         fail "${forbidden_role} credential can delete from forbidden bucket ${forbidden_bucket}"
@@ -208,12 +206,12 @@ expect_forbidden_list() {
     forbidden_role=$1
     forbidden_bucket=$2
     case "$forbidden_role" in
-        media) forbidden_aws=media_aws ;;
-        backup) forbidden_aws=backup_aws ;;
+        media) forbidden_s3=media_s3 ;;
+        backup) forbidden_s3=backup_s3 ;;
         *) fail "unknown credential role ${forbidden_role}" ;;
     esac
     forbidden_error=$acceptance_dir/forbidden-list.stderr
-    if "$forbidden_aws" s3api list-objects-v2 \
+    if "$forbidden_s3" s3api list-objects-v2 \
         --bucket "$forbidden_bucket" --max-keys 1 \
         >/dev/null 2>"$forbidden_error"; then
         fail "${forbidden_role} credential can list forbidden bucket ${forbidden_bucket}"
@@ -224,7 +222,7 @@ expect_forbidden_list() {
 }
 
 contract=$acceptance_dir/storage-v1.json
-media_aws s3api get-object \
+media_s3 s3api get-object \
     --bucket "$media_bucket" --key .hook2stream/contracts/storage-v1.json "$contract" >/dev/null
 contract_sha256=$("$STORJ_SHA256SUM_BIN" "$contract")
 contract_sha256=${contract_sha256%% *}
@@ -234,45 +232,45 @@ contract_sha256=${contract_sha256%% *}
 payload=$acceptance_dir/payload
 range_body=$acceptance_dir/range
 printf '%s' hook2stream-storj-acceptance-v1 > "$payload"
-media_aws s3api put-object --bucket "$media_bucket" --key "$media_key" --body "$payload" >/dev/null
+media_s3 s3api put-object --bucket "$media_bucket" --key "$media_key" --body "$payload" >/dev/null
 media_object_created=true
-[ "$(media_aws s3api head-object --bucket "$media_bucket" --key "$media_key" --query ContentLength --output text)" = 31 ] \
+[ "$(media_s3 s3api head-object --bucket "$media_bucket" --key "$media_key" --query ContentLength --output text)" = 31 ] \
     || fail "media HEAD returned an unexpected length"
-media_aws s3api get-object \
+media_s3 s3api get-object \
     --bucket "$media_bucket" --key "$media_key" --range bytes=12-16 "$range_body" >/dev/null
 printf '%s' storj | "$STORJ_CMP_BIN" -s - "$range_body" \
     || fail "media Range returned unexpected bytes"
 
-multipart_upload_id=$(media_aws s3api create-multipart-upload \
+multipart_upload_id=$(media_s3 s3api create-multipart-upload \
     --bucket "$media_bucket" --key "$multipart_key" --query UploadId --output text)
 [ -n "$multipart_upload_id" ] && [ "$multipart_upload_id" != None ] \
     || fail "multipart create returned no upload ID"
 printf '%s' multipart-part > "$acceptance_dir/part"
-media_aws s3api upload-part \
+media_s3 s3api upload-part \
     --bucket "$media_bucket" --key "$multipart_key" --upload-id "$multipart_upload_id" \
     --part-number 1 --body "$acceptance_dir/part" >/dev/null
-media_aws s3api list-multipart-uploads --bucket "$media_bucket" --output json \
+media_s3 s3api list-multipart-uploads --bucket "$media_bucket" --output json \
     | storj_jq -e --arg key "$multipart_key" --arg uploadId "$multipart_upload_id" \
         'any((.Uploads // [])[]; .Key == $key and .UploadId == $uploadId)' >/dev/null \
     || fail "incomplete multipart upload was not listed"
-media_aws s3api abort-multipart-upload \
+media_s3 s3api abort-multipart-upload \
     --bucket "$media_bucket" --key "$multipart_key" --upload-id "$multipart_upload_id" >/dev/null
 multipart_upload_id=
 
-[ "$(backup_aws s3api get-bucket-versioning --bucket "$backup_bucket" --query Status --output text)" = Enabled ] \
+[ "$(backup_s3 s3api get-bucket-versioning --bucket "$backup_bucket" --query Status --output text)" = Enabled ] \
     || fail "backup bucket versioning is not enabled"
-backup_version_id=$(backup_aws s3api put-object \
+backup_version_id=$(backup_s3 s3api put-object \
     --bucket "$backup_bucket" --key "$backup_key" --body "$payload" \
     --query VersionId --output text)
 [ -n "$backup_version_id" ] && [ "$backup_version_id" != None ] \
     || fail "versioned backup PUT returned no VersionId"
-backup_aws s3api head-object \
+backup_s3 s3api head-object \
     --bucket "$backup_bucket" --key "$backup_key" --version-id "$backup_version_id" \
     >/dev/null || fail "backup writer cannot read its own versioned object"
-media_aws s3api list-objects-v2 \
+media_s3 s3api list-objects-v2 \
     --bucket "$media_bucket" --prefix .hook2stream-acceptance/ --max-keys 1 \
     >/dev/null || fail "media credential lacks required List permission"
-backup_aws s3api list-objects-v2 \
+backup_s3 s3api list-objects-v2 \
     --bucket "$backup_bucket" --prefix hook2stream/acceptance/ --max-keys 1 \
     >/dev/null || fail "backup credential lacks required List permission"
 expect_forbidden_delete backup "$backup_bucket" "$backup_key"
@@ -300,7 +298,7 @@ for forbidden_bucket in "$media_bucket" "$other_media_bucket" "$other_backup_buc
         ".hook2stream-acceptance/${DEPLOYMENT_ENVIRONMENT}/forbidden-backup-write-$$"
 done
 
-media_aws s3api delete-object --bucket "$media_bucket" --key "$media_key" >/dev/null
+media_s3 s3api delete-object --bucket "$media_bucket" --key "$media_key" >/dev/null
 media_object_created=false
 
 storj_require_private_anonymous_get \

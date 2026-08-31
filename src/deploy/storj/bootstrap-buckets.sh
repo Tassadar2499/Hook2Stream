@@ -15,6 +15,7 @@ storj_initialize_operator_runtime || fail "trusted operator runtime validation f
 
 : "${DEPLOYMENT_ENVIRONMENT:?DEPLOYMENT_ENVIRONMENT is required}"
 : "${STORJ_PROJECT_ID:?STORJ_PROJECT_ID is required}"
+: "${STORJ_ENCRYPTION_MODEL:?STORJ_ENCRYPTION_MODEL is required}"
 : "${STORJ_S3_ACCESS_KEY_FILE:?STORJ_S3_ACCESS_KEY_FILE is required}"
 : "${STORJ_S3_SECRET_KEY_FILE:?STORJ_S3_SECRET_KEY_FILE is required}"
 : "${STORJ_S3_ENDPOINT:=https://gateway.storjshare.io}"
@@ -41,6 +42,10 @@ esac
 [ "$STORJ_S3_ENDPOINT" = https://gateway.storjshare.io ] \
     || fail "the MVP bootstrap is pinned to https://gateway.storjshare.io"
 [ "$STORJ_S3_REGION" = global ] || fail "Storj signing region must be global"
+case "$STORJ_ENCRYPTION_MODEL" in
+    managed|self-managed) ;;
+    *) fail "STORJ_ENCRYPTION_MODEL must be managed or self-managed" ;;
+esac
 [ "$STORAGE_CONTRACT_KEY" = .hook2stream/contracts/storage-v1.json ] \
     || fail "storage contract key must remain canonical"
 storj_validate_credential_file "$STORJ_S3_ACCESS_KEY_FILE" 'bootstrap access key' \
@@ -77,8 +82,6 @@ bootstrap_credentials=$bootstrap_dir/aws-credentials
 printf '%s\n' \
     '[default]' \
     "region = $STORJ_S3_REGION" \
-    'request_checksum_calculation = when_required' \
-    'response_checksum_validation = when_required' \
     's3 =' \
     '    addressing_style = path' > "$STORJ_AWS_CONFIG_FILE"
 storj_write_aws_credentials_file \
@@ -87,7 +90,7 @@ storj_write_aws_credentials_file \
     "$bootstrap_credentials" \
     bootstrap || fail "operator credential validation failed"
 
-storj_aws() { storj_run_aws "$bootstrap_credentials" "$@"; }
+storj_s3() { storj_run_s3_client "$bootstrap_credentials" "$@"; }
 storj_jq() {
     "$STORJ_ENV_BIN" -i \
         PATH="$STORJ_TRUSTED_PATH" HOME="$STORJ_OPERATOR_HOME" \
@@ -99,7 +102,7 @@ ensure_bucket() {
     bucket_name=$1
     head_stdout=$bootstrap_dir/head-${bucket_name}.stdout
     head_stderr=$bootstrap_dir/head-${bucket_name}.stderr
-    if storj_aws s3api head-bucket --bucket "$bucket_name" \
+    if storj_s3 s3api head-bucket --bucket "$bucket_name" \
         >"$head_stdout" 2>"$head_stderr"; then
         [ ! -s "$head_stdout" ] \
             || fail "head-bucket returned unexpected output for ${bucket_name}"
@@ -115,56 +118,34 @@ ensure_bucket() {
         || fail "head-bucket failed without an exact AWS error for ${bucket_name}"
     storj_error_is_missing_bucket "$head_error_code" \
         || fail "head-bucket for ${bucket_name} failed with ${head_error_code}; refusing create"
-    storj_aws s3api create-bucket \
+    storj_s3 s3api create-bucket \
         --bucket "$bucket_name" \
         --create-bucket-configuration LocationConstraint=global-1 \
         --output json >/dev/null
-    storj_aws s3api head-bucket --bucket "$bucket_name" >/dev/null
+    storj_s3 s3api head-bucket --bucket "$bucket_name" >/dev/null
 }
 
 ensure_bucket "$media_bucket"
 ensure_bucket "$backup_bucket"
 
-media_versioning=$(storj_aws s3api get-bucket-versioning \
+media_versioning=$(storj_s3 s3api get-bucket-versioning \
     --bucket "$media_bucket" --output json \
     | storj_jq -r '.Status // "Disabled"')
 [ "$media_versioning" = Disabled ] \
     || fail "media bucket must remain unversioned (found ${media_versioning})"
-storj_aws s3api put-bucket-versioning \
+storj_s3 s3api put-bucket-versioning \
     --bucket "$backup_bucket" \
     --versioning-configuration Status=Enabled >/dev/null
-backup_versioning=$(storj_aws s3api get-bucket-versioning \
+backup_versioning=$(storj_s3 s3api get-bucket-versioning \
     --bucket "$backup_bucket" --output json \
     | storj_jq -r '.Status // "Disabled"')
 [ "$backup_versioning" = Enabled ] || fail "backup bucket versioning is not enabled"
-
-require_no_bucket_cors() {
-    cors_bucket=$1
-    cors_stdout=$bootstrap_dir/cors-${cors_bucket}.stdout
-    cors_stderr=$bootstrap_dir/cors-${cors_bucket}.stderr
-    if storj_aws s3api get-bucket-cors --bucket "$cors_bucket" \
-        >"$cors_stdout" 2>"$cors_stderr"; then
-        fail "${cors_bucket} unexpectedly has a CORS configuration"
-    else
-        cors_status=$?
-    fi
-    [ "$cors_status" -ne 0 ] || fail "get-bucket-cors failed without a failure status"
-    [ ! -s "$cors_stdout" ] \
-        || fail "failed get-bucket-cors returned output for ${cors_bucket}"
-    cors_error_code=$(storj_aws_error_code_from_file \
-        "$cors_stderr" GetBucketCors) \
-        || fail "get-bucket-cors failed without an exact AWS error for ${cors_bucket}"
-    storj_error_is_missing_cors "$cors_error_code" \
-        || fail "get-bucket-cors for ${cors_bucket} failed with ${cors_error_code}"
-}
-
-require_no_bucket_cors "$media_bucket"
-require_no_bucket_cors "$backup_bucket"
 
 contract_file=$bootstrap_dir/storage-v1.json
 storj_jq -S -n \
     --arg environment "$DEPLOYMENT_ENVIRONMENT" \
     --arg projectId "$STORJ_PROJECT_ID" \
+    --arg encryptionModel "$STORJ_ENCRYPTION_MODEL" \
     --arg mediaBucket "$media_bucket" \
     --arg backupBucket "$backup_bucket" \
     --argjson mediaThresholdGiB "$media_threshold_gib" \
@@ -175,6 +156,7 @@ storj_jq -S -n \
         provider: "storj",
         environment: $environment,
         projectId: $projectId,
+        encryptionModel: $encryptionModel,
         bucketLocation: "global-1",
         mediaBucket: $mediaBucket,
         backupBucket: $backupBucket,
@@ -187,7 +169,7 @@ storj_jq -S -n \
     }' > "$contract_file"
 contract_sha256=$("$STORJ_SHA256SUM_BIN" "$contract_file")
 contract_sha256=${contract_sha256%% *}
-storj_aws s3api put-object \
+storj_s3 s3api put-object \
     --bucket "$media_bucket" \
     --key "$STORAGE_CONTRACT_KEY" \
     --body "$contract_file" \

@@ -2,6 +2,12 @@
 # Shared fail-closed security and response parsing for operator-only Storj tools.
 
 STORJ_TRUSTED_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+STORJ_REQUIRED_BOTO3_VERSION=1.35.99
+STORJ_REQUIRED_BOTOCORE_VERSION=1.35.99
+STORJ_CLIENT_ROOT=/opt/hook2stream-storj-s3-client-v1-boto3-1.35.99-1feba5d7c2f0
+STORJ_PYTHON_BIN=$STORJ_CLIENT_ROOT/bin/python
+STORJ_S3_CLIENT_BIN=$STORJ_CLIENT_ROOT/storj-s3-client.py
+STORJ_S3_CLIENT_SHA256=1feba5d7c2f0ed9cf587ba14172b333caa96d36a0a42f0ab95bc20a8bce1817a
 
 # These four binaries are the trust bootstrap. They are fixed Ubuntu system
 # paths rather than PATH lookups; storj_initialize_operator_runtime validates
@@ -103,6 +109,112 @@ storj_resolve_trusted_tool() {
     printf '%s\n' "$storj_tool_canonical"
 }
 
+storj_first_unsafe_client_tree_entry() {
+    storj_tree_root=$1
+    storj_tree_expected_uid=$2
+    "$STORJ_FIND_BIN" "$storj_tree_root" -xdev ! -type l \
+        \( ! -uid "$storj_tree_expected_uid" -o -perm /022 \) \
+        -print -quit
+}
+
+storj_require_safe_client_tree() {
+    [ -d "$STORJ_CLIENT_ROOT" ] && [ ! -L "$STORJ_CLIENT_ROOT" ] \
+        || storj_security_error "pinned Storj client root is not a regular directory" \
+        || return 1
+    storj_require_safe_root_path "$STORJ_CLIENT_ROOT" directory || return 1
+    storj_require_safe_tool_ancestors "$STORJ_CLIENT_ROOT" || return 1
+
+    storj_unsafe_tree_entry=$(storj_first_unsafe_client_tree_entry \
+        "$STORJ_CLIENT_ROOT" 0) || return 1
+    [ -z "$storj_unsafe_tree_entry" ] \
+        || storj_security_error \
+            "pinned Storj client tree has unsafe ownership or mode: ${storj_unsafe_tree_entry}" \
+        || return 1
+    storj_unsafe_tree_type=$("$STORJ_FIND_BIN" "$STORJ_CLIENT_ROOT" -xdev \
+        ! \( -type d -o -type f -o -type l \) -print -quit) || return 1
+    [ -z "$storj_unsafe_tree_type" ] \
+        || storj_security_error \
+            "pinned Storj client tree contains an unsupported file type: ${storj_unsafe_tree_type}" \
+        || return 1
+
+    for storj_client_link in \
+        "$STORJ_CLIENT_ROOT/bin/python" \
+        "$STORJ_CLIENT_ROOT/bin/python3" \
+        "$STORJ_CLIENT_ROOT/bin/python3.12" \
+        "$STORJ_CLIENT_ROOT/lib64"; do
+        [ -L "$storj_client_link" ] \
+            || storj_security_error \
+                "pinned Storj client symlink contract is incomplete: ${storj_client_link}" \
+            || return 1
+        "$STORJ_FIND_BIN" "$storj_client_link" -maxdepth 0 -type l -uid 0 \
+            -print -quit | "$STORJ_GREP_BIN" -Fqx "$storj_client_link" \
+            || storj_security_error \
+                "pinned Storj client symlink is not root-owned: ${storj_client_link}" \
+            || return 1
+        storj_client_link_target=$($STORJ_READLINK_BIN -f -- "$storj_client_link") \
+            || storj_security_error \
+                "cannot canonicalize pinned Storj client symlink: ${storj_client_link}" \
+            || return 1
+        storj_require_safe_root_path "$storj_client_link_target" target || return 1
+        storj_require_safe_tool_ancestors "$storj_client_link_target" || return 1
+    done
+    storj_extra_client_link=$("$STORJ_FIND_BIN" "$STORJ_CLIENT_ROOT" -xdev \
+        -type l \
+        ! -path "$STORJ_CLIENT_ROOT/bin/python" \
+        ! -path "$STORJ_CLIENT_ROOT/bin/python3" \
+        ! -path "$STORJ_CLIENT_ROOT/bin/python3.12" \
+        ! -path "$STORJ_CLIENT_ROOT/lib64" \
+        -print -quit) || return 1
+    [ -z "$storj_extra_client_link" ] \
+        || storj_security_error \
+            "pinned Storj client tree contains an unexpected symlink: ${storj_extra_client_link}" \
+        || return 1
+}
+
+storj_require_safe_python_link() {
+    [ -e "$STORJ_PYTHON_BIN" ] \
+        || storj_security_error "pinned Storj Python is missing: ${STORJ_PYTHON_BIN}" \
+        || return 1
+    storj_require_safe_tool_ancestors "$STORJ_PYTHON_BIN" || return 1
+    storj_python_canonical=$($STORJ_READLINK_BIN -f -- "$STORJ_PYTHON_BIN") \
+        || storj_security_error "cannot canonicalize pinned Storj Python" \
+        || return 1
+    [ -f "$storj_python_canonical" ] && [ -x "$storj_python_canonical" ] \
+        || storj_security_error "pinned Storj Python target is not executable" \
+        || return 1
+    storj_require_safe_root_path "$storj_python_canonical" tool || return 1
+    storj_require_safe_tool_ancestors "$storj_python_canonical" || return 1
+}
+
+storj_require_compatible_s3_client() {
+    storj_client_actual_sha=$($STORJ_SHA256SUM_BIN "$STORJ_S3_CLIENT_BIN") \
+        || storj_security_error "could not hash the pinned Storj S3 client" \
+        || return 1
+    storj_client_actual_sha=${storj_client_actual_sha%% *}
+    [ "$storj_client_actual_sha" = "$STORJ_S3_CLIENT_SHA256" ] \
+        || storj_security_error "pinned Storj S3 client digest mismatch" \
+        || return 1
+    storj_client_version_output=$(
+        "$STORJ_ENV_BIN" -i \
+            PATH="$STORJ_TRUSTED_PATH" \
+            HOME=/nonexistent \
+            LC_ALL=C LANG=C \
+            PYTHONNOUSERSITE=1 \
+            "$STORJ_PYTHON_BIN" -I -E -s \
+            "$STORJ_S3_CLIENT_BIN" --self-check 2>&1
+    ) || {
+        storj_security_error "pinned Storj S3 client self-check failed"
+        return 1
+    }
+    [ "$storj_client_version_output" = \
+        "hook2stream-storj-s3/1 boto3/${STORJ_REQUIRED_BOTO3_VERSION} botocore/${STORJ_REQUIRED_BOTOCORE_VERSION} Python/3.12" ] \
+        || {
+            storj_security_error \
+                "Storj requires the pinned boto3/${STORJ_REQUIRED_BOTO3_VERSION} and botocore/${STORJ_REQUIRED_BOTOCORE_VERSION} client"
+            return 1
+        }
+}
+
 storj_initialize_operator_runtime() {
     storj_reject_inherited_code_environment || return 1
 
@@ -121,15 +233,23 @@ storj_initialize_operator_runtime() {
 
     STORJ_OPERATOR_UID=$($STORJ_ID_BIN -u) || return 1
     STORJ_AWK_BIN=$(storj_resolve_trusted_tool awk) || return 1
-    STORJ_AWS_BIN=$(storj_resolve_trusted_tool aws) || return 1
     STORJ_CMP_BIN=$(storj_resolve_trusted_tool cmp) || return 1
     STORJ_CURL_BIN=$(storj_resolve_trusted_tool curl) || return 1
+    STORJ_FIND_BIN=$(storj_resolve_trusted_tool find) || return 1
     STORJ_GREP_BIN=$(storj_resolve_trusted_tool grep) || return 1
     STORJ_JQ_BIN=$(storj_resolve_trusted_tool jq) || return 1
     STORJ_MKDIR_BIN=$(storj_resolve_trusted_tool mkdir) || return 1
     STORJ_MKTEMP_BIN=$(storj_resolve_trusted_tool mktemp) || return 1
     STORJ_RM_BIN=$(storj_resolve_trusted_tool rm) || return 1
     STORJ_SHA256SUM_BIN=$(storj_resolve_trusted_tool sha256sum) || return 1
+    storj_require_safe_client_tree || return 1
+    storj_require_safe_python_link || return 1
+    [ -f "$STORJ_S3_CLIENT_BIN" ] && [ -x "$STORJ_S3_CLIENT_BIN" ] \
+        || storj_security_error "pinned Storj S3 client is unavailable" \
+        || return 1
+    storj_require_safe_root_path "$STORJ_S3_CLIENT_BIN" tool || return 1
+    storj_require_safe_tool_ancestors "$STORJ_S3_CLIENT_BIN" || return 1
+    storj_require_compatible_s3_client || return 1
 }
 
 storj_validate_credential_file() {
@@ -274,10 +394,6 @@ storj_error_is_missing_bucket() {
     esac
 }
 
-storj_error_is_missing_cors() {
-    [ "$1" = NoSuchCORSConfiguration ]
-}
-
 storj_error_is_permission_denied() {
     case "$1" in
         AccessDenied|Forbidden|403) return 0 ;;
@@ -294,9 +410,23 @@ storj_require_permission_denied_error() {
     storj_error_is_permission_denied "$storj_permission_error_code"
 }
 
-storj_run_aws() {
+storj_run_s3_client() {
     storj_credentials_file=$1
     shift
+    [ "${1:-}" = s3api ] || {
+        storj_security_error "only the fixed Storj s3api command surface is allowed"
+        return 1
+    }
+    case "${2:-}" in
+        abort-multipart-upload|create-bucket|create-multipart-upload|delete-object|\
+        get-bucket-versioning|get-object|head-bucket|head-object|\
+        list-multipart-uploads|list-objects-v2|put-bucket-versioning|put-object|\
+        upload-part) ;;
+        *)
+            storj_security_error "Storj S3 operation is outside the fixed allowlist"
+            return 1
+            ;;
+    esac
     "$STORJ_ENV_BIN" -i \
         PATH="$STORJ_TRUSTED_PATH" \
         HOME="$STORJ_OPERATOR_HOME" \
@@ -306,8 +436,9 @@ storj_run_aws() {
         AWS_DEFAULT_REGION="$STORJ_S3_REGION" \
         AWS_REGION="$STORJ_S3_REGION" \
         AWS_EC2_METADATA_DISABLED=true \
-        AWS_PAGER= \
-        "$STORJ_AWS_BIN" \
+        PYTHONNOUSERSITE=1 \
+        "$STORJ_PYTHON_BIN" -I -E -s \
+        "$STORJ_S3_CLIENT_BIN" \
         --endpoint-url "$STORJ_S3_ENDPOINT" --region "$STORJ_S3_REGION" "$@"
 }
 

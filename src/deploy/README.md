@@ -96,21 +96,30 @@ hours; temporary `staging/` H2SE data and manifest share a 24-hour absolute TTL.
 
 ## Storj operator bootstrap
 
-Staging and production use different Storj Standard/global projects and
-different escrowed encryption passphrases. Their fixed private buckets are:
+Staging and production use different Storj Standard/global projects. Before
+creating either project, record an explicit, irreversible encryption-model
+decision. Managed encryption is recommended for the MVP because newly created
+Self-Managed projects cannot use Storj exhaustive S3 listing; H2SE and age still
+ensure Storj receives only ciphertext. Self-Managed remains available only with
+a distinct escrowed passphrase per environment and live proof that all required
+list operations work. Their fixed private buckets are:
 
 | Environment | Media | PostgreSQL backup |
 |---|---|---|
 | staging | `hook2stream-com-staging-media` | `hook2stream-com-staging-pg-backups` |
 | production | `hook2stream-com-production-media` | `hook2stream-com-production-pg-backups` |
 
-Media is unversioned and has no CORS; backup is versioned. The operating
-thresholds are 35/160 GiB media and 10/30 GiB backup. Follow
+Media is unversioned and browser S3 access/CORS stay disabled; backup is
+versioned. Storj bucket CORS operations are unsupported and must not be called.
+The operating thresholds are 35/160 GiB media and 10/30 GiB backup. Follow
 [`storj/README.md`](storj/README.md) to derive role-scoped grants, bootstrap the
 buckets and private storage marker, and run live acceptance. Full project,
-bootstrap/root, restore-read grants, and project encryption passphrases remain
-off every VPS and outside GitHub. Only runtime media, no-Delete backup writer,
-and the marker digest reach their corresponding app environment.
+restore-read grants, any Self-Managed project passphrases, and the temporary
+bootstrap credential remain off every VPS and outside GitHub. Revoke the
+temporary bootstrap credential after live acceptance. Only runtime media,
+no-Delete backup writer, and the marker digest reach their corresponding app
+environment. Storj's 30-day minimum object charge and 50-kB minimum billable
+object size apply even when shorter TTLs enforce the MVP retention contract.
 
 ## Servers.Guru hosts and encrypted mount
 

@@ -92,6 +92,7 @@ jq -e \
         .provider == "storj" and
         .environment == $environment and
         (.projectId | type == "string" and length > 0) and
+        (.encryptionModel == "managed" or .encryptionModel == "self-managed") and
         .mediaBucket == $mediaBucket and
         .backupBucket == $backupBucket and
         .bucketLocation == "global-1" and

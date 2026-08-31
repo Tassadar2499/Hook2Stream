@@ -19,6 +19,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify pinned Storj operator client installation boundary
+        shell: bash
+        run: |
+          installer=src/deploy/storj/install-compatible-s3-client.sh
+          client_root=/opt/hook2stream-storj-s3-client-v1-boto3-1.35.99-1feba5d7c2f0
+          client_module="$client_root/lib/python3.12/site-packages/boto3/__init__.py"
+
+          sudo /usr/bin/env \
+            PIP_REQUIREMENT=/tmp/hook2stream-pip-requirement-must-not-be-read \
+            /bin/sh "$installer"
+          sudo /bin/sh "$installer"
+          sudo chmod 0664 "$client_module"
+          if sudo /bin/sh "$installer"; then
+            echo "Storj installer accepted writable dependency drift" >&2
+            exit 1
+          fi
+          sudo chmod 0644 "$client_module"
+          sudo /bin/sh "$installer"
+
       - name: Build hardened PostgreSQL integration dependency
         run: docker build --file src/deploy/postgres/Dockerfile --tag hook2stream-postgres:ci .
 

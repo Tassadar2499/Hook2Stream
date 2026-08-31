@@ -22,22 +22,24 @@ type fakeMultipartClient struct {
 	listError  error
 	abortError error
 	listCalls  int
+	listInputs []*s3.ListMultipartUploadsInput
 	aborted    []string
 }
 
 func (client *fakeMultipartClient) ListMultipartUploads(
 	_ context.Context,
-	_ *s3.ListMultipartUploadsInput,
+	input *s3.ListMultipartUploadsInput,
 	_ ...func(*s3.Options),
 ) (*s3.ListMultipartUploadsOutput, error) {
+	client.listInputs = append(client.listInputs, input)
+	client.listCalls++
 	if client.listError != nil {
 		return nil, client.listError
 	}
-	if client.listCalls >= len(client.pages) {
+	if client.listCalls > len(client.pages) {
 		return &s3.ListMultipartUploadsOutput{}, nil
 	}
-	page := client.pages[client.listCalls]
-	client.listCalls++
+	page := client.pages[client.listCalls-1]
 	return page, nil
 }
 
@@ -190,27 +192,18 @@ func TestSingleRangePattern(t *testing.T) {
 	}
 }
 
-func TestAbortExpiredMultipartUploadsPaginatesAndAbortsOnlyExpired(t *testing.T) {
+func TestAbortExpiredMultipartUploadsUsesStorjSinglePageAndAbortsOnlyExpired(t *testing.T) {
 	cutoff := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	old := cutoff.Add(-time.Second)
 	boundary := cutoff
 	newUpload := cutoff.Add(time.Second)
-	client := &fakeMultipartClient{pages: []*s3.ListMultipartUploadsOutput{
-		{
-			IsTruncated:        aws.Bool(true),
-			NextKeyMarker:      aws.String("next-key"),
-			NextUploadIdMarker: aws.String("next-upload"),
-			Uploads: []types.MultipartUpload{
-				{Key: aws.String("old"), UploadId: aws.String("old-id"), Initiated: &old},
-				{Key: aws.String("new"), UploadId: aws.String("new-id"), Initiated: &newUpload},
-			},
+	client := &fakeMultipartClient{pages: []*s3.ListMultipartUploadsOutput{{
+		Uploads: []types.MultipartUpload{
+			{Key: aws.String("old"), UploadId: aws.String("old-id"), Initiated: &old},
+			{Key: aws.String("new"), UploadId: aws.String("new-id"), Initiated: &newUpload},
+			{Key: aws.String("boundary"), UploadId: aws.String("boundary-id"), Initiated: &boundary},
 		},
-		{
-			Uploads: []types.MultipartUpload{
-				{Key: aws.String("boundary"), UploadId: aws.String("boundary-id"), Initiated: &boundary},
-			},
-		},
-	}}
+	}}}
 
 	aborted, err := abortExpiredMultipartUploads(
 		context.Background(),
@@ -224,8 +217,12 @@ func TestAbortExpiredMultipartUploadsPaginatesAndAbortsOnlyExpired(t *testing.T)
 	if aborted != 2 {
 		t.Fatalf("aborted = %d, want 2", aborted)
 	}
-	if client.listCalls != 2 {
-		t.Fatalf("list calls = %d, want 2", client.listCalls)
+	if client.listCalls != 1 {
+		t.Fatalf("list calls = %d, want 1", client.listCalls)
+	}
+	input := client.listInputs[0]
+	if aws.ToInt32(input.MaxUploads) != 1000 || input.KeyMarker != nil || input.UploadIdMarker != nil {
+		t.Fatalf("unsafe Storj list input: %#v", input)
 	}
 	if got := strings.Join(client.aborted, ","); got != "old:old-id,boundary:boundary-id" {
 		t.Fatalf("aborted uploads = %q", got)
@@ -264,33 +261,23 @@ func TestAbortExpiredMultipartUploadsFailsClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("missing-pagination-markers", func(t *testing.T) {
+	t.Run("truncated-page", func(t *testing.T) {
 		client := &fakeMultipartClient{pages: []*s3.ListMultipartUploadsOutput{{
 			IsTruncated: aws.Bool(true),
+			Uploads: []types.MultipartUpload{
+				{Key: aws.String("old"), UploadId: aws.String("old-id"), Initiated: &old},
+			},
 		}}}
 		if _, err := abortExpiredMultipartUploads(
 			context.Background(), client, "bucket", cutoff,
-		); err == nil || !strings.Contains(err.Error(), "omitted pagination markers") {
-			t.Fatalf("pagination marker error = %v", err)
+		); err == nil || !strings.Contains(err.Error(), "more than 1000") {
+			t.Fatalf("truncated page error = %v", err)
 		}
-	})
-
-	t.Run("duplicate-pagination-markers", func(t *testing.T) {
-		page := func() *s3.ListMultipartUploadsOutput {
-			return &s3.ListMultipartUploadsOutput{
-				IsTruncated:        aws.Bool(true),
-				NextKeyMarker:      aws.String("same-key"),
-				NextUploadIdMarker: aws.String("same-upload"),
-			}
+		if len(client.aborted) != 0 {
+			t.Fatalf("truncated page caused partial cleanup: %v", client.aborted)
 		}
-		client := &fakeMultipartClient{pages: []*s3.ListMultipartUploadsOutput{page(), page()}}
-		if _, err := abortExpiredMultipartUploads(
-			context.Background(), client, "bucket", cutoff,
-		); err == nil || !strings.Contains(err.Error(), "duplicate multipart pagination markers") {
-			t.Fatalf("duplicate pagination error = %v", err)
-		}
-		if client.listCalls != 2 {
-			t.Fatalf("duplicate markers caused %d list calls, want 2", client.listCalls)
+		if client.listCalls != 1 {
+			t.Fatalf("truncated page caused %d list calls, want 1", client.listCalls)
 		}
 	})
 

@@ -415,44 +415,39 @@ func abortExpiredMultipartUploads(
 	bucket string,
 	cutoff time.Time,
 ) (int, error) {
-	paginator := s3.NewListMultipartUploadsPaginator(client, &s3.ListMultipartUploadsInput{
-		Bucket: aws.String(bucket),
+	// Storj Gateway-MT does not support UploadIdMarker or
+	// NextUploadIdMarker. Request its documented maximum single page and refuse
+	// a truncated response rather than partially cleaning an unknowable set.
+	page, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket:     aws.String(bucket),
+		MaxUploads: aws.Int32(1000),
 	})
+	if err != nil {
+		return 0, fmt.Errorf("list multipart uploads: %w", err)
+	}
+	if aws.ToBool(page.IsTruncated) {
+		return 0, errors.New("Storj returned more than 1000 incomplete multipart uploads; refusing unsupported partial cleanup")
+	}
+
+	for _, upload := range page.Uploads {
+		if aws.ToString(upload.Key) == "" || aws.ToString(upload.UploadId) == "" || upload.Initiated == nil {
+			return 0, errors.New("S3 returned incomplete multipart metadata")
+		}
+	}
+
 	aborted := 0
-	seenPaginationMarkers := make(map[string]struct{})
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("list multipart uploads: %w", err)
+	for _, upload := range page.Uploads {
+		if upload.Initiated.After(cutoff) {
+			continue
 		}
-		if aws.ToBool(page.IsTruncated) {
-			nextKeyMarker := aws.ToString(page.NextKeyMarker)
-			nextUploadIDMarker := aws.ToString(page.NextUploadIdMarker)
-			if nextKeyMarker == "" || nextUploadIDMarker == "" {
-				return 0, errors.New("truncated multipart response omitted pagination markers")
-			}
-			paginationMarker := nextKeyMarker + "\x00" + nextUploadIDMarker
-			if _, alreadySeen := seenPaginationMarkers[paginationMarker]; alreadySeen {
-				return 0, errors.New("S3 returned duplicate multipart pagination markers")
-			}
-			seenPaginationMarkers[paginationMarker] = struct{}{}
+		if _, err := client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucket),
+			Key:      upload.Key,
+			UploadId: upload.UploadId,
+		}); err != nil {
+			return 0, fmt.Errorf("abort expired multipart upload: %w", err)
 		}
-		for _, upload := range page.Uploads {
-			if aws.ToString(upload.Key) == "" || aws.ToString(upload.UploadId) == "" || upload.Initiated == nil {
-				return 0, errors.New("S3 returned incomplete multipart metadata")
-			}
-			if upload.Initiated.After(cutoff) {
-				continue
-			}
-			if _, err := client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-				Bucket:   aws.String(bucket),
-				Key:      upload.Key,
-				UploadId: upload.UploadId,
-			}); err != nil {
-				return 0, fmt.Errorf("abort expired multipart upload: %w", err)
-			}
-			aborted++
-		}
+		aborted++
 	}
 
 	return aborted, nil
