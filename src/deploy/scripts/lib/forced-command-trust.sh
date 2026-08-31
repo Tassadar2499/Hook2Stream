@@ -68,9 +68,8 @@ hook2stream_validate_ghcr_pull_auth() {
         ($credential | startswith($username + ":")) and
         ($credential | length) > (($username | length) + 1) and
         (($credential | split(":")) | length) == 2 and
-        ($credential | test("[\\r\\n\\u0000]") | not))
+        ($credential | test("[\r\n\u0000]") | not))
        )
-      )
     ' "$hook2stream_registry_config" >/dev/null 2>&1 || return 1
     hook2stream_registry_actual_sha256=$(jq -jr '.auths["ghcr.io"].auth' \
         "$hook2stream_registry_config" | sha256sum | awk '{ print $1 }') \

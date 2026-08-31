@@ -12,43 +12,8 @@ fail_test() {
 scratch=$(mktemp -d)
 cleanup() { rm -rf "$scratch"; }
 trap cleanup EXIT HUP INT TERM
-mkdir "$scratch/bin"
-cat > "$scratch/bin/jq" <<'EOF'
-#!/usr/bin/env node
-const fs = require("fs");
-const args = process.argv.slice(2);
-const path = args.at(-1);
-let parsed;
-try { parsed = JSON.parse(fs.readFileSync(path, "utf8")); } catch { process.exit(1); }
-const auth = parsed?.auths?.["ghcr.io"]?.auth;
-if (args.includes("-jr")) {
-  if (typeof auth !== "string") process.exit(1);
-  process.stdout.write(auth);
-  process.exit(0);
-}
-const usernameIndex = args.indexOf("--arg");
-const username = usernameIndex >= 0 && args[usernameIndex + 1] === "username"
-  ? args[usernameIndex + 2] : "";
-const exact = parsed && Object.keys(parsed).length === 1 &&
-  Object.keys(parsed.auths ?? {}).length === 1 &&
-  Object.keys(parsed.auths?.["ghcr.io"] ?? {}).length === 1 &&
-  typeof auth === "string" && /^[A-Za-z0-9+/]+={0,2}$/.test(auth);
-let credential = "";
-if (exact) {
-  try {
-    credential = Buffer.from(auth, "base64").toString("utf8");
-    if (Buffer.from(credential, "utf8").toString("base64") !== auth) process.exit(1);
-  } catch { process.exit(1); }
-}
-const valid = exact && credential.startsWith(`${username}:`) &&
-  Buffer.from(credential, "utf8").toString("base64") === auth &&
-  credential.length > username.length + 1 && credential.split(":").length === 2 &&
-  !/[\r\n\0]/.test(credential);
-process.exit(valid ? 0 : 1);
-EOF
-chmod 0755 "$scratch/bin/jq"
-PATH=$scratch/bin:$PATH
-export PATH
+command -v jq >/dev/null 2>&1 \
+    || fail_test "real jq is required to validate registry credential semantics"
 owner_group=$(id -u):$(id -g)
 auth_dir=$scratch/registry-auth
 username=hook2stream-staging-pull
@@ -79,6 +44,43 @@ auth_sha256() {
 }
 write_config
 write_identity
+
+# Exercise jq's actual string and regular-expression semantics. A doubled jq
+# escape in the control-byte character class treats the letters r, n, and u
+# (and digits from u0000) as forbidden ordinary characters. Keep those
+# characters in the valid fixture, and separately prove that the three actual
+# control bytes remain rejected.
+valid_encoded_auth=$encoded_auth
+for prohibited_control_byte in carriage-return line-feed nul; do
+    case "$prohibited_control_byte" in
+        carriage-return)
+            encoded_auth=$(
+                { printf '%s' "$username:fixture"; printf '\r'; printf '%s' token; } \
+                    | base64 | tr -d '\n'
+            )
+            ;;
+        line-feed)
+            encoded_auth=$(
+                { printf '%s' "$username:fixture"; printf '\n'; printf '%s' token; } \
+                    | base64 | tr -d '\n'
+            )
+            ;;
+        nul)
+            encoded_auth=$(
+                { printf '%s' "$username:fixture"; printf '\000'; printf '%s' token; } \
+                    | base64 | tr -d '\n'
+            )
+            ;;
+    esac
+    write_config
+    if hook2stream_validate_ghcr_pull_auth \
+        "$auth_dir" "$username" "$(auth_sha256)" "$owner_group"; then
+        fail_test "real jq accepted a credential containing $prohibited_control_byte"
+    fi
+done
+encoded_auth=$valid_encoded_auth
+write_config
+
 identity_sha256=$(sha256sum "$auth_dir/identity.attestation" | awk '{ print $1 }')
 
 hook2stream_validate_ghcr_pull_auth \
