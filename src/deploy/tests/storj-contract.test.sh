@@ -30,9 +30,22 @@ grep -Fq 'versioning-configuration Status=Enabled' "$bootstrap" \
     || fail "bootstrap does not enable backup versioning"
 grep -Fq 'retentionMode: "storj-object-ttl-v1"' "$bootstrap" \
     || fail "bootstrap marker omits Storj TTL retention mode"
+grep -Fq 'STORJ_ENCRYPTION_MODEL must be managed or self-managed' "$bootstrap" \
+    && grep -Fq 'encryptionModel: $encryptionModel' "$bootstrap" \
+    || fail "bootstrap does not bind the pre-created project encryption choice into the marker"
 if grep -R -E 'put-bucket-lifecycle|PutBucketLifecycle' "$deployment_dir/storj"; then
     fail "Storj tooling attempts unsupported bucket lifecycle mutations"
 fi
+if grep -R -E '(get|put|delete)-bucket-cors|(Get|Put|Delete)BucketCors' "$deployment_dir/storj"; then
+    fail "Storj tooling attempts unsupported bucket CORS operations"
+fi
+if grep -Eq 'NewListMultipartUploadsPaginator|[.]NextUploadIdMarker|UploadIdMarker[[:space:]]*:' \
+    "$deployment_dir/backup/storage-tool/main.go"; then
+    fail "Storj janitor relies on unsupported multipart upload-ID pagination"
+fi
+grep -Fq 'MaxUploads: aws.Int32(1000)' "$deployment_dir/backup/storage-tool/main.go" \
+    && grep -Fq 'refusing unsupported partial cleanup' "$deployment_dir/backup/storage-tool/main.go" \
+    || fail "Storj janitor does not fail closed above the supported single-page limit"
 grep -Fq 'disallow-deletes' "$deployment_dir/storj/README.md" \
     || fail "operator instructions omit backup no-Delete grant"
 grep -Fq 'max-object-ttl 168h' "$deployment_dir/storj/README.md" \

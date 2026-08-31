@@ -82,6 +82,7 @@ const valid = marker.schemaVersion === 1 &&
   marker.provider === "storj" &&
   marker.environment === values.environment &&
   typeof marker.projectId === "string" && marker.projectId.length > 0 &&
+  ["managed", "self-managed"].includes(marker.encryptionModel) &&
   marker.mediaBucket === values.mediaBucket &&
   marker.backupBucket === values.backupBucket &&
   marker.bucketLocation === "global-1" &&
@@ -98,7 +99,7 @@ printf '%s\n' probe-secret-key > "$secret_key_file"
 operation_log=$temporary_dir/operations
 : > "$operation_log"
 marker_file=$temporary_dir/storage-v1.json
-printf '%s\n' '{"schemaVersion":1,"provider":"storj","environment":"staging","projectId":"project-staging","bucketLocation":"global-1","mediaBucket":"hook2stream-com-staging-media","backupBucket":"hook2stream-com-staging-pg-backups","h2seReadVersions":[1],"retentionMode":"storj-object-ttl-v1"}' > "$marker_file"
+printf '%s\n' '{"schemaVersion":1,"provider":"storj","environment":"staging","projectId":"project-staging","encryptionModel":"self-managed","bucketLocation":"global-1","mediaBucket":"hook2stream-com-staging-media","backupBucket":"hook2stream-com-staging-pg-backups","h2seReadVersions":[1],"retentionMode":"storj-object-ttl-v1"}' > "$marker_file"
 marker_sha256=$(sha256sum "$marker_file" | cut -d' ' -f1)
 
 PATH="$mock_bin:$PATH" \

@@ -3,11 +3,30 @@
 Staging and production use separate Storj Standard/global projects. The four
 bucket names, versioning mode, marker schema, and retention thresholds are fixed
 by `bootstrap-buckets.sh`; deployed application hosts run only in `VerifyOnly`
-mode and must never receive the project/root access grant.
+mode and must never receive project/root or bootstrap access.
 
-For each environment, create one full project access grant with a unique
-encryption passphrase and escrow both outside the VPS and GitHub. Derive and
-register three restricted grants with `uplink share`:
+## Irreversible project-creation gate
+
+Do not create either project until the operator records an explicit encryption
+model decision for it. Storj does not allow changing the model later:
+
+- `managed` is recommended for this MVP because projects created after
+  2025-11-30 cannot use exhaustive S3 listing with Self-Managed encryption.
+  H2SE and age still ensure Storj receives only media and backup ciphertext.
+- `self-managed` keeps the Storj encryption passphrase solely with the
+  operator, but requires a distinct escrowed passphrase per environment and
+  live proof that every Hook2Stream list/prefix operation avoids the unsupported
+  exhaustive-list path.
+
+The user must approve the recorded choice before project creation. Pass the
+same recorded value as `STORJ_ENCRYPTION_MODEL=managed|self-managed` during
+bootstrap; it is bound into the signed-by-digest storage marker. Never silently
+substitute one model for the other.
+
+For each environment, create one full project access grant and escrow it outside
+the VPS and GitHub. For Self-Managed projects, use and escrow that environment's
+approved unique passphrase. Derive and register three restricted grants with
+`uplink share`:
 
 - media runtime: Read, Write, List, Delete, restricted to its media bucket;
 - backup writer: Read, Write, List, `--disallow-deletes`, its backup bucket, and
@@ -29,6 +48,15 @@ uplink share --access hook2stream-staging-root --readonly --register \
 
 Repeat with the production root access, production bucket names, and `840h`.
 
+Create a fourth, temporary full-project S3 credential named
+`hook2stream-<environment>-bootstrap-<date>` in the Storj Console. It is
+operator-only and exists solely to create/verify the two canonical buckets,
+enable backup versioning, and publish the marker. Capture it directly into the
+two mode-`0600` bootstrap files used below. After bootstrap and live acceptance,
+delete that access in the Storj Console and prove the old credential now receives
+an exact permission denial. Never delete the escrowed root grant, because doing
+so also revokes all derived runtime roles.
+
 Use `--register` to obtain S3 gateway credentials. Capture its output directly
 in the operator's encrypted secret store; do not paste grants, passphrases,
 access keys, or secret keys into shell history, GitHub, Terraform state, or CI
@@ -37,16 +65,28 @@ escrowed project grant/passphrase; production and staging never share one.
 
 ## Trusted operator workstation
 
-Install the AWS CLI, `curl`, `jq`, and the standard GNU tools from a root-owned
-OS package (or the root-installed AWS CLI v2 bundle). Every executable and its
-canonical parent directories must be owned by UID 0 and not writable by group
-or other users. User-local `pip`, `pipx`, Homebrew, npm, shell-function, and
-`PATH` shims are ignored; any such tool found inside the fixed system path is
-rejected by ownership and mode checks. The scripts replace the caller's
-`PATH` with `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, pin
-each canonical executable, and run AWS CLI and curl through a minimal `env -i`
-environment. Proxy, custom CA, AWS-profile, Python, and loader variables cannot
-reach a credential-bearing provider process.
+Install `python3-venv`, `curl`, `jq`, and the standard GNU tools from root-owned
+Ubuntu packages, then install the repository's narrow S3 client:
+
+```sh
+sudo /bin/sh src/deploy/storj/install-compatible-s3-client.sh
+```
+
+The installer supports Ubuntu 24.04 amd64/Python 3.12, uses exact
+`boto3==1.35.99` and `botocore==1.35.99` wheels with `--require-hashes`, and
+installs under a content-versioned
+`/opt/hook2stream-storj-s3-client-v1-boto3-1.35.99-<digest-prefix>` path.
+Operator scripts recursively reject non-root-owned, group/other-writable, or
+unexpected-symlink entries across the venv before Python can run, then verify
+the client digest and self-check before reading credentials. They invoke Python
+with `-I -E -s`, allow only the required S3 operations and four canonical
+buckets, and never use an arbitrary AWS CLI from `PATH`.
+
+Every executable and canonical parent directory must be owned by UID 0 and not
+writable by group or other users. The scripts replace the caller's `PATH` and
+run the S3 client and curl through minimal `env -i` environments. Proxy, custom
+CA, AWS-profile, Python, and loader variables cannot reach a credential-bearing
+provider process.
 
 Each source credential must be a different absolute, already-canonical path to
 a regular non-symlink file. The file must be owned by the current operator, have
@@ -65,12 +105,13 @@ absolute canonical paths. Do not add secrets themselves to the command line:
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   DEPLOYMENT_ENVIRONMENT=staging \
   STORJ_PROJECT_ID=replace-with-storj-project-id \
+  STORJ_ENCRYPTION_MODEL=replace-with-approved-managed-or-self-managed \
   STORJ_S3_ACCESS_KEY_FILE="$secret_root/staging-bootstrap-access-key" \
   STORJ_S3_SECRET_KEY_FILE="$secret_root/staging-bootstrap-secret-key" \
   /bin/sh "$repository_root/src/deploy/storj/bootstrap-buckets.sh"
 ```
 
-Internally the bootstrap copies the two values into a private, mode-`0600` AWS
+Internally the bootstrap copies the two values into a private, mode-`0600` S3
 credentials file under a mode-`0700` one-run directory inside the same encrypted
 secret directory, and removes that directory on exit. Plaintext keys are not
 exported globally, placed in process arguments, or copied to `/tmp`.
@@ -98,11 +139,11 @@ after 168/840 hours and record that delayed check in the go-live evidence.
 
 Bootstrap is fail-closed around ambiguous S3 and HTTP failures. A failed
 `HeadBucket` triggers creation only for the exact missing-bucket codes
-`NoSuchBucket`, `NotFound`, or the AWS CLI HEAD mapping `404`; `AccessDenied`,
+`NoSuchBucket`, `NotFound`, or the S3 HEAD mapping `404`; `AccessDenied`,
 `403`, network errors, and 5xx errors stop without `CreateBucket`.
-`GetBucketCors` accepts only `NoSuchCORSConfiguration` as proof that CORS is
-absent. A generic `404`, authorization failure, network error, or 5xx response
-blocks bootstrap.
+Storj does not implement bucket CORS read/write/delete operations, so bootstrap
+does not call them. Browser S3 URLs remain disabled, and live acceptance proves
+the marker is private through an unauthenticated exact `403` or `404` response.
 
 Both bootstrap and live acceptance perform the marker privacy GET in curl's
 minimal environment, without configuration or any environment proxy; curl uses
@@ -115,3 +156,6 @@ Temporary `staging/` H2SE data and manifests receive the same absolute 24-hour
 object TTL, while the daily media janitor aborts incomplete multipart uploads
 older than 24 hours. Backups use single `PutObject` calls, publish their manifest
 last, and rely on the access grant's maximum object TTL rather than a delete job.
+The July 2026 pricing model still bills objects deleted before 30 days for the
+full 30-day minimum and bills objects smaller than 50 kB as 50 kB. TTL remains a
+retention/security control, not a way to reduce those minimum charges.

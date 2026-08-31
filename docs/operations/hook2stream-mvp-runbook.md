@@ -92,8 +92,13 @@ mode-`0600`, non-symlink file without extended ACLs. Each permanent host has a
 different exact pinned ED25519 host key, distinct from all user and
 receipt-authority keys.
 
-Create one Storj account without a bank card and two Standard/global projects.
-Use a separate encryption passphrase for each project and escrow both off-host.
+Create one Storj account without a bank card, but do not create either
+Standard/global project until the user records an explicit encryption-model
+decision. The choice is irreversible. Managed encryption is recommended for
+this MVP because projects created after 2025-11-30 cannot use exhaustive S3
+listing with Self-Managed encryption; H2SE and age still ensure Storj receives
+only ciphertext. Self-Managed requires a separate escrowed passphrase per
+environment and live proof that every required list/prefix operation works.
 Fund with STORJ on zkSync Era when the operator wallet supports it; use Ethereum
 L1 only when L2 is unavailable. Keep at least USD 50 or three months of forecast
 Storj cost, whichever is greater. Storj crypto balances do not auto-recharge,
@@ -311,19 +316,24 @@ Create the following private buckets with location `global-1`:
 | staging | `hook2stream-com-staging-media` | `hook2stream-com-staging-pg-backups` |
 | production | `hook2stream-com-production-media` | `hook2stream-com-production-pg-backups` |
 
-Media buckets are unversioned and have no CORS. Backup buckets are versioned.
+Media buckets are unversioned and browser S3 access/CORS stay disabled. Backup
+buckets are versioned. Storj bucket CORS operations are unsupported and must
+not be called.
 Storj does not support the S3 Lifecycle API used by AWS/MinIO, so deployed code
 must never call `PutBucketLifecycle`. The 35/160 GiB media and 10/30 GiB backup
 values are operating thresholds, not a claim that Storj enforces a bucket
 quota.
 
-For each environment, derive from one escrowed full project grant/passphrase:
+For each environment, derive from one escrowed full project grant. A
+Self-Managed project also has its own off-host escrowed passphrase:
 
 - media runtime: Read, Write, List, Delete, restricted to its media bucket;
 - backup writer: Read, Write, List, no Delete, restricted to its backup bucket,
   with `MaxObjectTTL=168h` on staging or `840h` on production;
 - restore read-only: backup bucket only, kept off both VPS instances;
-- bootstrap/root: operator-held only and never installed on an app host.
+- root: operator-held only and never installed on an app host;
+- bootstrap: a separate temporary full-project S3 credential, revoked after
+  bootstrap and live acceptance with its denial recorded as evidence.
 
 Use these exact `uplink` permission shapes, substituting values only inside the
 operator's encrypted session and capturing registered credentials directly into
@@ -350,7 +360,9 @@ terminal capture, CI output, or this documentation.
 
 Credentials and passphrases never cross environment or role boundaries. Follow
 [`src/deploy/storj/README.md`](../../src/deploy/storj/README.md) to create grants,
-bootstrap buckets, and run live acceptance. The bootstrap publishes the private
+install the exact hash-locked `boto3==1.35.99` operator client, bootstrap
+buckets, and run live acceptance. The bootstrap requires the approved
+`STORJ_ENCRYPTION_MODEL=managed|self-managed` and publishes the private
 `.hook2stream/contracts/storage-v1.json` marker last and prints its SHA-256.
 Store only that digest in the root-owned environment file. Before backup or a
 migration, the host gate fetches the marker with runtime authentication, proves
@@ -383,8 +395,13 @@ URLs and CORS stay disabled; public upload/download APIs remain same-origin.
 
 H2SE temporary data and manifests under `staging/` receive the same absolute
 24-hour object TTL. A daily janitor uses the media credential to abort
-incomplete multipart uploads older than 24 hours. Backup uploads do not use
-multipart. There is no storage host, MinIO deployment workflow, storage
+incomplete multipart uploads older than 24 hours. Storj does not expose the
+upload-ID pagination markers needed for another page, so the janitor requests
+at most 1000 uploads and fails before any abort when that response is truncated.
+Backup uploads do not use multipart. Storj still bills objects deleted before
+30 days for the 30-day minimum and bills objects smaller than 50 kB as 50 kB;
+TTL remains a retention control rather than a guaranteed cost reduction. There
+is no storage host, MinIO deployment workflow, storage
 GitHub Environment, storage Tailscale node, or storage forced command. The
 checked-in `compose.minio.yaml` remains solely for disposable local development
 and CI and is excluded from release candidates. Because the final MinIO
@@ -398,8 +415,9 @@ Each VPS has a separate root-owned secrets directory on its encrypted mount.
 Files are non-symlinks, owned by `root:<service-group>`, and mode `0640`. OAuth,
 Stripe, OpenRouter, runtime media S3, backup S3, PostgreSQL, session, invite,
 age, and H2SE keyring values never enter Git, Servers.Guru provider records,
-candidates, Compose output, or CI logs. Storj root/bootstrap and restore grants plus project
-encryption passphrases are operator-held off-host.
+candidates, Compose output, or CI logs. Storj root and restore grants, any
+Self-Managed project passphrases, and the temporary bootstrap credential are
+operator-held off-host; the bootstrap credential is revoked after acceptance.
 
 Media objects use H2SE v1 ciphertext; Storj never receives plaintext or an H2SE
 KEK. Rotate the active environment-specific KEK every 90 days and retain old
