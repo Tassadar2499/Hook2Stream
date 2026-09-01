@@ -43,7 +43,7 @@ public sealed class MediaContentEndpointTests
     }
 
     [Fact]
-    public async Task Active_but_expired_entitlement_cannot_download_generated_content()
+    public async Task Active_but_expired_entitlement_can_download_generated_history()
     {
         await using var factory = new Hook2StreamApiFactory();
         using var client = CreateClient(factory, "media-expired");
@@ -52,11 +52,13 @@ public sealed class MediaContentEndpointTests
             factory,
             entitlementState: EntitlementState.Active,
             validUntil: DateTimeOffset.UtcNow.AddMinutes(-1));
+        await Store(factory, seed.SourceObjectKey, "historical-render"u8.ToArray());
 
         var response = await client.GetAsync(DownloadUrl(seed));
 
-        Assert.Equal(HttpStatusCode.PaymentRequired, response.StatusCode);
-        await AssertProblemCode(response, "download.entitlement_required");
+        response.EnsureSuccessStatusCode();
+        Assert.Equal("attachment", response.Content.Headers.ContentDisposition?.DispositionType);
+        Assert.Equal("historical-render", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -79,16 +81,20 @@ public sealed class MediaContentEndpointTests
         Assert.Equal("licensed-render", await response.Content.ReadAsStringAsync());
     }
 
-    [Fact]
-    public async Task Revoked_entitlement_cannot_download_generated_content()
+    [Theory]
+    [InlineData(EntitlementState.Revoked, false)]
+    [InlineData(EntitlementState.Active, true)]
+    public async Task Revoked_entitlement_state_or_timestamp_cannot_download_generated_content(
+        EntitlementState state,
+        bool hasRevokedAt)
     {
         await using var factory = new Hook2StreamApiFactory();
         using var client = CreateClient(factory, "media-revoked");
         await Onboard(client);
         var seed = await SeedGeneratedAsset(
             factory,
-            entitlementState: EntitlementState.Revoked,
-            revokedAt: DateTimeOffset.UtcNow.AddMinutes(-1));
+            entitlementState: state,
+            revokedAt: hasRevokedAt ? DateTimeOffset.UtcNow.AddMinutes(-1) : null);
 
         var response = await client.GetAsync(DownloadUrl(seed));
 

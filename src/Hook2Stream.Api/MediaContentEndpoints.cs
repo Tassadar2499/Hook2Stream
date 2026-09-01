@@ -11,11 +11,11 @@ internal static class MediaContentEndpoints
     public static RouteGroupBuilder MapMediaContentApi(this RouteGroupBuilder api)
     {
         api.MapMethods("/releases/{projectId:guid}/assets/{assetId:guid}/content", ["GET", "HEAD"],
-            (Guid projectId, Guid assetId, CurrentUserService user, Hook2StreamDbContext db, IObjectStorage storage, TimeProvider clock, CancellationToken token) =>
-                Serve(projectId, assetId, false, user, db, storage, clock, token));
+            (Guid projectId, Guid assetId, CurrentUserService user, Hook2StreamDbContext db, IObjectStorage storage, CancellationToken token) =>
+                Serve(projectId, assetId, false, user, db, storage, token));
         api.MapMethods("/releases/{projectId:guid}/downloads/{assetId:guid}", ["GET", "HEAD"],
-            (Guid projectId, Guid assetId, CurrentUserService user, Hook2StreamDbContext db, IObjectStorage storage, TimeProvider clock, CancellationToken token) =>
-                Serve(projectId, assetId, true, user, db, storage, clock, token));
+            (Guid projectId, Guid assetId, CurrentUserService user, Hook2StreamDbContext db, IObjectStorage storage, CancellationToken token) =>
+                Serve(projectId, assetId, true, user, db, storage, token));
         return api;
     }
 
@@ -26,7 +26,6 @@ internal static class MediaContentEndpoints
         CurrentUserService currentUser,
         Hook2StreamDbContext db,
         IObjectStorage storage,
-        TimeProvider clock,
         CancellationToken cancellationToken)
     {
         var context = await currentUser.RequireWorkspaceAsync(cancellationToken);
@@ -38,19 +37,16 @@ internal static class MediaContentEndpoints
 
         if (download && asset.Origin == AssetOrigin.Generated)
         {
-            var now = clock.GetUtcNow();
             var entitled = asset.RenderBatchId is { } renderBatchId
                 ? await db.RenderBatches.AsNoTracking().AnyAsync(batch =>
                     batch.Id == renderBatchId && db.Entitlements.Any(value =>
                         value.Id == batch.EntitlementId && value.WorkspaceId == context.Workspace.Id &&
-                        value.ProjectId == projectId && value.State == EntitlementState.Active && value.RevokedAt == null &&
-                        (value.ValidUntil == null || value.ValidUntil > now)),
+                        value.ProjectId == projectId && value.State == EntitlementState.Active && value.RevokedAt == null),
                     cancellationToken)
                 : asset.Purpose == AssetPurpose.CleanCover && await db.Entitlements.AsNoTracking().AnyAsync(value =>
                     value.WorkspaceId == context.Workspace.Id && value.ProjectId == projectId &&
                     value.ArtworkPackRevisionId == asset.ArtworkPackRevisionId &&
-                    value.State == EntitlementState.Active && value.RevokedAt == null &&
-                    (value.ValidUntil == null || value.ValidUntil > now),
+                    value.State == EntitlementState.Active && value.RevokedAt == null,
                     cancellationToken);
             if (!entitled)
                 throw new ApiProblemException(402, "download.entitlement_required", "The entitlement for this download is missing or revoked.");

@@ -114,6 +114,17 @@ public sealed record PaymentCheckoutResult(
     Uri CheckoutUrl,
     bool CompletedSynchronously);
 
+public enum PaymentWebhookDisposition
+{
+    Unknown = 0,
+    Paid = 1,
+    Refunded = 2,
+    CheckoutFailed = 3,
+    PaymentFailed = 4,
+    SubscriptionAccessEnded = 5,
+    Disputed = 6
+}
+
 public sealed record PaymentWebhookEvent(
     string EventId,
     string Type,
@@ -127,8 +138,7 @@ public sealed record PaymentWebhookEvent(
     string? ExternalPaymentIntentId,
     string? ExternalInvoiceId,
     string? ExternalChargeId,
-    bool Paid,
-    bool Refunded,
+    PaymentWebhookDisposition Disposition,
     DateTimeOffset OccurredAt,
     DateTimeOffset? PeriodStartsAt,
     DateTimeOffset? PeriodEndsAt,

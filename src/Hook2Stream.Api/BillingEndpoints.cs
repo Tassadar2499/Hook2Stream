@@ -13,6 +13,8 @@ namespace Hook2Stream.Api;
 public static class BillingEndpoints
 {
     private const int WebhookMaxBytes = 1024 * 1024;
+    private const string AccessRevokedAuditAction = "billing.provider_access_revoked";
+    private const string SubscriptionAccessEndedAuditAction = "billing.provider_subscription_access_ended";
     private static readonly TimeSpan DownloadUrlLifetime = TimeSpan.FromMinutes(10);
     private static readonly JsonSerializerOptions StoredJson = new(JsonSerializerDefaults.Web);
 
@@ -275,6 +277,7 @@ public static class BillingEndpoints
                     null,
                     null,
                     timeProvider.GetUtcNow(),
+                    timeProvider.GetUtcNow(),
                     BillingProducts.IsSubscription(checkout.ProductCode) ? timeProvider.GetUtcNow().AddMonths(1) : null),
                 timeProvider,
                 cancellationToken);
@@ -335,30 +338,53 @@ public static class BillingEndpoints
             State = "processing"
         };
         db.InboxMessages.Add(inbox);
-        var checkout = await ResolveCheckout(db, paymentEvent, cancellationToken);
-        if (checkout is null && (paymentEvent.Paid || paymentEvent.Refunded))
-            throw Problem(409, "billing.webhook_unresolved", "The payment event is not yet linked to a checkout; retry it later.");
-        if (checkout is null)
+        if (paymentEvent.Disposition == PaymentWebhookDisposition.Unknown)
         {
             inbox.State = "ignored";
             inbox.ProcessedAt = timeProvider.GetUtcNow();
             inbox.LastError = "billing.event_not_actionable";
-            await db.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException)
+            {
+                db.ChangeTracker.Clear();
+                var duplicate = await db.InboxMessages.AsNoTracking().SingleOrDefaultAsync(
+                    value => value.Source == "stripe" && value.MessageId == paymentEvent.EventId,
+                    cancellationToken);
+                if (duplicate is null || duplicate.PayloadHash != paymentEvent.PayloadHash) throw;
+                return Results.Ok(new { received = true, duplicate = true });
+            }
             return Results.Ok(new { received = true, ignored = true });
         }
+
+        var checkout = await ResolveCheckout(db, paymentEvent, cancellationToken);
+        if (checkout is null)
+            throw Problem(409, "billing.webhook_unresolved", "The payment event is not yet linked to a checkout; retry it later.");
         if (paymentEvent.WorkspaceId is { } eventWorkspaceId && checkout.WorkspaceId != eventWorkspaceId ||
             paymentEvent.ProductCode is { } eventProductCode && checkout.ProductCode != eventProductCode ||
             paymentEvent.ProjectId is { } eventProjectId && checkout.ProjectId != eventProjectId)
             throw Problem(409, "billing.webhook_metadata_mismatch", "The payment metadata does not match its checkout.");
+        ValidateWebhookCorrelation(checkout, paymentEvent);
+        await ValidateWebhookOwnershipAsync(db, checkout, paymentEvent, cancellationToken);
 
+        // Every actionable event participates in the checkout concurrency fence.
+        // The single SaveChanges call is atomic, including inbox/audit/access
+        // mutations, and stays compatible with Npgsql's retrying execution strategy.
+        // A competing provider event loses the Version check and Stripe retries it.
+        db.Entry(checkout).Property(value => value.UpdatedAt).IsModified = true;
         checkout.ExternalSessionId ??= paymentEvent.ExternalSessionId;
         checkout.ExternalCustomerId ??= paymentEvent.ExternalCustomerId;
         checkout.ExternalSubscriptionId ??= paymentEvent.ExternalSubscriptionId;
         checkout.ExternalPaymentIntentId ??= paymentEvent.ExternalPaymentIntentId;
-        if (paymentEvent.Paid && checkout.ProjectId is { } paidProjectId &&
+        var paidProjectId = checkout.ProjectId;
+        var manualReview = paymentEvent.Disposition == PaymentWebhookDisposition.Paid &&
+                           paidProjectId.HasValue &&
             await db.Projects.IgnoreQueryFilters().AnyAsync(
-                value => value.Id == paidProjectId && value.DeletedAt != null,
-                cancellationToken))
+                value => value.Id == paidProjectId.Value && value.DeletedAt != null,
+                cancellationToken);
+        if (manualReview)
         {
             inbox.State = "manual_review";
             inbox.ProcessedAt = timeProvider.GetUtcNow();
@@ -376,38 +402,55 @@ public static class BillingEndpoints
                     paymentEvent.ExternalPaymentIntentId
                 })
             });
-            await db.SaveChangesAsync(cancellationToken);
-            return Results.Ok(new { received = true, manualReview = true });
         }
-        var checkoutFailed = paymentEvent.Type is
-            "checkout.session.expired" or
-            "checkout.session.async_payment_failed";
-        if (checkoutFailed && checkout.State == CheckoutState.Pending)
-            checkout.State = CheckoutState.Failed;
-        else if (paymentEvent.Refunded)
-            await RevokeCheckout(db, checkout, paymentEvent, cancellationToken);
-        else if (paymentEvent.Paid &&
-                 checkout.State != CheckoutState.Failed &&
-                 !(checkout.ProductCode == BillingProducts.ActiveArtist &&
-                   paymentEvent.Type.StartsWith("checkout.session.", StringComparison.Ordinal)))
-            await FulfillCheckout(
-                db,
-                checkout,
-                new FulfillmentContext(
-                    checkout.ProductCode == BillingProducts.ActiveArtist
-                        ? $"invoice:{paymentEvent.ExternalInvoiceId ?? paymentEvent.EventId}"
-                        : "purchase",
-                    paymentEvent.ExternalCustomerId,
-                    paymentEvent.ExternalSubscriptionId,
-                    paymentEvent.ExternalPaymentIntentId,
-                    paymentEvent.ExternalInvoiceId,
-                    paymentEvent.PeriodStartsAt ?? paymentEvent.OccurredAt,
-                    paymentEvent.PeriodEndsAt),
-                timeProvider,
-                cancellationToken);
+        else
+        {
+            switch (paymentEvent.Disposition)
+            {
+                case PaymentWebhookDisposition.CheckoutFailed when checkout.State == CheckoutState.Pending:
+                    checkout.State = CheckoutState.Failed;
+                    break;
+                case PaymentWebhookDisposition.PaymentFailed:
+                    AddBillingProviderAudit(db, checkout, paymentEvent, "billing.provider_payment_failed");
+                    break;
+                case PaymentWebhookDisposition.Refunded:
+                    await RevokeCheckout(db, checkout, paymentEvent, cancellationToken);
+                    break;
+                case PaymentWebhookDisposition.SubscriptionAccessEnded:
+                    await EndSubscriptionAccess(db, checkout, paymentEvent, cancellationToken);
+                    break;
+                case PaymentWebhookDisposition.Disputed:
+                    await RevokeDisputedAccess(db, checkout, paymentEvent, cancellationToken);
+                    break;
+                case PaymentWebhookDisposition.Paid
+                    when checkout.State != CheckoutState.Failed &&
+                         !(checkout.ProductCode == BillingProducts.ActiveArtist &&
+                           paymentEvent.Type.StartsWith("checkout.session.", StringComparison.Ordinal)):
+                    await FulfillCheckout(
+                        db,
+                        checkout,
+                        new FulfillmentContext(
+                            checkout.ProductCode == BillingProducts.ActiveArtist
+                                ? $"invoice:{paymentEvent.ExternalInvoiceId ?? paymentEvent.EventId}"
+                                : "purchase",
+                            paymentEvent.ExternalCustomerId,
+                            paymentEvent.ExternalSubscriptionId,
+                            paymentEvent.ExternalPaymentIntentId,
+                            paymentEvent.ExternalInvoiceId,
+                            paymentEvent.OccurredAt,
+                            paymentEvent.PeriodStartsAt ?? paymentEvent.OccurredAt,
+                            paymentEvent.PeriodEndsAt),
+                        timeProvider,
+                        cancellationToken);
+                    break;
+            }
+        }
 
-        inbox.State = "processed";
-        inbox.ProcessedAt = timeProvider.GetUtcNow();
+        if (!manualReview)
+        {
+            inbox.State = "processed";
+            inbox.ProcessedAt = timeProvider.GetUtcNow();
+        }
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -421,7 +464,9 @@ public static class BillingEndpoints
             if (duplicate is null || duplicate.PayloadHash != paymentEvent.PayloadHash) throw;
             return Results.Ok(new { received = true, duplicate = true });
         }
-        return Results.Ok(new { received = true });
+        return manualReview
+            ? Results.Ok(new { received = true, manualReview = true })
+            : Results.Ok(new { received = true });
     }
 
     private static async Task<IResult> StartRender(
@@ -994,7 +1039,16 @@ public static class BillingEndpoints
         TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
-        if (checkout.State == CheckoutState.Refunded && !BillingProducts.IsSubscription(checkout.ProductCode)) return;
+        if (BillingProducts.IsSubscription(checkout.ProductCode))
+        {
+            if (checkout.SubscriptionAccessEndedAt is { } accessEndedAt &&
+                fulfillment.EventOccurredAt <= accessEndedAt)
+                return;
+        }
+        else if (checkout.State == CheckoutState.Refunded || checkout.ProviderAccessRevokedAt is not null)
+        {
+            return;
+        }
         checkout.ExternalCustomerId ??= fulfillment.ExternalCustomerId;
         checkout.ExternalSubscriptionId ??= fulfillment.ExternalSubscriptionId;
         checkout.ExternalPaymentIntentId ??= fulfillment.ExternalPaymentIntentId;
@@ -1058,6 +1112,7 @@ public static class BillingEndpoints
             ReleaseModeSnapshot = checkout.ReleaseModeSnapshot,
             AudioAssetIdSnapshot = checkout.AudioAssetIdSnapshot,
             AudioFingerprintSnapshot = checkout.AudioFingerprintSnapshot,
+            ProviderEventOccurredAt = fulfillment.EventOccurredAt,
             PeriodStartsAt = BillingProducts.IsSubscription(checkout.ProductCode)
                 ? fulfillment.PeriodStartsAt
                 : null,
@@ -1118,31 +1173,31 @@ public static class BillingEndpoints
         if (!BillingProducts.IsSubscription(checkout.ProductCode) &&
             checkout.State == CheckoutState.Refunded && checkout.RefundedAt >= paymentEvent.OccurredAt) return;
         if (!BillingProducts.IsSubscription(checkout.ProductCode)) checkout.State = CheckoutState.Refunded;
-        checkout.RefundedAt = checkout.RefundedAt is { } refundedAt && refundedAt > paymentEvent.OccurredAt
+        var effectiveRefundedAt = checkout.RefundedAt is { } refundedAt && refundedAt > paymentEvent.OccurredAt
             ? refundedAt
             : paymentEvent.OccurredAt;
+        checkout.RefundedAt = effectiveRefundedAt;
         var entitlements = await db.Entitlements.Where(value => value.CheckoutId == checkout.Id).ToListAsync(cancellationToken);
-        var referenced = paymentEvent.ExternalInvoiceId is { } invoiceId
-            ? entitlements.Where(value => value.ExternalInvoiceId == invoiceId).ToList()
-            : paymentEvent.ExternalPaymentIntentId is { } paymentIntentId
-                ? entitlements.Where(value => value.ExternalPaymentIntentId == paymentIntentId).ToList()
-                : [];
+        IEnumerable<Entitlement> referencedQuery = entitlements;
+        var hasReference = false;
+        if (paymentEvent.ExternalInvoiceId is { Length: > 0 } invoiceId)
+        {
+            referencedQuery = referencedQuery.Where(value => value.ExternalInvoiceId == invoiceId);
+            hasReference = true;
+        }
+        if (paymentEvent.ExternalPaymentIntentId is { Length: > 0 } paymentIntentId)
+        {
+            referencedQuery = referencedQuery.Where(value => value.ExternalPaymentIntentId == paymentIntentId);
+            hasReference = true;
+        }
+        var referenced = hasReference ? referencedQuery.ToList() : [];
         if (BillingProducts.IsSubscription(checkout.ProductCode) && referenced.Count == 0)
             throw Problem(409, "billing.refund_period_unresolved", "The subscription refund is not linked to a granted billing period yet.");
-        foreach (var entitlement in referenced.Count > 0 ? referenced : entitlements)
-        {
-            entitlement.State = EntitlementState.Revoked;
-            entitlement.RevokedAt = checkout.RefundedAt;
-            if (entitlement.ProjectId is { } projectId)
-            {
-                AddPipelineReconcile(
-                    db,
-                    checkout.WorkspaceId,
-                    projectId,
-                    "entitlement.revoked",
-                    entitlement.Id);
-            }
-        }
+        RevokeEntitlements(
+            db,
+            checkout,
+            referenced.Count > 0 ? referenced : entitlements,
+            effectiveRefundedAt);
         var grant = await db.ArtworkCreditGrants.SingleOrDefaultAsync(value => value.CheckoutId == checkout.Id, cancellationToken);
         if (grant is null) return;
         var wallet = await db.WorkspaceArtworkCredits.SingleAsync(value => value.WorkspaceId == checkout.WorkspaceId, cancellationToken);
@@ -1166,6 +1221,236 @@ public static class BillingEndpoints
             });
         }
     }
+
+    private static async Task EndSubscriptionAccess(
+        Hook2StreamDbContext db,
+        BillingCheckout checkout,
+        PaymentWebhookEvent paymentEvent,
+        CancellationToken cancellationToken)
+    {
+        if (!BillingProducts.IsSubscription(checkout.ProductCode))
+            throw Problem(409, "billing.subscription_mismatch", "A subscription lifecycle event cannot target a one-time checkout.");
+        var subscriptionId = paymentEvent.ExternalSubscriptionId ?? checkout.ExternalSubscriptionId;
+        if (string.IsNullOrWhiteSpace(subscriptionId))
+            throw Problem(409, "billing.subscription_unresolved", "The subscription lifecycle event is missing its subscription identity.");
+
+        AddBillingProviderAudit(db, checkout, paymentEvent, SubscriptionAccessEndedAuditAction);
+        checkout.SubscriptionAccessEndedAt = checkout.SubscriptionAccessEndedAt is { } endedAt && endedAt > paymentEvent.OccurredAt
+            ? endedAt
+            : paymentEvent.OccurredAt;
+        var entitlements = await db.Entitlements.Where(value =>
+                value.WorkspaceId == checkout.WorkspaceId &&
+                value.ProductCode == BillingProducts.ActiveArtist &&
+                value.ExternalSubscriptionId == subscriptionId &&
+                value.State == EntitlementState.Active &&
+                value.RevokedAt == null &&
+                (value.ProviderEventOccurredAt == null || value.ProviderEventOccurredAt <= paymentEvent.OccurredAt))
+            .ToListAsync(cancellationToken);
+        foreach (var entitlement in entitlements)
+        {
+            if (entitlement.ValidUntil is null || entitlement.ValidUntil > paymentEvent.OccurredAt)
+                entitlement.ValidUntil = paymentEvent.OccurredAt;
+        }
+    }
+
+    private static async Task RevokeDisputedAccess(
+        Hook2StreamDbContext db,
+        BillingCheckout checkout,
+        PaymentWebhookEvent paymentEvent,
+        CancellationToken cancellationToken)
+    {
+        AddBillingProviderAudit(db, checkout, paymentEvent, AccessRevokedAuditAction);
+        if (BillingProducts.IsSubscription(checkout.ProductCode))
+        {
+            var subscriptionId = checkout.ExternalSubscriptionId;
+            if (string.IsNullOrWhiteSpace(subscriptionId))
+                throw Problem(409, "billing.subscription_unresolved", "The disputed payment is missing its subscription identity.");
+            IQueryable<Entitlement> entitlementQuery = db.Entitlements.Where(value =>
+                value.WorkspaceId == checkout.WorkspaceId &&
+                value.CheckoutId == checkout.Id &&
+                value.ExternalSubscriptionId == subscriptionId);
+            var hasPeriodIdentity = false;
+            if (paymentEvent.ExternalPaymentIntentId is { Length: > 0 } paymentIntentId)
+            {
+                entitlementQuery = entitlementQuery.Where(value => value.ExternalPaymentIntentId == paymentIntentId);
+                hasPeriodIdentity = true;
+            }
+            if (paymentEvent.ExternalInvoiceId is { Length: > 0 } invoiceId)
+            {
+                entitlementQuery = entitlementQuery.Where(value => value.ExternalInvoiceId == invoiceId);
+                hasPeriodIdentity = true;
+            }
+            if (!hasPeriodIdentity)
+                throw Problem(409, "billing.dispute_period_unresolved", "The subscription dispute is missing its payment-period identity.");
+
+            var referenced = await entitlementQuery.ToListAsync(cancellationToken);
+            if (referenced.Count == 0)
+                throw Problem(409, "billing.dispute_period_unresolved", "The subscription dispute is not linked to a granted billing period yet.");
+            RevokeEntitlements(db, checkout, referenced, paymentEvent.OccurredAt);
+            return;
+        }
+
+        checkout.ProviderAccessRevokedAt = checkout.ProviderAccessRevokedAt is { } revokedAt && revokedAt > paymentEvent.OccurredAt
+            ? revokedAt
+            : paymentEvent.OccurredAt;
+        var entitlements = await db.Entitlements
+            .Where(value => value.CheckoutId == checkout.Id)
+            .ToListAsync(cancellationToken);
+        RevokeEntitlements(db, checkout, entitlements, paymentEvent.OccurredAt);
+        await RevokeArtworkCreditGrant(db, checkout, paymentEvent.OccurredAt, cancellationToken);
+    }
+
+    private static void RevokeEntitlements(
+        Hook2StreamDbContext db,
+        BillingCheckout checkout,
+        IReadOnlyList<Entitlement> entitlements,
+        DateTimeOffset revokedAt)
+    {
+        foreach (var entitlement in entitlements)
+        {
+            var wasRevoked = entitlement.State == EntitlementState.Revoked || entitlement.RevokedAt is not null;
+            entitlement.State = EntitlementState.Revoked;
+            entitlement.RevokedAt = entitlement.RevokedAt is { } previousRevokedAt && previousRevokedAt > revokedAt
+                ? previousRevokedAt
+                : revokedAt;
+            if (!wasRevoked && entitlement.ProjectId is { } projectId)
+            {
+                AddPipelineReconcile(
+                    db,
+                    checkout.WorkspaceId,
+                    projectId,
+                    "entitlement.revoked",
+                    entitlement.Id);
+            }
+        }
+    }
+
+    private static async Task RevokeArtworkCreditGrant(
+        Hook2StreamDbContext db,
+        BillingCheckout checkout,
+        DateTimeOffset revokedAt,
+        CancellationToken cancellationToken)
+    {
+        var grant = await db.ArtworkCreditGrants.SingleOrDefaultAsync(
+            value => value.CheckoutId == checkout.Id,
+            cancellationToken);
+        if (grant is null) return;
+        var wallet = await db.WorkspaceArtworkCredits.SingleAsync(
+            value => value.WorkspaceId == checkout.WorkspaceId,
+            cancellationToken);
+        var revoked = Math.Min(wallet.Balance, grant.Remaining);
+        wallet.Balance -= revoked;
+        grant.Remaining -= revoked;
+        grant.RevokedAt = grant.RevokedAt is { } grantRevokedAt && grantRevokedAt > revokedAt
+            ? grantRevokedAt
+            : revokedAt;
+        var reference = $"checkout:{checkout.Id:N}:access-revoked";
+        if (!await db.ArtworkCreditTransactions.AnyAsync(
+                value => value.WorkspaceId == checkout.WorkspaceId && value.Reference == reference,
+                cancellationToken))
+        {
+            db.ArtworkCreditTransactions.Add(new ArtworkCreditTransaction
+            {
+                WorkspaceId = checkout.WorkspaceId,
+                GrantId = grant.Id,
+                Delta = -revoked,
+                BalanceAfter = wallet.Balance,
+                Reason = "provider_access_revoked",
+                Reference = reference
+            });
+        }
+    }
+
+    private static void AddBillingProviderAudit(
+        Hook2StreamDbContext db,
+        BillingCheckout checkout,
+        PaymentWebhookEvent paymentEvent,
+        string action)
+    {
+        db.AuditEvents.Add(new AuditEvent
+        {
+            WorkspaceId = checkout.WorkspaceId,
+            Action = action,
+            ResourceType = "billing_checkout",
+            ResourceId = checkout.Id,
+            DataJson = JsonSerializer.Serialize(new ProviderBillingAudit(
+                paymentEvent.EventId,
+                paymentEvent.Type,
+                paymentEvent.Disposition,
+                paymentEvent.ExternalSubscriptionId,
+                paymentEvent.ExternalPaymentIntentId,
+                paymentEvent.ExternalInvoiceId,
+                paymentEvent.ExternalChargeId,
+                paymentEvent.OccurredAt), StoredJson)
+        });
+    }
+
+    private static void ValidateWebhookCorrelation(
+        BillingCheckout checkout,
+        PaymentWebhookEvent paymentEvent)
+    {
+        ValidateProviderId("session", checkout.ExternalSessionId, paymentEvent.ExternalSessionId);
+        ValidateProviderId("customer", checkout.ExternalCustomerId, paymentEvent.ExternalCustomerId);
+        ValidateProviderId("subscription", checkout.ExternalSubscriptionId, paymentEvent.ExternalSubscriptionId);
+        if (!BillingProducts.IsSubscription(checkout.ProductCode))
+            ValidateProviderId("payment_intent", checkout.ExternalPaymentIntentId, paymentEvent.ExternalPaymentIntentId);
+    }
+
+    private static void ValidateProviderId(string kind, string? stored, string? received)
+    {
+        if (!string.IsNullOrWhiteSpace(stored) &&
+            !string.IsNullOrWhiteSpace(received) &&
+            !string.Equals(stored, received, StringComparison.Ordinal))
+            throw Problem(
+                409,
+                "billing.webhook_correlation_mismatch",
+                $"The payment event {kind} does not match its checkout.");
+    }
+
+    private static async Task ValidateWebhookOwnershipAsync(
+        Hook2StreamDbContext db,
+        BillingCheckout checkout,
+        PaymentWebhookEvent paymentEvent,
+        CancellationToken cancellationToken)
+    {
+        if (paymentEvent.ExternalSessionId is { Length: > 0 } sessionId &&
+            await db.BillingCheckouts.IgnoreQueryFilters().AnyAsync(
+                value => value.Id != checkout.Id && value.ExternalSessionId == sessionId,
+                cancellationToken))
+            throw ProviderOwnershipConflict("session");
+
+        if (paymentEvent.ExternalCustomerId is { Length: > 0 } customerId &&
+            await db.BillingCheckouts.IgnoreQueryFilters().AnyAsync(
+                value => value.Id != checkout.Id &&
+                         value.WorkspaceId != checkout.WorkspaceId &&
+                         value.ExternalCustomerId == customerId,
+                cancellationToken))
+            throw ProviderOwnershipConflict("customer");
+
+        if (paymentEvent.ExternalSubscriptionId is { Length: > 0 } subscriptionId &&
+            (await db.BillingCheckouts.IgnoreQueryFilters().AnyAsync(
+                 value => value.Id != checkout.Id && value.ExternalSubscriptionId == subscriptionId,
+                 cancellationToken) ||
+             await db.Entitlements.IgnoreQueryFilters().AnyAsync(
+                 value => value.CheckoutId != checkout.Id && value.ExternalSubscriptionId == subscriptionId,
+                 cancellationToken)))
+            throw ProviderOwnershipConflict("subscription");
+
+        if (!BillingProducts.IsSubscription(checkout.ProductCode) &&
+            paymentEvent.ExternalPaymentIntentId is { Length: > 0 } paymentIntentId &&
+            (await db.BillingCheckouts.IgnoreQueryFilters().AnyAsync(
+                 value => value.Id != checkout.Id && value.ExternalPaymentIntentId == paymentIntentId,
+                 cancellationToken) ||
+             await db.Entitlements.IgnoreQueryFilters().AnyAsync(
+                 value => value.CheckoutId != checkout.Id && value.ExternalPaymentIntentId == paymentIntentId,
+                 cancellationToken)))
+            throw ProviderOwnershipConflict("payment_intent");
+    }
+
+    private static ApiProblemException ProviderOwnershipConflict(string kind) => Problem(
+        409,
+        "billing.webhook_correlation_mismatch",
+        $"The payment event {kind} already belongs to another checkout.");
 
     private static async Task<BillingCheckout?> ResolveCheckout(
         Hook2StreamDbContext db,
@@ -1418,12 +1703,23 @@ public static class BillingEndpoints
     private static ApiProblemException NotFound() => Problem(404, "resource.not_found", "The requested resource was not found.");
     private static ApiProblemException Problem(int status, string code, string message) => new(status, code, message);
 
+    private sealed record ProviderBillingAudit(
+        string EventId,
+        string Type,
+        PaymentWebhookDisposition Disposition,
+        string? ExternalSubscriptionId,
+        string? ExternalPaymentIntentId,
+        string? ExternalInvoiceId,
+        string? ExternalChargeId,
+        DateTimeOffset OccurredAt);
+
     private sealed record FulfillmentContext(
         string ProviderPeriodKey,
         string? ExternalCustomerId,
         string? ExternalSubscriptionId,
         string? ExternalPaymentIntentId,
         string? ExternalInvoiceId,
+        DateTimeOffset EventOccurredAt,
         DateTimeOffset PeriodStartsAt,
         DateTimeOffset? PeriodEndsAt);
 

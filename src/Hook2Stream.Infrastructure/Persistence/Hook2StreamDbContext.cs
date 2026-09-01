@@ -402,7 +402,7 @@ public sealed class Hook2StreamDbContext(DbContextOptions<Hook2StreamDbContext> 
             entity.Property(value => value.TrackTitleSnapshot).HasMaxLength(160);
             entity.Property(value => value.AudioFingerprintSnapshot).HasMaxLength(128);
             entity.HasIndex(value => value.ExternalPaymentIntentId).IsUnique().HasFilter("external_payment_intent_id IS NOT NULL");
-            entity.HasIndex(value => value.ExternalSubscriptionId).HasFilter("external_subscription_id IS NOT NULL");
+            entity.HasIndex(value => value.ExternalSubscriptionId).IsUnique().HasFilter("external_subscription_id IS NOT NULL");
             entity.HasQueryFilter(value => value.DeletedAt == null);
         });
 

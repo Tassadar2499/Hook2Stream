@@ -144,6 +144,32 @@ callbacks as `https://staging.hook2stream.com/api/v1/auth/callback` and
 Stripe webhooks at `/api/v1/billing/stripe/webhook` on those exact two origins.
 Unknown Google accounts fail closed; production accepts only pre-issued invites.
 
+Configure both Stripe endpoints from the exact canonical list in
+`src/deploy/stripe-webhook-events.txt`: `checkout.session.completed`,
+`checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `checkout.session.expired`,
+`invoice.paid`, `invoice.payment_failed`, `invoice.finalization_failed`,
+`invoice.voided`, `invoice.marked_uncollectible`, `charge.refunded`,
+`charge.dispute.created`, `customer.subscription.deleted`,
+`customer.subscription.paused`, and `customer.subscription.updated`.
+Full refunds and disputes revoke the matching paid access, including historical
+downloads. Ended/paused subscriptions and subscription updates whose status is
+`canceled`, `unpaid`, `paused`, or `incomplete_expired` instead end the ability
+to start new renders at Stripe `event.created`; completed historical renders
+remain downloadable while the entitlement remains active and not revoked.
+Ordering and terminal tombstones use `event.created`, not invoice-period start:
+an older late event cannot restore access, while a later verified `invoice.paid`
+may recover access even when its invoice period began before the terminal event.
+Invoice payment/finalization failures are recorded for audit but do not revoke
+an already paid period while Stripe retries collection. Unknown events are
+retained as ignored inbox records and never restore access.
+
+Do not subscribe to `charge.dispute.closed` or
+`charge.dispute.funds_reinstated` for automatic restoration. A won dispute is
+restored only after operator verification, through a manual entitlement or
+credit correction with an audit record; webhook delivery never restores it
+automatically.
+
 ## Servers.Guru host bootstrap and LUKS2
 
 Servers.Guru issues an initial root credential and provides panel VNC. It does

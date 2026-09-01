@@ -5,10 +5,13 @@ using System.Text;
 using System.Text.Json;
 using Hook2Stream.Application;
 using Hook2Stream.Domain;
+using Hook2Stream.Infrastructure.Billing;
 using Hook2Stream.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 namespace Hook2Stream.IntegrationTests;
 
@@ -125,8 +128,7 @@ public sealed class BillingWorkflowTests
             ExternalPaymentIntentId: null,
             ExternalInvoiceId: null,
             ExternalChargeId: "ch_fully_reserved",
-            Paid: false,
-            Refunded: true,
+            Disposition: PaymentWebhookDisposition.Refunded,
             OccurredAt: DateTimeOffset.UtcNow,
             PeriodStartsAt: null,
             PeriodEndsAt: null,
@@ -194,8 +196,7 @@ public sealed class BillingWorkflowTests
             ExternalPaymentIntentId: null,
             ExternalInvoiceId: null,
             ExternalChargeId: null,
-            Paid: false,
-            Refunded: false,
+            Disposition: PaymentWebhookDisposition.CheckoutFailed,
             OccurredAt: DateTimeOffset.UtcNow,
             PeriodStartsAt: null,
             PeriodEndsAt: null,
@@ -206,7 +207,7 @@ public sealed class BillingWorkflowTests
         {
             EventId = "evt-checkout-late-success",
             Type = "checkout.session.async_payment_succeeded",
-            Paid = true,
+            Disposition = PaymentWebhookDisposition.Paid,
             OccurredAt = gateway.NextEvent.OccurredAt.AddMinutes(1),
             PayloadHash = string.Empty
         };
@@ -489,7 +490,7 @@ public sealed class BillingWorkflowTests
             EventId: "evt-cover-refund",
             Type: "charge.refunded",
             CheckoutId: checkoutId,
-            ExternalSessionId: "fixture-cover-1",
+            ExternalSessionId: $"fixture-{checkoutId:N}",
             ProductCode: BillingProducts.CleanCover,
             WorkspaceId: seeded.WorkspaceId,
             ProjectId: seeded.ProjectId,
@@ -498,8 +499,7 @@ public sealed class BillingWorkflowTests
             ExternalPaymentIntentId: null,
             ExternalInvoiceId: null,
             ExternalChargeId: "ch-cover-refund",
-            Paid: false,
-            Refunded: true,
+            Disposition: PaymentWebhookDisposition.Refunded,
             OccurredAt: DateTimeOffset.UtcNow,
             PeriodStartsAt: null,
             PeriodEndsAt: null,
@@ -515,8 +515,7 @@ public sealed class BillingWorkflowTests
         {
             EventId = "evt-cover-late-paid",
             Type = "checkout.session.completed",
-            Paid = true,
-            Refunded = false,
+            Disposition = PaymentWebhookDisposition.Paid,
             OccurredAt = gateway.NextEvent.OccurredAt.AddMinutes(-5),
             PayloadHash = string.Empty
         };
@@ -568,25 +567,25 @@ public sealed class BillingWorkflowTests
         var period1Start = DateTimeOffset.UtcNow.AddDays(-20);
         var period1End = period1Start.AddMonths(1);
         gateway.NextEvent = SubscriptionEvent(
-            "evt-period-1-paid", checkoutId, workspaceId, "in_period_1", paid: true, refunded: false,
-            period1Start, period1End);
+            "evt-period-1-paid", checkoutId, workspaceId, "sub_subscription", "in_period_1",
+            paid: true, refunded: false, period1Start.AddHours(1), period1Start, period1End);
         Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "period-1-paid")).StatusCode);
 
         gateway.NextEvent = SubscriptionEvent(
-            "evt-period-1-refund", checkoutId, workspaceId, "in_period_1", paid: false, refunded: true,
-            period1Start, period1End);
+            "evt-period-1-refund", checkoutId, workspaceId, "sub_subscription", "in_period_1",
+            paid: false, refunded: true, period1Start.AddHours(2), period1Start, period1End);
         Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "period-1-refund")).StatusCode);
 
         gateway.NextEvent = SubscriptionEvent(
-            "evt-period-1-late-paid", checkoutId, workspaceId, "in_period_1", paid: true, refunded: false,
-            period1Start, period1End);
+            "evt-period-1-late-paid", checkoutId, workspaceId, "sub_subscription", "in_period_1",
+            paid: true, refunded: false, period1Start.AddHours(3), period1Start, period1End);
         Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "period-1-late-paid")).StatusCode);
 
         var period2Start = period1End;
         var period2End = period2Start.AddMonths(1);
         gateway.NextEvent = SubscriptionEvent(
-            "evt-period-2-paid", checkoutId, workspaceId, "in_period_2", paid: true, refunded: false,
-            period2Start, period2End);
+            "evt-period-2-paid", checkoutId, workspaceId, "sub_subscription", "in_period_2",
+            paid: true, refunded: false, period2Start.AddHours(1), period2Start, period2End);
         Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "period-2-paid")).StatusCode);
 
         await using var verifyScope = factory.Services.CreateAsyncScope();
@@ -599,6 +598,1210 @@ public sealed class BillingWorkflowTests
         Assert.Equal("in_period_1", entitlements[0].ExternalInvoiceId);
         Assert.Equal(EntitlementState.Active, entitlements[1].State);
         Assert.Equal("in_period_2", entitlements[1].ExternalInvoiceId);
+    }
+
+    [Theory]
+    [InlineData("customer.subscription.deleted")]
+    [InlineData("customer.subscription.paused")]
+    [InlineData("customer.subscription.updated")]
+    public async Task Subscription_access_end_is_idempotent_preserves_history_and_late_paid_does_not_restore_the_period(
+        string eventType)
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        Guid firstEntitlementId;
+        var periodStart = DateTimeOffset.UtcNow.AddDays(-10);
+        var periodEnd = periodStart.AddMonths(1);
+        var revokedAt = periodStart.AddDays(5);
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = (await db.Workspaces.SingleAsync()).Id;
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = $"subscription-revoke-{eventType}",
+                RequestHash = new string('2', 64),
+                State = CheckoutState.Completed,
+                ExternalSessionId = $"cs_{eventType}",
+                ExternalSubscriptionId = "sub_lifecycle",
+                CheckoutUrl = "https://payments.example.test/subscription-lifecycle",
+                CompletedAt = periodStart
+            };
+            var entitlement = new Entitlement
+            {
+                WorkspaceId = workspaceId,
+                CheckoutId = checkout.Id,
+                ProductCode = BillingProducts.ActiveArtist,
+                ProviderPeriodKey = "invoice:in_lifecycle_1",
+                ExternalSubscriptionId = "sub_lifecycle",
+                ExternalInvoiceId = "in_lifecycle_1",
+                ProviderEventOccurredAt = periodStart.AddHours(1),
+                PeriodStartsAt = periodStart,
+                ValidUntil = periodEnd,
+                IncludedItemCount = 18,
+                RemainingContentRerenders = 18
+            };
+            checkoutId = checkout.Id;
+            firstEntitlementId = entitlement.Id;
+            db.BillingCheckouts.Add(checkout);
+            db.Entitlements.Add(entitlement);
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: $"evt-{eventType}-revoked",
+            Type: eventType,
+            CheckoutId: null,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_subscription",
+            ExternalSubscriptionId: "sub_lifecycle",
+            ExternalPaymentIntentId: null,
+            ExternalInvoiceId: null,
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.SubscriptionAccessEnded,
+            OccurredAt: revokedAt,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "subscription-access-revoked")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "subscription-access-revoked")).StatusCode);
+
+        gateway.NextEvent = SubscriptionEvent(
+            $"evt-{eventType}-late-paid",
+            checkoutId,
+            workspaceId,
+            "sub_lifecycle",
+            "in_lifecycle_1",
+            paid: true,
+            refunded: false,
+            revokedAt.AddSeconds(-1),
+            periodStart,
+            periodEnd);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "subscription-late-paid")).StatusCode);
+
+        var nextPeriodStart = periodEnd;
+        var nextPeriodEnd = nextPeriodStart.AddMonths(1);
+        gateway.NextEvent = SubscriptionEvent(
+            $"evt-{eventType}-next-paid",
+            checkoutId,
+            workspaceId,
+            "sub_lifecycle",
+            "in_lifecycle_2",
+            paid: true,
+            refunded: false,
+            revokedAt.AddSeconds(1),
+            nextPeriodStart,
+            nextPeriodEnd);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "subscription-next-paid")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var entitlements = await verifyDb.Entitlements.OrderBy(value => value.PeriodStartsAt).ToListAsync();
+        Assert.Equal(2, entitlements.Count);
+        Assert.Equal(firstEntitlementId, entitlements[0].Id);
+        Assert.Equal(EntitlementState.Active, entitlements[0].State);
+        Assert.Null(entitlements[0].RevokedAt);
+        Assert.Equal(revokedAt, entitlements[0].ValidUntil);
+        Assert.Equal("in_lifecycle_1", entitlements[0].ExternalInvoiceId);
+        Assert.Equal(EntitlementState.Active, entitlements[1].State);
+        Assert.Equal("in_lifecycle_2", entitlements[1].ExternalInvoiceId);
+        Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(value => value.Action == "billing.provider_subscription_access_ended"));
+        Assert.Equal(3, await verifyDb.InboxMessages.CountAsync());
+    }
+
+    [Fact]
+    public async Task Out_of_order_subscription_end_blocks_an_older_event_but_allows_overdue_payment_created_later()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        var revokedAt = DateTimeOffset.UtcNow;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = (await db.Workspaces.SingleAsync()).Id;
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "subscription-out-of-order-revoke",
+                RequestHash = new string('5', 64),
+                ExternalSubscriptionId = "sub_out_of_order",
+                CheckoutUrl = "https://payments.example.test/subscription-out-of-order"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-out-of-order-revoked",
+            Type: "customer.subscription.deleted",
+            CheckoutId: null,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_subscription",
+            ExternalSubscriptionId: "sub_out_of_order",
+            ExternalPaymentIntentId: null,
+            ExternalInvoiceId: null,
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.SubscriptionAccessEnded,
+            OccurredAt: revokedAt,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "out-of-order-revoked")).StatusCode);
+
+        var oldStart = revokedAt.AddDays(-20);
+        gateway.NextEvent = SubscriptionEvent(
+            "evt-out-of-order-old-paid",
+            checkoutId,
+            workspaceId,
+            "sub_out_of_order",
+            "in_out_of_order_old",
+            paid: true,
+            refunded: false,
+            revokedAt.AddSeconds(-1),
+            oldStart,
+            oldStart.AddMonths(1));
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "out-of-order-old-paid")).StatusCode);
+
+        var overdueStart = revokedAt.AddDays(-2);
+        gateway.NextEvent = SubscriptionEvent(
+            "evt-out-of-order-new-paid",
+            checkoutId,
+            workspaceId,
+            "sub_out_of_order",
+            "in_out_of_order_new",
+            paid: true,
+            refunded: false,
+            revokedAt.AddSeconds(1),
+            overdueStart,
+            overdueStart.AddMonths(1));
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "out-of-order-new-paid")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var entitlement = await verifyDb.Entitlements.SingleAsync();
+        Assert.Equal("in_out_of_order_new", entitlement.ExternalInvoiceId);
+        Assert.Equal(EntitlementState.Active, entitlement.State);
+        Assert.Equal(revokedAt.AddSeconds(1), entitlement.ProviderEventOccurredAt);
+    }
+
+    [Fact]
+    public async Task Older_subscription_end_delivered_after_newer_payment_does_not_clamp_the_new_period()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "subscription-reverse-delivery",
+                RequestHash = new string('6', 64),
+                ExternalSubscriptionId = "sub_reverse_delivery",
+                CheckoutUrl = "https://payments.example.test/subscription-reverse-delivery"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            await db.SaveChangesAsync();
+        }
+
+        var accessEndedAt = DateTimeOffset.UtcNow;
+        var paidOccurredAt = accessEndedAt.AddMinutes(1);
+        var overduePeriodStart = accessEndedAt.AddDays(-3);
+        var periodEnd = accessEndedAt.AddDays(27);
+        gateway.NextEvent = SubscriptionEvent(
+            "evt-reverse-delivery-paid",
+            checkoutId,
+            workspaceId,
+            "sub_reverse_delivery",
+            "in_reverse_delivery",
+            paid: true,
+            refunded: false,
+            paidOccurredAt,
+            overduePeriodStart,
+            periodEnd);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "reverse-delivery-paid")).StatusCode);
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-reverse-delivery-ended",
+            Type: "customer.subscription.deleted",
+            CheckoutId: null,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_subscription",
+            ExternalSubscriptionId: "sub_reverse_delivery",
+            ExternalPaymentIntentId: null,
+            ExternalInvoiceId: null,
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.SubscriptionAccessEnded,
+            OccurredAt: accessEndedAt,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "reverse-delivery-ended")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var entitlement = await verifyDb.Entitlements.SingleAsync();
+        Assert.Equal(EntitlementState.Active, entitlement.State);
+        Assert.Null(entitlement.RevokedAt);
+        Assert.Equal(periodEnd, entitlement.ValidUntil);
+        Assert.Equal(paidOccurredAt, entitlement.ProviderEventOccurredAt);
+        Assert.Equal(
+            accessEndedAt,
+            await verifyDb.BillingCheckouts.Where(value => value.Id == checkoutId)
+                .Select(value => value.SubscriptionAccessEndedAt)
+                .SingleAsync());
+    }
+
+    [Fact]
+    public async Task Subscription_payment_failure_is_audited_without_premature_revocation()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = (await db.Workspaces.SingleAsync()).Id;
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "subscription-payment-failed",
+                RequestHash = new string('3', 64),
+                State = CheckoutState.Completed,
+                ExternalSubscriptionId = "sub_payment_failed",
+                CheckoutUrl = "https://payments.example.test/subscription-payment-failed"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            db.Entitlements.Add(new Entitlement
+            {
+                WorkspaceId = workspaceId,
+                CheckoutId = checkout.Id,
+                ProductCode = BillingProducts.ActiveArtist,
+                ProviderPeriodKey = "invoice:in_paid_before_retry",
+                ExternalSubscriptionId = "sub_payment_failed",
+                ExternalInvoiceId = "in_paid_before_retry",
+                PeriodStartsAt = DateTimeOffset.UtcNow.AddDays(-5),
+                ValidUntil = DateTimeOffset.UtcNow.AddDays(25)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-invoice-payment-failed",
+            Type: "invoice.payment_failed",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_payment_failed",
+            ExternalSubscriptionId: "sub_payment_failed",
+            ExternalPaymentIntentId: "pi_payment_failed",
+            ExternalInvoiceId: "in_payment_failed",
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.PaymentFailed,
+            OccurredAt: DateTimeOffset.UtcNow,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "invoice-payment-failed")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Equal(EntitlementState.Active, (await verifyDb.Entitlements.SingleAsync()).State);
+        Assert.Equal(CheckoutState.Completed, (await verifyDb.BillingCheckouts.SingleAsync()).State);
+        Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(value => value.Action == "billing.provider_payment_failed"));
+    }
+
+    [Fact]
+    public async Task One_time_dispute_then_refund_is_idempotent_and_reconciles_revocation_once()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        Guid projectId;
+        Guid entitlementId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = (await db.Workspaces.SingleAsync()).Id;
+            var project = new ReleaseProject
+            {
+                WorkspaceId = workspaceId,
+                ProjectLabel = "Release pack dispute",
+                ArtistName = "Disputed artist",
+                TrackTitle = "Disputed track"
+            };
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProjectId = project.Id,
+                ProductCode = BillingProducts.ReleasePack,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ReleasePack),
+                IdempotencyKey = "release-pack-dispute",
+                RequestHash = new string('4', 64),
+                State = CheckoutState.Completed,
+                ExternalPaymentIntentId = "pi_disputed",
+                CheckoutUrl = "https://payments.example.test/release-pack-dispute"
+            };
+            var entitlement = new Entitlement
+            {
+                WorkspaceId = workspaceId,
+                CheckoutId = checkout.Id,
+                ProjectId = project.Id,
+                ProductCode = BillingProducts.ReleasePack,
+                ProviderPeriodKey = "purchase",
+                ExternalPaymentIntentId = "pi_disputed",
+                IncludedItemCount = 18,
+                RemainingContentRerenders = 18
+            };
+            checkoutId = checkout.Id;
+            projectId = project.Id;
+            entitlementId = entitlement.Id;
+            db.Projects.Add(project);
+            db.BillingCheckouts.Add(checkout);
+            db.Entitlements.Add(entitlement);
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-charge-disputed",
+            Type: "charge.dispute.created",
+            CheckoutId: null,
+            ExternalSessionId: null,
+            ProductCode: null,
+            WorkspaceId: null,
+            ProjectId: null,
+            ExternalCustomerId: null,
+            ExternalSubscriptionId: null,
+            ExternalPaymentIntentId: "pi_disputed",
+            ExternalInvoiceId: null,
+            ExternalChargeId: "ch_disputed",
+            Disposition: PaymentWebhookDisposition.Disputed,
+            OccurredAt: DateTimeOffset.UtcNow,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "charge-disputed")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "charge-disputed")).StatusCode);
+
+        gateway.NextEvent = gateway.NextEvent with
+        {
+            EventId = "evt-charge-refunded-after-dispute",
+            Type = "charge.refunded",
+            Disposition = PaymentWebhookDisposition.Refunded,
+            OccurredAt = gateway.NextEvent.OccurredAt.AddMinutes(1),
+            PayloadHash = string.Empty
+        };
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "charge-refunded-after-dispute")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "charge-refunded-after-dispute")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Equal(EntitlementState.Revoked, (await verifyDb.Entitlements.SingleAsync()).State);
+        var verifiedCheckout = await verifyDb.BillingCheckouts.SingleAsync(value => value.Id == checkoutId);
+        Assert.Equal(CheckoutState.Refunded, verifiedCheckout.State);
+        Assert.NotNull(verifiedCheckout.RefundedAt);
+        Assert.Equal(1, await verifyDb.AuditEvents.CountAsync(value => value.Action == "billing.provider_access_revoked"));
+        Assert.Equal(
+            1,
+            await verifyDb.OutboxMessages.CountAsync(value =>
+                value.DedupeKey == $"pipeline.reconcile:{projectId:N}:entitlement.revoked:{entitlementId:N}"));
+    }
+
+    [Fact]
+    public async Task Subscription_dispute_then_refund_revokes_only_the_period_and_reconciles_once()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        Guid projectId;
+        Guid disputedEntitlementId;
+        Guid retainedEntitlementId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var project = new ReleaseProject
+            {
+                WorkspaceId = workspaceId,
+                ProjectLabel = "Subscription period dispute",
+                ArtistName = "Subscription artist",
+                TrackTitle = "Subscription track"
+            };
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProjectId = project.Id,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "subscription-period-dispute",
+                RequestHash = new string('7', 64),
+                State = CheckoutState.Completed,
+                ExternalCustomerId = "cus_subscription_dispute",
+                ExternalSubscriptionId = "sub_subscription_dispute",
+                CheckoutUrl = "https://payments.example.test/subscription-period-dispute"
+            };
+            var disputed = new Entitlement
+            {
+                WorkspaceId = workspaceId,
+                CheckoutId = checkout.Id,
+                ProjectId = project.Id,
+                ProductCode = BillingProducts.ActiveArtist,
+                ProviderPeriodKey = "invoice:in_disputed_period",
+                ExternalSubscriptionId = "sub_subscription_dispute",
+                ExternalPaymentIntentId = "pi_disputed_period",
+                ExternalInvoiceId = "in_disputed_period",
+                ProviderEventOccurredAt = DateTimeOffset.UtcNow.AddMonths(-1),
+                PeriodStartsAt = DateTimeOffset.UtcNow.AddMonths(-1),
+                ValidUntil = DateTimeOffset.UtcNow
+            };
+            var retained = new Entitlement
+            {
+                WorkspaceId = workspaceId,
+                CheckoutId = checkout.Id,
+                ProjectId = project.Id,
+                ProductCode = BillingProducts.ActiveArtist,
+                ProviderPeriodKey = "invoice:in_retained_period",
+                ExternalSubscriptionId = "sub_subscription_dispute",
+                ExternalPaymentIntentId = "pi_retained_period",
+                ExternalInvoiceId = "in_retained_period",
+                ProviderEventOccurredAt = DateTimeOffset.UtcNow,
+                PeriodStartsAt = DateTimeOffset.UtcNow,
+                ValidUntil = DateTimeOffset.UtcNow.AddMonths(1)
+            };
+            checkoutId = checkout.Id;
+            projectId = project.Id;
+            disputedEntitlementId = disputed.Id;
+            retainedEntitlementId = retained.Id;
+            db.Projects.Add(project);
+            db.BillingCheckouts.Add(checkout);
+            db.Entitlements.AddRange(disputed, retained);
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-subscription-period-dispute",
+            Type: "charge.dispute.created",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_subscription_dispute",
+            ExternalSubscriptionId: "sub_subscription_dispute",
+            ExternalPaymentIntentId: "pi_disputed_period",
+            ExternalInvoiceId: "in_disputed_period",
+            ExternalChargeId: "ch_disputed_period",
+            Disposition: PaymentWebhookDisposition.Disputed,
+            OccurredAt: DateTimeOffset.UtcNow,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "subscription-period-dispute")).StatusCode);
+
+        gateway.NextEvent = gateway.NextEvent with
+        {
+            EventId = "evt-subscription-period-refund-after-dispute",
+            Type = "charge.refunded",
+            Disposition = PaymentWebhookDisposition.Refunded,
+            OccurredAt = gateway.NextEvent.OccurredAt.AddMinutes(1),
+            PayloadHash = string.Empty
+        };
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await PostWebhook(client, "subscription-period-refund-after-dispute")).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await PostWebhook(client, "subscription-period-refund-after-dispute")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Equal(
+            EntitlementState.Revoked,
+            await verifyDb.Entitlements.Where(value => value.Id == disputedEntitlementId)
+                .Select(value => value.State)
+                .SingleAsync());
+        Assert.Equal(
+            EntitlementState.Active,
+            await verifyDb.Entitlements.Where(value => value.Id == retainedEntitlementId)
+                .Select(value => value.State)
+                .SingleAsync());
+        var verifiedCheckout = await verifyDb.BillingCheckouts.SingleAsync(value => value.Id == checkoutId);
+        Assert.Equal(CheckoutState.Completed, verifiedCheckout.State);
+        Assert.Null(verifiedCheckout.ProviderAccessRevokedAt);
+        Assert.NotNull(verifiedCheckout.RefundedAt);
+        Assert.Equal(
+            1,
+            await verifyDb.OutboxMessages.CountAsync(value =>
+                value.DedupeKey == $"pipeline.reconcile:{projectId:N}:entitlement.revoked:{disputedEntitlementId:N}"));
+    }
+
+    [Theory]
+    [InlineData("charge.refunded")]
+    [InlineData("charge.dispute.created")]
+    public async Task Invoice_payments_array_intent_is_stored_and_scopes_later_access_revocation(
+        string accessEventType)
+    {
+        const string webhookSecret = "whsec_invoice_payments_integration";
+        var gateway = new StripePaymentGateway(
+            new HttpClient(),
+            Options.Create(new StripeOptions
+            {
+                WebhookSecret = webhookSecret,
+                WebhookToleranceSeconds = 300
+            }));
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = $"invoice-payments-{accessEventType}",
+                RequestHash = new string('8', 64),
+                ExternalCustomerId = "cus_invoice_payments",
+                ExternalSubscriptionId = "sub_invoice_payments",
+                CheckoutUrl = "https://payments.example.test/invoice-payments"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            await db.SaveChangesAsync();
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var firstPeriodStart = now.AddMonths(-2);
+        var firstPaid = StripeInvoicePaidPayload(
+            "evt_invoice_payments_first",
+            checkoutId,
+            workspaceId,
+            "in_invoice_payments_first",
+            "pi_invoice_payments_first",
+            now.AddMinutes(-3),
+            firstPeriodStart,
+            firstPeriodStart.AddMonths(1));
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await PostSignedStripeWebhook(client, firstPaid, webhookSecret)).StatusCode);
+
+        var secondPeriodStart = firstPeriodStart.AddMonths(1);
+        var secondPaid = StripeInvoicePaidPayload(
+            "evt_invoice_payments_second",
+            checkoutId,
+            workspaceId,
+            "in_invoice_payments_second",
+            "pi_invoice_payments_second",
+            now.AddMinutes(-2),
+            secondPeriodStart,
+            secondPeriodStart.AddMonths(1));
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await PostSignedStripeWebhook(client, secondPaid, webhookSecret)).StatusCode);
+
+        await using (var paidScope = factory.Services.CreateAsyncScope())
+        {
+            var paidDb = paidScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            Assert.Equal(
+                new[] { "pi_invoice_payments_first", "pi_invoice_payments_second" },
+                await paidDb.Entitlements.OrderBy(value => value.PeriodStartsAt)
+                    .Select(value => value.ExternalPaymentIntentId)
+                    .ToArrayAsync());
+        }
+
+        var accessPayload = StripeAccessRevocationPayload(
+            accessEventType,
+            "pi_invoice_payments_first",
+            now.AddMinutes(-1));
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await PostSignedStripeWebhook(client, accessPayload, webhookSecret)).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var entitlements = await verifyDb.Entitlements.OrderBy(value => value.PeriodStartsAt).ToListAsync();
+        Assert.Equal(2, entitlements.Count);
+        Assert.Equal(EntitlementState.Revoked, entitlements[0].State);
+        Assert.Equal("pi_invoice_payments_first", entitlements[0].ExternalPaymentIntentId);
+        Assert.Equal(EntitlementState.Active, entitlements[1].State);
+        Assert.Equal("pi_invoice_payments_second", entitlements[1].ExternalPaymentIntentId);
+    }
+
+    [Fact]
+    public async Task One_time_dispute_tombstone_arriving_before_payment_blocks_late_credit_grant()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ArtworkCredits5,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ArtworkCredits5),
+                IdempotencyKey = "credit-dispute-before-paid",
+                RequestHash = new string('8', 64),
+                ExternalPaymentIntentId = "pi_credit_dispute",
+                CheckoutUrl = "https://payments.example.test/credit-dispute-before-paid"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            await db.SaveChangesAsync();
+        }
+
+        var disputedAt = DateTimeOffset.UtcNow;
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-credit-dispute-before-paid",
+            Type: "charge.dispute.created",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ArtworkCredits5,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: null,
+            ExternalSubscriptionId: null,
+            ExternalPaymentIntentId: "pi_credit_dispute",
+            ExternalInvoiceId: null,
+            ExternalChargeId: "ch_credit_dispute",
+            Disposition: PaymentWebhookDisposition.Disputed,
+            OccurredAt: disputedAt,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "credit-dispute-before-paid")).StatusCode);
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-credit-late-paid",
+            Type: "checkout.session.completed",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ArtworkCredits5,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: null,
+            ExternalSubscriptionId: null,
+            ExternalPaymentIntentId: "pi_credit_dispute",
+            ExternalInvoiceId: null,
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.Paid,
+            OccurredAt: disputedAt.AddMinutes(1),
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "credit-late-paid")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Empty(await verifyDb.ArtworkCreditGrants.ToListAsync());
+        Assert.Empty(await verifyDb.WorkspaceArtworkCredits.ToListAsync());
+        var checkoutState = await verifyDb.BillingCheckouts.SingleAsync(value => value.Id == checkoutId);
+        Assert.Equal(CheckoutState.Pending, checkoutState.State);
+        Assert.Equal(disputedAt, checkoutState.ProviderAccessRevokedAt);
+    }
+
+    [Fact]
+    public async Task Malformed_historical_audit_json_is_not_used_as_security_state()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ArtworkCredits5,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ArtworkCredits5),
+                IdempotencyKey = "malformed-audit-evidence",
+                RequestHash = new string('d', 64),
+                ExternalPaymentIntentId = "pi_malformed_audit",
+                CheckoutUrl = "https://payments.example.test/malformed-audit-evidence"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            db.AuditEvents.Add(new AuditEvent
+            {
+                WorkspaceId = workspaceId,
+                Action = "billing.provider_access_revoked",
+                ResourceType = "billing_checkout",
+                ResourceId = checkout.Id,
+                DataJson = "{malformed"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-paid-after-malformed-audit",
+            Type: "checkout.session.completed",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ArtworkCredits5,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: null,
+            ExternalSubscriptionId: null,
+            ExternalPaymentIntentId: "pi_malformed_audit",
+            ExternalInvoiceId: null,
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.Paid,
+            OccurredAt: DateTimeOffset.UtcNow,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "paid-after-malformed-audit")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Equal(5, (await verifyDb.WorkspaceArtworkCredits.SingleAsync()).Balance);
+        Assert.Null((await verifyDb.BillingCheckouts.SingleAsync(value => value.Id == checkoutId)).ProviderAccessRevokedAt);
+    }
+
+    [Fact]
+    public async Task Unknown_provider_event_is_persisted_as_ignored()
+    {
+        var gateway = new MutablePaymentGateway
+        {
+            NextEvent = new PaymentWebhookEvent(
+                EventId: "evt-unknown-provider-event",
+                Type: "customer.subscription.resumed",
+                CheckoutId: null,
+                ExternalSessionId: null,
+                ProductCode: null,
+                WorkspaceId: null,
+                ProjectId: null,
+                ExternalCustomerId: null,
+                ExternalSubscriptionId: "sub_unknown",
+                ExternalPaymentIntentId: null,
+                ExternalInvoiceId: null,
+                ExternalChargeId: null,
+                Disposition: PaymentWebhookDisposition.Unknown,
+                OccurredAt: DateTimeOffset.UtcNow,
+                PeriodStartsAt: null,
+                PeriodEndsAt: null,
+                PayloadHash: string.Empty)
+        };
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "unknown-provider-event")).StatusCode);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var inbox = await db.InboxMessages.SingleAsync();
+        Assert.Equal("ignored", inbox.State);
+        Assert.Equal("billing.event_not_actionable", inbox.LastError);
+    }
+
+    [Fact]
+    public async Task Actionable_provider_event_without_checkout_fails_closed_for_retry()
+    {
+        var gateway = new MutablePaymentGateway
+        {
+            NextEvent = new PaymentWebhookEvent(
+                EventId: "evt-unresolved-payment-failure",
+                Type: "invoice.payment_failed",
+                CheckoutId: null,
+                ExternalSessionId: null,
+                ProductCode: null,
+                WorkspaceId: null,
+                ProjectId: null,
+                ExternalCustomerId: null,
+                ExternalSubscriptionId: "sub_unresolved",
+                ExternalPaymentIntentId: null,
+                ExternalInvoiceId: "in_unresolved",
+                ExternalChargeId: null,
+                Disposition: PaymentWebhookDisposition.PaymentFailed,
+                OccurredAt: DateTimeOffset.UtcNow,
+                PeriodStartsAt: null,
+                PeriodEndsAt: null,
+                PayloadHash: string.Empty)
+        };
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+
+        Assert.Equal(HttpStatusCode.Conflict, (await PostWebhook(client, "unresolved-payment-failure")).StatusCode);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Empty(await db.InboxMessages.ToListAsync());
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("customer")]
+    [InlineData("subscription")]
+    [InlineData("payment_intent")]
+    public async Task Provider_identity_mismatch_returns_conflict_before_any_mutation(string mismatch)
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        var oneTime = mismatch == "payment_intent";
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = oneTime ? BillingProducts.ReleasePack : BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(
+                    oneTime ? BillingProducts.ReleasePack : BillingProducts.ActiveArtist),
+                IdempotencyKey = $"provider-correlation-{mismatch}",
+                RequestHash = new string('9', 64),
+                ExternalSessionId = "cs_expected",
+                ExternalCustomerId = "cus_expected",
+                ExternalSubscriptionId = oneTime ? null : "sub_expected",
+                ExternalPaymentIntentId = oneTime ? "pi_expected" : null,
+                CheckoutUrl = "https://payments.example.test/provider-correlation"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: $"evt-provider-correlation-{mismatch}",
+            Type: "invoice.payment_failed",
+            CheckoutId: checkoutId,
+            ExternalSessionId: mismatch == "session" ? "cs_wrong" : "cs_expected",
+            ProductCode: oneTime ? BillingProducts.ReleasePack : BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: mismatch == "customer" ? "cus_wrong" : "cus_expected",
+            ExternalSubscriptionId: oneTime
+                ? null
+                : mismatch == "subscription" ? "sub_wrong" : "sub_expected",
+            ExternalPaymentIntentId: oneTime
+                ? mismatch == "payment_intent" ? "pi_wrong" : "pi_expected"
+                : null,
+            ExternalInvoiceId: "in_correlation",
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.PaymentFailed,
+            OccurredAt: DateTimeOffset.UtcNow,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+
+        var response = await PostWebhook(client, $"provider-correlation-{mismatch}");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("billing.webhook_correlation_mismatch", problem.GetProperty("code").GetString());
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Empty(await verifyDb.InboxMessages.ToListAsync());
+        Assert.DoesNotContain(
+            await verifyDb.AuditEvents.ToListAsync(),
+            value => value.Action.StartsWith("billing.provider_", StringComparison.Ordinal));
+        Assert.Equal(CheckoutState.Pending, (await verifyDb.BillingCheckouts.SingleAsync()).State);
+    }
+
+    [Fact]
+    public async Task Provider_subscription_owned_by_another_checkout_cannot_fill_a_null_correlation()
+    {
+        var gateway = new MutablePaymentGateway();
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid targetCheckoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var target = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "provider-owner-target",
+                RequestHash = new string('b', 64),
+                CheckoutUrl = "https://payments.example.test/provider-owner-target"
+            };
+            var owner = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "provider-owner-existing",
+                RequestHash = new string('c', 64),
+                ExternalSubscriptionId = "sub_owned_by_other_checkout",
+                CheckoutUrl = "https://payments.example.test/provider-owner-existing"
+            };
+            targetCheckoutId = target.Id;
+            db.BillingCheckouts.AddRange(target, owner);
+            await db.SaveChangesAsync();
+        }
+
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-provider-owned-subscription",
+            Type: "invoice.payment_failed",
+            CheckoutId: targetCheckoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: null,
+            ExternalSubscriptionId: "sub_owned_by_other_checkout",
+            ExternalPaymentIntentId: null,
+            ExternalInvoiceId: "in_provider_owner_conflict",
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.PaymentFailed,
+            OccurredAt: DateTimeOffset.UtcNow,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+
+        var response = await PostWebhook(client, "provider-owned-subscription");
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("billing.webhook_correlation_mismatch", problem.GetProperty("code").GetString());
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Null((await verifyDb.BillingCheckouts.SingleAsync(value => value.Id == targetCheckoutId)).ExternalSubscriptionId);
+        Assert.Empty(await verifyDb.InboxMessages.ToListAsync());
+        Assert.DoesNotContain(
+            await verifyDb.AuditEvents.ToListAsync(),
+            value => value.Action.StartsWith("billing.provider_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Actionable_event_concurrency_conflict_is_atomic_and_retry_preserves_terminal_ordering()
+    {
+        var gateway = new MutablePaymentGateway();
+        var concurrency = new InjectedWebhookConcurrencyInterceptor();
+        await using var factory = new Hook2StreamApiFactory(
+            services =>
+            {
+                services.RemoveAll<IPaymentGateway>();
+                services.AddSingleton<IPaymentGateway>(gateway);
+            },
+            options => options.AddInterceptors(concurrency));
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        Guid workspaceId;
+        Guid checkoutId;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            workspaceId = await db.Workspaces.Select(value => value.Id).SingleAsync();
+            var checkout = new BillingCheckout
+            {
+                WorkspaceId = workspaceId,
+                ProductCode = BillingProducts.ActiveArtist,
+                AmountCents = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                IdempotencyKey = "concurrent-provider-events",
+                RequestHash = new string('a', 64),
+                ExternalCustomerId = "cus_subscription",
+                ExternalSubscriptionId = "sub_concurrent",
+                CheckoutUrl = "https://payments.example.test/concurrent-provider-events"
+            };
+            checkoutId = checkout.Id;
+            db.BillingCheckouts.Add(checkout);
+            await db.SaveChangesAsync();
+        }
+
+        var accessEndedAt = DateTimeOffset.UtcNow;
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-concurrent-payment-failed",
+            Type: "invoice.payment_failed",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_subscription",
+            ExternalSubscriptionId: "sub_concurrent",
+            ExternalPaymentIntentId: null,
+            ExternalInvoiceId: "in_concurrent_failed",
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.PaymentFailed,
+            OccurredAt: accessEndedAt.AddMinutes(-1),
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        concurrency.Arm();
+
+        var conflicted = await PostWebhook(client, "concurrent-payment-failed");
+
+        Assert.Equal(HttpStatusCode.Conflict, conflicted.StatusCode);
+        Assert.True(concurrency.ObservedCheckoutFence);
+        await using (var conflictScope = factory.Services.CreateAsyncScope())
+        {
+            var conflictDb = conflictScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+            Assert.Empty(await conflictDb.InboxMessages.ToListAsync());
+            Assert.Equal(
+                0,
+                await conflictDb.AuditEvents.CountAsync(
+                    value => value.Action == "billing.provider_payment_failed"));
+            Assert.Null((await conflictDb.BillingCheckouts.SingleAsync(value => value.Id == checkoutId)).SubscriptionAccessEndedAt);
+        }
+
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "concurrent-payment-failed-retry")).StatusCode);
+        gateway.NextEvent = new PaymentWebhookEvent(
+            EventId: "evt-concurrent-ended",
+            Type: "customer.subscription.deleted",
+            CheckoutId: checkoutId,
+            ExternalSessionId: null,
+            ProductCode: BillingProducts.ActiveArtist,
+            WorkspaceId: workspaceId,
+            ProjectId: null,
+            ExternalCustomerId: "cus_subscription",
+            ExternalSubscriptionId: "sub_concurrent",
+            ExternalPaymentIntentId: null,
+            ExternalInvoiceId: null,
+            ExternalChargeId: null,
+            Disposition: PaymentWebhookDisposition.SubscriptionAccessEnded,
+            OccurredAt: accessEndedAt,
+            PeriodStartsAt: null,
+            PeriodEndsAt: null,
+            PayloadHash: string.Empty);
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "concurrent-ended")).StatusCode);
+        var periodStart = accessEndedAt.AddDays(-7);
+        gateway.NextEvent = SubscriptionEvent(
+            "evt-concurrent-old-paid",
+            checkoutId,
+            workspaceId,
+            "sub_concurrent",
+            "in_concurrent",
+            paid: true,
+            refunded: false,
+            accessEndedAt.AddSeconds(-1),
+            periodStart,
+            periodStart.AddMonths(1));
+        Assert.Equal(HttpStatusCode.OK, (await PostWebhook(client, "concurrent-old-paid")).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var checkoutState = await verifyDb.BillingCheckouts.SingleAsync(value => value.Id == checkoutId);
+        Assert.Equal(accessEndedAt, checkoutState.SubscriptionAccessEndedAt);
+        Assert.Empty(await verifyDb.Entitlements.ToListAsync());
+        Assert.Equal(3, await verifyDb.InboxMessages.CountAsync());
+        Assert.Equal(
+            1,
+            await verifyDb.AuditEvents.CountAsync(value => value.Action == "billing.provider_payment_failed"));
+        Assert.Equal(
+            1,
+            await verifyDb.AuditEvents.CountAsync(
+                value => value.Action == "billing.provider_subscription_access_ended"));
     }
 
     private static async Task<CampaignSeed> SeedCampaign(Hook2StreamApiFactory factory)
@@ -967,13 +2170,148 @@ public sealed class BillingWorkflowTests
     private static Task<HttpResponseMessage> PostWebhook(HttpClient client, string marker) =>
         client.PostAsJsonAsync("/api/v1/billing/stripe/webhook", new { marker });
 
-    private static PaymentWebhookEvent SubscriptionEvent(
+    private static async Task<HttpResponseMessage> PostSignedStripeWebhook(
+        HttpClient client,
+        byte[] payload,
+        string webhookSecret)
+    {
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var signedPayload = Encoding.UTF8.GetBytes($"{timestamp}.{Encoding.UTF8.GetString(payload)}");
+        var signature = HMACSHA256.HashData(Encoding.UTF8.GetBytes(webhookSecret), signedPayload);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/billing/stripe/webhook")
+        {
+            Content = new ByteArrayContent(payload)
+        };
+        request.Content.Headers.ContentType = new("application/json");
+        request.Headers.TryAddWithoutValidation(
+            "Stripe-Signature",
+            $"t={timestamp},v1={Convert.ToHexStringLower(signature)}");
+        return await client.SendAsync(request);
+    }
+
+    private static byte[] StripeInvoicePaidPayload(
         string eventId,
         Guid checkoutId,
         Guid workspaceId,
         string invoiceId,
+        string paymentIntentId,
+        DateTimeOffset occurredAt,
+        DateTimeOffset periodStartsAt,
+        DateTimeOffset periodEndsAt) => JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = eventId,
+            type = "invoice.paid",
+            created = occurredAt.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = invoiceId,
+                    customer = "cus_invoice_payments",
+                    amount_paid = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    currency = "usd",
+                    metadata = new { },
+                    parent = new
+                    {
+                        subscription_details = new
+                        {
+                            subscription = "sub_invoice_payments",
+                            metadata = new Dictionary<string, string>
+                            {
+                                ["workspace_id"] = workspaceId.ToString("N"),
+                                ["checkout_id"] = checkoutId.ToString("N"),
+                                ["product_code"] = BillingProducts.ActiveArtist
+                            }
+                        }
+                    },
+                    payments = new
+                    {
+                        data = new[]
+                        {
+                            new
+                            {
+                                status = "open",
+                                payment = new { payment_intent = $"pi_old_open_{invoiceId}" }
+                            },
+                            new
+                            {
+                                status = "canceled",
+                                payment = new { payment_intent = $"pi_old_canceled_{invoiceId}" }
+                            },
+                            new
+                            {
+                                status = "paid",
+                                payment = new { payment_intent = paymentIntentId }
+                            }
+                        }
+                    },
+                    lines = new
+                    {
+                        data = new[]
+                        {
+                            new
+                            {
+                                period = new
+                                {
+                                    start = periodStartsAt.ToUnixTimeSeconds(),
+                                    end = periodEndsAt.ToUnixTimeSeconds()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    private static byte[] StripeAccessRevocationPayload(
+        string eventType,
+        string paymentIntentId,
+        DateTimeOffset occurredAt) => eventType == "charge.refunded"
+        ? JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_invoice_payments_refund",
+            type = eventType,
+            created = occurredAt.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "ch_invoice_payments_refund",
+                    payment_intent = paymentIntentId,
+                    amount = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    amount_captured = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    amount_refunded = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    refunded = true,
+                    metadata = new { }
+                }
+            }
+        })
+        : JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_invoice_payments_dispute",
+            type = eventType,
+            created = occurredAt.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "dp_invoice_payments_dispute",
+                    charge = "ch_invoice_payments_dispute",
+                    payment_intent = paymentIntentId,
+                    metadata = new { }
+                }
+            }
+        });
+
+    private static PaymentWebhookEvent SubscriptionEvent(
+        string eventId,
+        Guid checkoutId,
+        Guid workspaceId,
+        string subscriptionId,
+        string invoiceId,
         bool paid,
         bool refunded,
+        DateTimeOffset occurredAt,
         DateTimeOffset periodStartsAt,
         DateTimeOffset periodEndsAt) => new(
             EventId: eventId,
@@ -984,13 +2322,12 @@ public sealed class BillingWorkflowTests
             WorkspaceId: workspaceId,
             ProjectId: null,
             ExternalCustomerId: "cus_subscription",
-            ExternalSubscriptionId: "sub_subscription",
+            ExternalSubscriptionId: subscriptionId,
             ExternalPaymentIntentId: $"pi_{invoiceId}",
             ExternalInvoiceId: invoiceId,
             ExternalChargeId: refunded ? $"ch_{invoiceId}" : null,
-            Paid: paid,
-            Refunded: refunded,
-            OccurredAt: periodStartsAt.AddHours(1),
+            Disposition: paid ? PaymentWebhookDisposition.Paid : PaymentWebhookDisposition.Refunded,
+            OccurredAt: occurredAt,
             PeriodStartsAt: periodStartsAt,
             PeriodEndsAt: periodEndsAt,
             PayloadHash: string.Empty);
@@ -1037,6 +2374,33 @@ public sealed class BillingWorkflowTests
         {
             var value = NextEvent ?? throw new InvalidOperationException("No webhook was configured.");
             return value with { PayloadHash = Convert.ToHexStringLower(SHA256.HashData(payload)) };
+        }
+    }
+
+    private sealed class InjectedWebhookConcurrencyInterceptor : SaveChangesInterceptor
+    {
+        private int _remainingFailures;
+
+        public bool ObservedCheckoutFence { get; private set; }
+
+        public void Arm() => Interlocked.Exchange(ref _remainingFailures, 1);
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            var context = eventData.Context;
+            var isActionableWebhook = context?.ChangeTracker.Entries<InboxMessage>().Any(entry =>
+                    entry.State == EntityState.Added && entry.Entity.State == "processed") == true &&
+                context.ChangeTracker.Entries<BillingCheckout>().Any(entry => entry.State == EntityState.Modified);
+            if (!isActionableWebhook)
+                return new ValueTask<InterceptionResult<int>>(result);
+
+            ObservedCheckoutFence = true;
+            if (Interlocked.Exchange(ref _remainingFailures, 0) == 1)
+                throw new DbUpdateConcurrencyException("Injected checkout serialization conflict.");
+            return new ValueTask<InterceptionResult<int>>(result);
         }
     }
 }
