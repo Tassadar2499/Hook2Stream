@@ -72,8 +72,17 @@ put_versioned_object() {
 
 with_backup_lock() {
     exec 9>"$BACKUP_LOCK_FILE"
-    flock -w "$BACKUP_LOCK_TIMEOUT_SECONDS" 9 \
-        || fail "another backup did not release the shared lock within ${BACKUP_LOCK_TIMEOUT_SECONDS} seconds"
+    backup_lock_waited_seconds=0
+    while ! flock -n 9; do
+        [ "$backup_lock_waited_seconds" -lt "$BACKUP_LOCK_TIMEOUT_SECONDS" ] \
+            || fail "another backup did not release the shared lock within ${BACKUP_LOCK_TIMEOUT_SECONDS} seconds"
+
+        # Count completed one-second waits instead of consulting wall-clock time,
+        # which can move backwards. This also works with BusyBox flock, whose
+        # portable interface does not provide util-linux flock's -w option.
+        sleep 1
+        backup_lock_waited_seconds=$((backup_lock_waited_seconds + 1))
+    done
     perform_backup
     flock -u 9
     exec 9>&-

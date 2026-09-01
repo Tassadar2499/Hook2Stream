@@ -33,6 +33,38 @@ cat > "${stub_bin}/pg_dump" <<'EOF'
 printf '%s\n' 'deterministic-postgres-dump'
 EOF
 
+cat > "${stub_bin}/flock" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${TEST_STATE_DIR}/flock-invocations"
+case "${1:-}" in
+    -n)
+        [ "${2:-}" = 9 ] || exit 64
+        attempt_file=${TEST_STATE_DIR}/flock-attempt
+        attempt=0
+        [ ! -f "$attempt_file" ] || attempt=$(cat "$attempt_file")
+        attempt=$((attempt + 1))
+        printf '%s\n' "$attempt" > "$attempt_file"
+        [ "${TEST_FLOCK_ALWAYS_BUSY:-false}" != true ] || exit 1
+        [ "$attempt" -gt "${TEST_FLOCK_FAIL_ATTEMPTS:-0}" ] || exit 1
+        ;;
+    -u)
+        [ "${2:-}" = 9 ] || exit 64
+        ;;
+    *)
+        printf '%s\n' "unsupported BusyBox flock arguments: $*" >&2
+        exit 64
+        ;;
+esac
+EOF
+
+cat > "${stub_bin}/sleep" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 1 ] && [ "$1" = 1 ] || exit 64
+printf '%s\n' "$1" >> "${TEST_STATE_DIR}/sleep-invocations"
+EOF
+
 cat > "${stub_bin}/hook2stream-storage-tool" <<'EOF'
 #!/bin/sh
 set -eu
@@ -165,6 +197,8 @@ run_backup() {
         TEST_STATE_DIR="$state_dir" \
         TEST_UPLOAD_DIR="$upload_dir" \
         TEST_FAIL_MANIFEST="${TEST_FAIL_MANIFEST:-false}" \
+        TEST_FLOCK_ALWAYS_BUSY="${TEST_FLOCK_ALWAYS_BUSY:-false}" \
+        TEST_FLOCK_FAIL_ATTEMPTS="${TEST_FLOCK_FAIL_ATTEMPTS:-2}" \
         POSTGRES_HOST=postgres \
         POSTGRES_PORT=5432 \
         POSTGRES_DB=testdb \
@@ -183,6 +217,7 @@ run_backup() {
         BACKUP_RETENTION_DAYS=35 \
         BACKUP_MAX_OBJECT_TTL_HOURS=840 \
         BACKUP_SUCCESS_MARKER="${state_dir}/last-successful-backup" \
+        BACKUP_LOCK_TIMEOUT_SECONDS="${BACKUP_LOCK_TIMEOUT_SECONDS:-60}" \
         "$backup_script" backup-once
 }
 
@@ -199,8 +234,18 @@ grep -Fq 'options.UsePathStyle = true' "$deployment_dir/backup/storage-tool/main
 grep -Fq 'RequestChecksumCalculationWhenRequired' "$deployment_dir/backup/storage-tool/main.go" \
     && grep -Fq 'ResponseChecksumValidationWhenRequired' "$deployment_dir/backup/storage-tool/main.go" \
     || fail "backup does not use the Storj-compatible checksum mode"
-grep -Fq 'flock -w "$BACKUP_LOCK_TIMEOUT_SECONDS" 9' "$backup_script" \
-    || fail "backup-once and daemon runs are not serialized on shared scratch"
+grep -Fq 'while ! flock -n 9; do' "$backup_script" \
+    && grep -Fq 'flock -u 9' "$backup_script" \
+    || fail "backup-once and daemon runs are not serialized with portable flock operations"
+if grep -Eq 'flock[[:space:]]+(-[^[:space:]]*[wW]|--wait|--timeout)' "$backup_script"; then
+    fail "backup lock uses a wait option unsupported by BusyBox flock"
+fi
+[ "$(cat "${state_dir}/flock-attempt")" -eq 3 ] \
+    || fail "backup did not retry the non-blocking lock after contention"
+[ "$(wc -l < "${state_dir}/sleep-invocations" | tr -d ' ')" -eq 2 ] \
+    || fail "backup did not wait once between each contended lock attempt"
+[ "$(sed -n '4p' "${state_dir}/flock-invocations")" = '-u 9' ] \
+    || fail "successful backup did not explicitly release the shared lock"
 [ "$(cat "${state_dir}/used-recipient")" = 'age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq' ] \
     || fail "backup did not use the configured age recipient"
 
@@ -315,5 +360,25 @@ if run_backup >"${state_dir}/invalid-key-output" 2>&1; then
 fi
 grep -q 'age recipient' "${state_dir}/invalid-key-output" \
     || fail "unsafe age recipient failure did not explain the problem"
+
+rm -f \
+    "${state_dir}/flock-attempt" \
+    "${state_dir}/flock-invocations" \
+    "${state_dir}/sleep-invocations"
+if TEST_FLOCK_ALWAYS_BUSY=true \
+    TEST_FLOCK_FAIL_ATTEMPTS=0 \
+    BACKUP_LOCK_TIMEOUT_SECONDS=60 \
+    run_backup >"${state_dir}/lock-timeout-output" 2>&1; then
+    fail "backup succeeded while the shared lock remained contended"
+fi
+grep -Fq 'shared lock within 60 seconds' "${state_dir}/lock-timeout-output" \
+    || fail "bounded lock retry did not report the configured timeout"
+[ "$(cat "${state_dir}/flock-attempt")" -eq 61 ] \
+    || fail "bounded lock retry did not stop at the configured timeout"
+[ "$(wc -l < "${state_dir}/sleep-invocations" | tr -d ' ')" -eq 60 ] \
+    || fail "bounded lock retry did not preserve one-second timeout semantics"
+if grep -q '^-u 9$' "${state_dir}/flock-invocations"; then
+    fail "timed-out backup attempted to unlock a lock it never acquired"
+fi
 
 printf '%s\n' "postgres backup key-versioning test: passed"
