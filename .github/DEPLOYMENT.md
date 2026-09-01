@@ -60,25 +60,21 @@ GitHub-hosted runners use OIDC workload federation and ephemeral Tailscale
 nodes. Create two separate Tailscale OpenID Connect trust credentials with
 issuer `https://token.actions.githubusercontent.com`. Give each credential
 only the writable `auth_keys` scope and exactly its one requested tag. The
-current GitHub default-subject configuration is name-based, so use these exact
-subjects:
-
-```text
-repo:Tassadar2499/Hook2Stream:environment:staging
-repo:Tassadar2499/Hook2Stream:environment:production
-```
-
-The repository was created before GitHub's immutable-subject default and is
-currently configured with `use_immutable_subject=false`. If that repository
-setting is enabled later, or GitHub moves the repository to immutable subjects
-after a rename or transfer, replace both Tailscale trust subjects atomically
-with the corresponding immutable forms; do not leave a name-based and
-immutable credential active at the same time:
+live GitHub issuer returns immutable repository subjects for this public
+repository. Use these exact subjects:
 
 ```text
 repo:Tassadar2499@34176883/Hook2Stream@1295804906:environment:staging
 repo:Tassadar2499@34176883/Hook2Stream@1295804906:environment:production
 ```
+
+Do not infer the emitted token shape from the repository OIDC customization
+compatibility flag: the Tailscale trust-credential validator is authoritative
+and records the subject received from the issuer. A rename, transfer, or
+repository recreation can change the immutable IDs. If that happens, stop
+deployment and replace both environment subjects with the newly observed exact
+values; never leave name-based, wildcard, and immutable credentials active in
+parallel.
 
 Use the generated client ID and audience only in the matching GitHub
 Environment. `tag:hook2stream-ci-staging` may reach only staging TCP 22 and
