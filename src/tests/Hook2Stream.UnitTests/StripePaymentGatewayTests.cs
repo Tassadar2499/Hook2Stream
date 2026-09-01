@@ -70,8 +70,7 @@ public sealed class StripePaymentGatewayTests
         Assert.Equal(ProjectId, result.ProjectId);
         Assert.Equal("cus_acceptance", result.ExternalCustomerId);
         Assert.Equal("sub_acceptance", result.ExternalSubscriptionId);
-        Assert.True(result.Paid);
-        Assert.False(result.Refunded);
+        Assert.Equal(PaymentWebhookDisposition.Paid, result.Disposition);
         Assert.Equal(Now.AddSeconds(-10), result.OccurredAt);
         Assert.Equal(
             Convert.ToHexStringLower(SHA256.HashData(payload)),
@@ -91,9 +90,21 @@ public sealed class StripePaymentGatewayTests
             Signature(payload, Now.ToUnixTimeSeconds()),
             Now);
 
-        Assert.True(result.Paid);
+        Assert.Equal(PaymentWebhookDisposition.Paid, result.Disposition);
         Assert.Equal("cs_test_acceptance", result.ExternalSessionId);
         Assert.Equal(BillingProducts.MiniRelease, result.ProductCode);
+    }
+
+    [Theory]
+    [InlineData("checkout.session.expired")]
+    [InlineData("checkout.session.async_payment_failed")]
+    public void Checkout_failures_are_classified_explicitly(string eventType)
+    {
+        var payload = EventPayload("evt_checkout_failed", eventType, BillingProducts.MiniRelease);
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.CheckoutFailed, result.Disposition);
     }
 
     [Fact]
@@ -106,8 +117,7 @@ public sealed class StripePaymentGatewayTests
             Signature(payload, Now.ToUnixTimeSeconds()),
             Now);
 
-        Assert.False(result.Paid);
-        Assert.True(result.Refunded);
+        Assert.Equal(PaymentWebhookDisposition.Refunded, result.Disposition);
     }
 
     [Fact]
@@ -142,6 +152,32 @@ public sealed class StripePaymentGatewayTests
                             }
                         }
                     },
+                    payments = new
+                    {
+                        data = new[]
+                        {
+                            new
+                            {
+                                status = "open",
+                                payment = new { payment_intent = "pi_old_open_attempt" }
+                            },
+                            new
+                            {
+                                status = "canceled",
+                                payment = new { payment_intent = "pi_old_canceled_attempt" }
+                            },
+                            new
+                            {
+                                status = "paid",
+                                payment = new { payment_intent = "pi_renewal" }
+                            },
+                            new
+                            {
+                                status = "paid",
+                                payment = new { payment_intent = "pi_renewal" }
+                            }
+                        }
+                    },
                     lines = new
                     {
                         data = new[]
@@ -155,12 +191,183 @@ public sealed class StripePaymentGatewayTests
 
         var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
 
-        Assert.True(result.Paid);
+        Assert.Equal(PaymentWebhookDisposition.Paid, result.Disposition);
         Assert.Equal(CheckoutId, result.CheckoutId);
         Assert.Equal("sub_acceptance", result.ExternalSubscriptionId);
+        Assert.Equal("pi_renewal", result.ExternalPaymentIntentId);
         Assert.Equal("in_renewal", result.ExternalInvoiceId);
         Assert.Equal(periodStart, result.PeriodStartsAt);
         Assert.Equal(periodEnd, result.PeriodEndsAt);
+    }
+
+    [Fact]
+    public void Renewal_invoice_rejects_conflicting_paid_payment_intents()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_conflicting_invoice_payments",
+            type = "invoice.paid",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "in_conflicting_invoice_payments",
+                    customer = "cus_acceptance",
+                    amount_paid = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    currency = "usd",
+                    metadata = new Dictionary<string, string>
+                    {
+                        ["workspace_id"] = WorkspaceId.ToString("N"),
+                        ["checkout_id"] = CheckoutId.ToString("N"),
+                        ["product_code"] = BillingProducts.ActiveArtist
+                    },
+                    subscription = "sub_acceptance",
+                    payments = new
+                    {
+                        data = new[]
+                        {
+                            new
+                            {
+                                status = "paid",
+                                payment = new { payment_intent = "pi_paid_a" }
+                            },
+                            new
+                            {
+                                status = "paid",
+                                payment = new { payment_intent = "pi_paid_b" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        var exception = Assert.Throws<JsonException>(() =>
+            Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now));
+
+        Assert.Contains("conflicting paid payment intents", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Renewal_invoice_preserves_legacy_top_level_payment_intent_fallback()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_legacy_invoice_payment",
+            type = "invoice.paid",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "in_legacy_invoice_payment",
+                    customer = "cus_acceptance",
+                    subscription = "sub_acceptance",
+                    payment_intent = "pi_legacy_invoice_payment",
+                    amount_paid = BillingProducts.AmountCents(BillingProducts.ActiveArtist),
+                    currency = "usd",
+                    metadata = new Dictionary<string, string>
+                    {
+                        ["workspace_id"] = WorkspaceId.ToString("N"),
+                        ["checkout_id"] = CheckoutId.ToString("N"),
+                        ["product_code"] = BillingProducts.ActiveArtist
+                    },
+                    payments = new
+                    {
+                        data = new[]
+                        {
+                            new
+                            {
+                                status = "open",
+                                payment = new { payment_intent = "pi_old_open_attempt" }
+                            },
+                            new
+                            {
+                                status = "canceled",
+                                payment = new { payment_intent = "pi_old_canceled_attempt" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal("pi_legacy_invoice_payment", result.ExternalPaymentIntentId);
+    }
+
+    [Theory]
+    [InlineData("customer.subscription.deleted", "active")]
+    [InlineData("customer.subscription.paused", "paused")]
+    [InlineData("customer.subscription.updated", "canceled")]
+    [InlineData("customer.subscription.updated", "unpaid")]
+    [InlineData("customer.subscription.updated", "paused")]
+    [InlineData("customer.subscription.updated", "incomplete_expired")]
+    public void Terminal_subscription_events_end_current_access_without_becoming_disputes(string eventType, string status)
+    {
+        var payload = SubscriptionPayload("evt_subscription_revoked", eventType, status);
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.SubscriptionAccessEnded, result.Disposition);
+        Assert.Equal("sub_acceptance", result.ExternalSubscriptionId);
+        Assert.Equal(CheckoutId, result.CheckoutId);
+    }
+
+    [Theory]
+    [InlineData("invoice.payment_failed")]
+    [InlineData("invoice.finalization_failed")]
+    [InlineData("invoice.voided")]
+    [InlineData("invoice.marked_uncollectible")]
+    public void Invoice_failures_are_actionable_without_immediate_revocation(string eventType)
+    {
+        var payload = EventPayload("evt_invoice_failure", eventType, BillingProducts.ActiveArtist);
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.PaymentFailed, result.Disposition);
+    }
+
+    [Fact]
+    public void Dispute_event_carries_payment_correlation_and_is_classified_separately()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_dispute",
+            type = "charge.dispute.created",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "dp_acceptance",
+                    charge = "ch_acceptance",
+                    payment_intent = "pi_acceptance",
+                    metadata = new { }
+                }
+            }
+        });
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.Disputed, result.Disposition);
+        Assert.Equal("ch_acceptance", result.ExternalChargeId);
+        Assert.Equal("pi_acceptance", result.ExternalPaymentIntentId);
+    }
+
+    [Theory]
+    [InlineData("active")]
+    [InlineData("past_due")]
+    [InlineData("trialing")]
+    public void Non_terminal_subscription_update_is_unknown(string status)
+    {
+        var payload = SubscriptionPayload("evt_subscription_non_terminal", "customer.subscription.updated", status);
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.Unknown, result.Disposition);
     }
 
     [Fact]
@@ -187,10 +394,67 @@ public sealed class StripePaymentGatewayTests
 
         var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
 
-        Assert.True(result.Refunded);
+        Assert.Equal(PaymentWebhookDisposition.Refunded, result.Disposition);
         Assert.Null(result.CheckoutId);
         Assert.Null(result.ProductCode);
         Assert.Equal("pi_acceptance", result.ExternalPaymentIntentId);
+    }
+
+    [Fact]
+    public void Refunded_flag_is_authoritative_for_a_fully_refunded_partial_capture()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_partial_capture_fully_refunded",
+            type = "charge.refunded",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "ch_partial_capture",
+                    payment_intent = "pi_partial_capture",
+                    amount = 1_000,
+                    amount_captured = 500,
+                    amount_refunded = 500,
+                    refunded = true,
+                    metadata = new { }
+                }
+            }
+        });
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.Refunded, result.Disposition);
+        Assert.Equal("pi_partial_capture", result.ExternalPaymentIntentId);
+    }
+
+    [Fact]
+    public void Partial_refund_does_not_revoke_access_before_stripe_marks_the_charge_refunded()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_partial_refund",
+            type = "charge.refunded",
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "ch_partial_refund",
+                    payment_intent = "pi_partial_refund",
+                    amount = 1_000,
+                    amount_captured = 1_000,
+                    amount_refunded = 500,
+                    refunded = false,
+                    metadata = new { }
+                }
+            }
+        });
+
+        var result = Gateway().ParseAndVerifyWebhook(payload, Signature(payload, Now.ToUnixTimeSeconds()), Now);
+
+        Assert.Equal(PaymentWebhookDisposition.Unknown, result.Disposition);
     }
 
     [Theory]
@@ -244,7 +508,7 @@ public sealed class StripePaymentGatewayTests
 
         var result = Gateway().ParseAndVerifyWebhook(payload, signature, Now);
 
-        Assert.True(result.Paid);
+        Assert.Equal(PaymentWebhookDisposition.Paid, result.Disposition);
     }
 
     [Fact]
@@ -343,6 +607,29 @@ public sealed class StripePaymentGatewayTests
                         ["checkout_id"] = CheckoutId.ToString("N"),
                         ["project_id"] = ProjectId.ToString("N"),
                         ["product_code"] = productCode
+                    }
+                }
+            }
+        });
+
+    private static byte[] SubscriptionPayload(string eventId, string type, string status) =>
+        JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = eventId,
+            type,
+            created = Now.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "sub_acceptance",
+                    customer = "cus_acceptance",
+                    status,
+                    metadata = new Dictionary<string, string>
+                    {
+                        ["workspace_id"] = WorkspaceId.ToString("N"),
+                        ["checkout_id"] = CheckoutId.ToString("N"),
+                        ["product_code"] = BillingProducts.ActiveArtist
                     }
                 }
             }

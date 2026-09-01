@@ -388,6 +388,8 @@ public sealed class BillingCheckout : Entity
     public string? AudioFingerprintSnapshot { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public DateTimeOffset? RefundedAt { get; set; }
+    public DateTimeOffset? SubscriptionAccessEndedAt { get; set; }
+    public DateTimeOffset? ProviderAccessRevokedAt { get; set; }
 }
 
 public sealed class Entitlement : Entity
@@ -416,6 +418,7 @@ public sealed class Entitlement : Entity
     public DateTimeOffset? PeriodStartsAt { get; set; }
     public DateTimeOffset? ValidUntil { get; set; }
     public DateTimeOffset? RevokedAt { get; set; }
+    public DateTimeOffset? ProviderEventOccurredAt { get; set; }
 }
 
 public sealed class WorkspaceArtworkCredit : Entity

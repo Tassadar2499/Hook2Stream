@@ -188,13 +188,36 @@ public sealed class StripePaymentGateway(
         var projectId = TryMetadata(metadata, "project_id") is { Length: > 0 } project
             ? ParseGuid(project, "project_id")
             : (Guid?)null;
-        var checkoutPaid = eventType is "checkout.session.completed" or "checkout.session.async_payment_succeeded";
-        var paid = eventType == "invoice.paid" ||
-                   checkoutPaid && OptionalString(value, "payment_status") == "paid";
-        var refunded = eventType == "charge.refunded" &&
-                       value.TryGetProperty("refunded", out var refundedNode) &&
-                       refundedNode.ValueKind == JsonValueKind.True;
-        if (paid && productCode is not null)
+        var checkoutPaid = (eventType is "checkout.session.completed" or "checkout.session.async_payment_succeeded") &&
+                           OptionalString(value, "payment_status") == "paid";
+        // Stripe defines Charge.refunded as true only after the captured charge
+        // has been fully refunded. Comparing amount_refunded with the original
+        // authorization amount breaks valid partial-capture refunds.
+        var fullyRefunded = eventType == "charge.refunded" &&
+                            value.TryGetProperty("refunded", out var refundedNode) &&
+                            refundedNode.ValueKind == JsonValueKind.True;
+        var subscriptionStatus = eventType == "customer.subscription.updated"
+            ? OptionalString(value, "status")
+            : null;
+        var disposition = eventType switch
+        {
+            "invoice.paid" => PaymentWebhookDisposition.Paid,
+            "checkout.session.completed" or "checkout.session.async_payment_succeeded" when checkoutPaid =>
+                PaymentWebhookDisposition.Paid,
+            "charge.refunded" when fullyRefunded => PaymentWebhookDisposition.Refunded,
+            "checkout.session.expired" or "checkout.session.async_payment_failed" =>
+                PaymentWebhookDisposition.CheckoutFailed,
+            "invoice.payment_failed" or "invoice.finalization_failed" or "invoice.voided" or
+                "invoice.marked_uncollectible" => PaymentWebhookDisposition.PaymentFailed,
+            "customer.subscription.deleted" or "customer.subscription.paused" =>
+                PaymentWebhookDisposition.SubscriptionAccessEnded,
+            "customer.subscription.updated" when subscriptionStatus is
+                "canceled" or "unpaid" or "paused" or "incomplete_expired" =>
+                PaymentWebhookDisposition.SubscriptionAccessEnded,
+            "charge.dispute.created" => PaymentWebhookDisposition.Disputed,
+            _ => PaymentWebhookDisposition.Unknown
+        };
+        if (disposition == PaymentWebhookDisposition.Paid && productCode is not null)
         {
             var amount = eventType == "invoice.paid"
                 ? OptionalInt64(value, "amount_paid")
@@ -204,22 +227,20 @@ public sealed class StripePaymentGateway(
                 !string.Equals(currency, "usd", StringComparison.OrdinalIgnoreCase))
                 throw new JsonException("Stripe payment amount or currency does not match the purchased product.");
         }
-        if (refunded && OptionalInt64(value, "amount") is { } charged &&
-            OptionalInt64(value, "amount_refunded") != charged)
-            refunded = false;
         var objectId = OptionalString(value, "id");
         var sessionId = eventType.StartsWith("checkout.session.", StringComparison.Ordinal)
             ? objectId
             : null;
         var customerId = OptionalString(value, "customer");
-        var subscriptionId = OptionalString(value, "subscription")
-            ?? OptionalStringAtPath(value, "parent", "subscription_details", "subscription");
-        var paymentIntentId = OptionalString(value, "payment_intent")
-            ?? OptionalStringAtPath(value, "payment", "payment_intent");
+        var subscriptionId = eventType.StartsWith("customer.subscription.", StringComparison.Ordinal)
+            ? objectId
+            : OptionalString(value, "subscription")
+              ?? OptionalStringAtPath(value, "parent", "subscription_details", "subscription");
+        var paymentIntentId = PaymentIntentId(value, eventType);
         var invoiceId = eventType.StartsWith("invoice.", StringComparison.Ordinal)
             ? objectId
             : OptionalString(value, "invoice");
-        var chargeId = eventType.StartsWith("charge.", StringComparison.Ordinal)
+        var chargeId = eventType == "charge.refunded"
             ? objectId
             : OptionalString(value, "charge");
         var (periodStartsAt, periodEndsAt) = InvoicePeriod(value);
@@ -237,8 +258,7 @@ public sealed class StripePaymentGateway(
             paymentIntentId,
             invoiceId,
             chargeId,
-            paid,
-            refunded,
+            disposition,
             created,
             periodStartsAt,
             periodEndsAt,
@@ -309,6 +329,36 @@ public sealed class StripePaymentGateway(
         TryElementAtPath(value, out var node, path) && node.ValueKind == JsonValueKind.String
             ? node.GetString()
             : null;
+
+    private static string? PaymentIntentId(JsonElement value, string eventType)
+    {
+        var legacy = OptionalString(value, "payment_intent");
+        if (string.IsNullOrWhiteSpace(legacy))
+            legacy = OptionalStringAtPath(value, "payment", "payment_intent");
+        if (string.IsNullOrWhiteSpace(legacy)) legacy = null;
+        if (eventType != "invoice.paid" ||
+            !TryElementAtPath(value, out var payments, "payments", "data") ||
+            payments.ValueKind != JsonValueKind.Array)
+            return legacy;
+
+        var paidPaymentIntents = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var payment in payments.EnumerateArray())
+        {
+            if (!string.Equals(OptionalString(payment, "status"), "paid", StringComparison.Ordinal))
+                continue;
+            var paymentIntent = OptionalStringAtPath(payment, "payment", "payment_intent");
+            if (!string.IsNullOrWhiteSpace(paymentIntent)) paidPaymentIntents.Add(paymentIntent);
+        }
+
+        if (paidPaymentIntents.Count > 1)
+            throw new JsonException("Stripe invoice contains conflicting paid payment intents.");
+        var paidPaymentIntent = paidPaymentIntents.SingleOrDefault();
+        if (!string.IsNullOrWhiteSpace(legacy) &&
+            !string.IsNullOrWhiteSpace(paidPaymentIntent) &&
+            !string.Equals(legacy, paidPaymentIntent, StringComparison.Ordinal))
+            throw new JsonException("Stripe invoice payment intent fields conflict.");
+        return paidPaymentIntent ?? legacy;
+    }
 
     private static bool TryElementAtPath(JsonElement value, out JsonElement result, params string[] path)
     {
