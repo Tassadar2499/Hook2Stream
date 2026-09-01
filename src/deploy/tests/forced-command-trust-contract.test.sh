@@ -223,8 +223,21 @@ for executable_config in \
     printf '%s\n' '#!/bin/sh' >"$config_deploy/$executable_config"
     chmod 0700 "$config_deploy/$executable_config"
 done
+printf '%s\n' private >"$config_deploy/not-a-compose-config"
+chmod 0600 "$config_deploy/not-a-compose-config"
 hook2stream_prepare_container_config_modes "$config_deploy" "$owner_group" \
     || fail "the exact non-root container config allowlist was rejected"
+for private_directory in \
+    "$config_deploy" \
+    "$config_deploy/scripts" \
+    "$config_deploy/pgbouncer" \
+    "$config_deploy/vault" \
+    "$config_deploy/vault/templates"; do
+    [ "$(stat -c '%a' "$private_directory")" = 700 ] \
+        || fail "the config allowlist weakened a root-private parent directory"
+done
+[ "$(stat -c '%a' "$config_deploy/not-a-compose-config")" = 600 ] \
+    || fail "the config allowlist weakened an unrelated release file"
 for readonly_config in \
     Caddyfile \
     Caddyfile.production \
@@ -258,6 +271,39 @@ if hook2stream_prepare_container_config_modes "$config_deploy" "$owner_group"; t
 fi
 [ "$(stat -c '%a' "$scratch/symlink-target")" = 600 ] \
     || fail "a rejected config symlink changed its target mode"
+
+config_sources=$(awk '
+    $0 == "configs:" { in_configs=1; next }
+    in_configs && /^[^[:space:]]/ { in_configs=0 }
+    in_configs && /^[[:space:]]+file:/ {
+        sub(/^[[:space:]]+file:[[:space:]]*/, "")
+        print
+    }
+' "$deployment_dir/compose.yaml" "$deployment_dir/compose.vault.yaml")
+printf '%s\n' "$config_sources" | while IFS= read -r config_source; do
+    case "$config_source" in
+        '${EGRESS_CONFIG_DIR:-./egress}/'*)
+            # Generated later with an independently tested exact 0644 mode.
+            ;;
+        '${CADDYFILE_PATH:-./Caddyfile}')
+            grep -Fq "        Caddyfile \\" \
+                "$deployment_dir/scripts/lib/forced-command-trust.sh" \
+                || fail "the default Caddy config source is absent from the mode allowlist"
+            grep -Fq "        Caddyfile.production \\" \
+                "$deployment_dir/scripts/lib/forced-command-trust.sh" \
+                || fail "the production Caddy config source is absent from the mode allowlist"
+            ;;
+        ./*)
+            normalized_source=${config_source#./}
+            grep -Fq "        $normalized_source" \
+                "$deployment_dir/scripts/lib/forced-command-trust.sh" \
+                || fail "Compose config source is absent from the mode allowlist: $normalized_source"
+            ;;
+        *)
+            fail "an unclassified file-backed Compose config source was added: $config_source"
+            ;;
+    esac
+done
 
 app_wrapper=$deployment_dir/scripts/deploy-forced-command.sh
 app_launcher=$deployment_dir/scripts/deploy-forced-launcher.sh
