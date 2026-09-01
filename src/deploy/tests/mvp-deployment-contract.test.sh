@@ -56,6 +56,8 @@ if grep -Eq 'compose(_tools)? (pull|up|run).*minio|minio-init|public MinIO readi
 fi
 grep -Fq 'HOOK2STREAM_DEFER_SUCCESS_MARKER=true' "$wrapper" || fail "forced deploy does not defer success"
 grep -Fq '.deploy-bundle.sha256' "$wrapper" || fail "idempotent release bundle marker is missing"
+grep -Fq 'hook2stream_prepare_container_config_modes "$release_dir/deploy" 0:0' "$wrapper" \
+  || fail "published release does not prepare exact non-root container config modes"
 grep -Fq 'candidate must contain exactly four files' "$validator" || fail "candidate extras are not rejected"
 grep -Fq 'worker-media' "$wrapper" && grep -Fq 'worker-export' "$wrapper" || fail "all worker digests are not checked"
 grep -Fq 'egress-s3' "$wrapper" && grep -Fq 'egress-control' "$wrapper" \

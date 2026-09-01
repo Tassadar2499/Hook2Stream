@@ -245,6 +245,14 @@ approval, and any mismatch between expected and running digests. Its final
 success line is the base64-encoded `hook2stream-remote-deploy-result` record
 prefixed with `HOOK2STREAM_REMOTE_RECEIPT=`.
 
+Extracted releases remain `root:root 0700`. Before Compose may consume a
+release, the forced command validates an exact allowlist of non-secret config
+sources and changes only those files to read-only `0444` or executable
+read-only `0555`. This is required because local file-backed Compose configs
+preserve the source mode instead of applying the declared config `mode`. A
+symlink, missing allowlisted file, owner mismatch, writable result, or unknown
+path fails closed; secrets remain outside the release and are unaffected.
+
 Use ordinary OpenSSH only. Bootstrap every host with
 `sudo tailscale set --ssh=false`; validation fails unless
 `tailscale get --json ssh` returns either the legacy JSON literal `false` or

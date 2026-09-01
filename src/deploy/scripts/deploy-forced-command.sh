@@ -275,6 +275,8 @@ case "$operation" in
       chmod 0600 "$release_tmp/.deploy-bundle.sha256"
       mv "$release_tmp" "$release_dir" || fail "could not atomically publish release directory"
     fi
+    hook2stream_prepare_container_config_modes "$release_dir/deploy" 0:0 \
+      || fail "release container config sources are missing, unsafe, or unreadable by their non-root containers"
     hook2stream_trusted_file "$release_dir/deploy/scripts/deploy-release.sh" 0:0 700 \
       || fail "release lacks the forward deploy implementation"
     release_env=$HOOK2STREAM_RELEASE_STATE_DIR/candidate-$commit.env

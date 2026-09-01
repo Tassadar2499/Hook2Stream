@@ -193,6 +193,72 @@ if hook2stream_validate_effective_deploy_sudoers \
     fail "an effective deploy sudoers group grant was accepted"
 fi
 
+config_deploy=$scratch/container-configs
+mkdir -p "$config_deploy/scripts" "$config_deploy/pgbouncer" \
+    "$config_deploy/vault/templates"
+chmod 0700 "$config_deploy" "$config_deploy/scripts" \
+    "$config_deploy/pgbouncer" "$config_deploy/vault" \
+    "$config_deploy/vault/templates"
+for readonly_config in \
+    Caddyfile \
+    Caddyfile.production \
+    pgbouncer/pgbouncer.ini \
+    vault/agent.hcl \
+    vault/templates/foundation.json.ctmpl \
+    vault/templates/runtime-s3.json.ctmpl \
+    vault/templates/api.json.ctmpl \
+    vault/templates/control.json.ctmpl \
+    vault/templates/backup-s3.json.ctmpl \
+    vault/templates/media-security.json.ctmpl \
+    vault/templates/backup-encryption.json.ctmpl; do
+    printf '%s\n' config >"$config_deploy/$readonly_config"
+    chmod 0600 "$config_deploy/$readonly_config"
+done
+for executable_config in \
+    scripts/storage-probe.sh \
+    scripts/load-secrets.sh \
+    scripts/http-healthcheck.sh \
+    scripts/pgbouncer-entrypoint.sh \
+    scripts/postgres-set-password.sh; do
+    printf '%s\n' '#!/bin/sh' >"$config_deploy/$executable_config"
+    chmod 0700 "$config_deploy/$executable_config"
+done
+hook2stream_prepare_container_config_modes "$config_deploy" "$owner_group" \
+    || fail "the exact non-root container config allowlist was rejected"
+for readonly_config in \
+    Caddyfile \
+    Caddyfile.production \
+    pgbouncer/pgbouncer.ini \
+    vault/agent.hcl \
+    vault/templates/foundation.json.ctmpl \
+    vault/templates/runtime-s3.json.ctmpl \
+    vault/templates/api.json.ctmpl \
+    vault/templates/control.json.ctmpl \
+    vault/templates/backup-s3.json.ctmpl \
+    vault/templates/media-security.json.ctmpl \
+    vault/templates/backup-encryption.json.ctmpl; do
+    [ "$(stat -c '%a' "$config_deploy/$readonly_config")" = 444 ] \
+        || fail "$readonly_config was not restricted to read-only container access"
+done
+for executable_config in \
+    scripts/storage-probe.sh \
+    scripts/load-secrets.sh \
+    scripts/http-healthcheck.sh \
+    scripts/pgbouncer-entrypoint.sh \
+    scripts/postgres-set-password.sh; do
+    [ "$(stat -c '%a' "$config_deploy/$executable_config")" = 555 ] \
+        || fail "$executable_config was not restricted to read/execute container access"
+done
+printf '%s\n' untouched >"$scratch/symlink-target"
+chmod 0600 "$scratch/symlink-target"
+rm "$config_deploy/scripts/storage-probe.sh"
+ln -s "$scratch/symlink-target" "$config_deploy/scripts/storage-probe.sh"
+if hook2stream_prepare_container_config_modes "$config_deploy" "$owner_group"; then
+    fail "a symlinked container config source was accepted"
+fi
+[ "$(stat -c '%a' "$scratch/symlink-target")" = 600 ] \
+    || fail "a rejected config symlink changed its target mode"
+
 app_wrapper=$deployment_dir/scripts/deploy-forced-command.sh
 app_launcher=$deployment_dir/scripts/deploy-forced-launcher.sh
 candidate_validator=$deployment_dir/scripts/validate-candidate.sh
