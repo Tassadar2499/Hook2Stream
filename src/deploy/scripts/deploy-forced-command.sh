@@ -118,7 +118,7 @@ collect_actual_images() {
   actual_images='{}'
   for mapping in 'API_IMAGE:api' 'WORKER_IMAGE:worker-media' 'WORKER_IMAGE:worker-analysis' 'WORKER_IMAGE:worker-control' 'WORKER_IMAGE:worker-render' 'WORKER_IMAGE:worker-export' 'WEB_IMAGE:web' 'POSTGRES_BACKUP_IMAGE:postgres-backup' 'POSTGRES_BACKUP_IMAGE:storage-janitor' 'CADDY_IMAGE:caddy' 'POSTGRES_IMAGE:postgres' 'PGBOUNCER_IMAGE:pgbouncer' 'EGRESS_PROXY_IMAGE:egress-api' 'EGRESS_PROXY_IMAGE:egress-s3' 'EGRESS_PROXY_IMAGE:egress-control' 'EGRESS_PROXY_IMAGE:egress-backup'; do
     name=${mapping%%:*}; service=${mapping#*:}
-    container=$(HOOK2STREAM_ENV_FILE=$actual_environment sh -c '. "$1/scripts/lib/deployment-common.sh"; compose ps -q "$2"' _ "$actual_deploy_dir" "$service")
+    container=$(HOOK2STREAM_ENV_FILE=$actual_environment sh -c 'deployment_dir=$1; . "$deployment_dir/scripts/lib/deployment-common.sh"; compose ps -q "$2"' _ "$actual_deploy_dir" "$service")
     [ -n "$container" ] || fail "$service has no running container"
     actual=$(docker inspect --format '{{.Config.Image}}' "$container")
     expected=$(read_unique_environment_value "$actual_environment" "$name")
@@ -142,7 +142,7 @@ write_recovery_required() {
   recovery_deploy_dir=$6
   ingress_stopped=false
   recovery_container=$(HOOK2STREAM_ENV_FILE=$recovery_environment_file sh -c \
-    '. "$1/scripts/lib/deployment-common.sh"; compose ps -q caddy' \
+    'deployment_dir=$1; . "$deployment_dir/scripts/lib/deployment-common.sh"; compose ps -q caddy' \
     _ "$recovery_deploy_dir" 2>/dev/null || true)
   case "$recovery_container" in
     ''|*[!0-9a-f]*) ;;
@@ -850,7 +850,7 @@ case "$operation" in
     )' "$soak_dir/hook.stdout") || fail "soak hook result is invalid"
 
     render_containers=$(HOOK2STREAM_ENV_FILE=$current_env sh -c \
-      '. "$1/scripts/lib/deployment-common.sh"; compose ps -q worker-render' _ "$release_dir/deploy" | sed '/^$/d')
+      'deployment_dir=$1; . "$deployment_dir/scripts/lib/deployment-common.sh"; compose ps -q worker-render' _ "$release_dir/deploy" | sed '/^$/d')
     [ -n "$render_containers" ] \
       && [ "$(printf '%s\n' "$render_containers" | wc -l | tr -d ' ')" -eq 1 ] \
       || fail "exactly one worker-render container must exist after soak"
