@@ -19,6 +19,25 @@ function exactJson(actual, expected, message) {
 }
 
 const policy = JSON.parse(read("deploy/providers/serversguru/tailscale-policy.hujson"));
+const deploymentGuide = read(".github/DEPLOYMENT.md");
+
+const immutableSubjects = [
+  "repo:Tassadar2499@34176883/Hook2Stream@1295804906:environment:staging",
+  "repo:Tassadar2499@34176883/Hook2Stream@1295804906:environment:production",
+];
+for (const subject of immutableSubjects) {
+  assert(deploymentGuide.split(subject).length - 1 === 1,
+    `deployment guide must contain exact immutable WIF subject once: ${subject}`);
+}
+for (const legacySubject of [
+  "repo:Tassadar2499/Hook2Stream:environment:staging",
+  "repo:Tassadar2499/Hook2Stream:environment:production",
+]) {
+  assert(!deploymentGuide.includes(legacySubject),
+    `deployment guide must not authorize legacy name-based subject: ${legacySubject}`);
+}
+assert(deploymentGuide.includes("never leave name-based, wildcard, and immutable credentials active in\nparallel"),
+  "deployment guide must forbid overlapping fallback WIF credentials");
 
 exactJson(Object.keys(policy).sort(), ["grants", "hosts", "tagOwners", "tests"],
   "policy must contain only tagOwners, hosts, grants, and deny tests");

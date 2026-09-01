@@ -260,3 +260,52 @@ hook2stream_validate_effective_deploy_sudoers() {
     [ "$hook2stream_effective_sudoers" = \
         'hook2stream-deploy ALL = (root) NOPASSWD: /usr/local/sbin/hook2stream-deploy-launcher' ]
 }
+
+hook2stream_prepare_container_config_modes() {
+    [ "$#" -eq 2 ] || return 1
+    hook2stream_config_deploy_dir=$1
+    hook2stream_config_owner_group=$2
+    hook2stream_trusted_directory \
+        "$hook2stream_config_deploy_dir" "$hook2stream_config_owner_group" 700 \
+        || return 1
+    for hook2stream_config_directory in \
+        scripts pgbouncer vault vault/templates; do
+        hook2stream_trusted_directory \
+            "$hook2stream_config_deploy_dir/$hook2stream_config_directory" \
+            "$hook2stream_config_owner_group" 700 || return 1
+    done
+
+    for hook2stream_readonly_config in \
+        Caddyfile \
+        Caddyfile.production \
+        pgbouncer/pgbouncer.ini \
+        vault/agent.hcl \
+        vault/templates/foundation.json.ctmpl \
+        vault/templates/runtime-s3.json.ctmpl \
+        vault/templates/api.json.ctmpl \
+        vault/templates/control.json.ctmpl \
+        vault/templates/backup-s3.json.ctmpl \
+        vault/templates/media-security.json.ctmpl \
+        vault/templates/backup-encryption.json.ctmpl; do
+        hook2stream_readonly_path="$hook2stream_config_deploy_dir/$hook2stream_readonly_config"
+        [ -f "$hook2stream_readonly_path" ] \
+            && [ ! -L "$hook2stream_readonly_path" ] \
+            && chmod 0444 "$hook2stream_readonly_path" \
+            && hook2stream_trusted_file "$hook2stream_readonly_path" \
+                "$hook2stream_config_owner_group" 444 || return 1
+    done
+
+    for hook2stream_executable_config in \
+        scripts/storage-probe.sh \
+        scripts/load-secrets.sh \
+        scripts/http-healthcheck.sh \
+        scripts/pgbouncer-entrypoint.sh \
+        scripts/postgres-set-password.sh; do
+        hook2stream_executable_path="$hook2stream_config_deploy_dir/$hook2stream_executable_config"
+        [ -f "$hook2stream_executable_path" ] \
+            && [ ! -L "$hook2stream_executable_path" ] \
+            && chmod 0555 "$hook2stream_executable_path" \
+            && hook2stream_trusted_file "$hook2stream_executable_path" \
+                "$hook2stream_config_owner_group" 555 || return 1
+    done
+}
