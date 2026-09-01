@@ -134,6 +134,32 @@ for invalid_root_password_status in L LK NP ''; do
     fi
 done
 
+for disabled_tailscale_ssh_preference in \
+    false \
+    '{"ssh":false}' \
+    ' { "ssh" : false } ' \
+    '{
+  "ssh": false
+}'; do
+    hook2stream_validate_tailscale_ssh_preference "$disabled_tailscale_ssh_preference" \
+        || fail_test "disabled Tailscale SSH preference was rejected"
+done
+for unsafe_tailscale_ssh_preference in \
+    true \
+    '{"ssh":true}' \
+    '{"ssh":false,"extra":false}' \
+    '{"extra":false,"ssh":false}' \
+    '{"ssh":false,"ssh":false}' \
+    '{"ssh":"false"}' \
+    '{"ssh":null}' \
+    '{"ssh":false' \
+    'false false' \
+    ''; do
+    if hook2stream_validate_tailscale_ssh_preference "$unsafe_tailscale_ssh_preference"; then
+        fail_test "unsafe or malformed Tailscale SSH preference was accepted"
+    fi
+done
+
 sshd_root_password_key_users='pubkeyauthentication yes
 passwordauthentication yes
 kbdinteractiveauthentication no

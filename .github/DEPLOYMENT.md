@@ -251,7 +251,9 @@ prefixed with `HOOK2STREAM_REMOTE_RECEIPT=`.
 
 Use ordinary OpenSSH only. Bootstrap every host with
 `sudo tailscale set --ssh=false`; validation fails unless
-`tailscale get --json ssh` is exactly `false`, because Tailscale SSH would
+`tailscale get --json ssh` returns either the legacy JSON literal `false` or
+an object whose only member is the boolean `"ssh": false`. Extra keys, enabled
+or malformed values, and any other shape fail closed because Tailscale SSH would
 intercept the tailnet listener before these key and forced-command checks.
 
 After a successful staging deploy, the workflow opens a separate SSH command

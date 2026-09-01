@@ -398,7 +398,17 @@ hook2stream_host_no_extended_acl() {
 }
 
 hook2stream_validate_tailscale_ssh_preference() {
-    [ "$#" -eq 1 ] && [ "$1" = false ]
+    [ "$#" -eq 1 ] || return 1
+    printf '%s\n' "$1" | awk '
+      {
+        preference = preference (NR > 1 ? "\n" : "") $0
+      }
+      END {
+        disabled_literal = preference ~ /^[ \t\r\n]*false[ \t\r\n]*$/
+        disabled_object = preference ~ /^[ \t\r\n]*\{[ \t\r\n]*"ssh"[ \t\r\n]*:[ \t\r\n]*false[ \t\r\n]*\}[ \t\r\n]*$/
+        exit (disabled_literal || disabled_object) ? 0 : 1
+      }
+    '
 }
 
 hook2stream_validate_locked_password_status() {

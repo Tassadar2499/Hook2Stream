@@ -258,8 +258,10 @@ during initial bootstrap; after Tailscale is ready, SSH is allowed exclusively
 on `tailscale0`.
 Immediately after joining the tailnet run `sudo tailscale set --ssh=false`.
 Tailscale SSH is forbidden because it intercepts tailnet port 22 before the
-pinned OpenSSH keys and forced command; both validators require
-`tailscale get --json ssh` to return exactly `false`.
+pinned OpenSSH keys and forced command. Both validators accept only a disabled
+`tailscale get --json ssh` response: the legacy JSON literal `false` or an
+object whose only member is the boolean `"ssh": false`; extra keys, enabled or
+malformed values, and every other shape fail closed.
 
 Retaining a remotely usable root password increases the impact of tailnet or
 credential compromise and is an explicit temporary MVP risk. Use a unique,
