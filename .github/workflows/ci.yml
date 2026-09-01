@@ -270,6 +270,10 @@ jobs:
         run: |
           docker run --rm --entrypoint /bin/sh "hook2stream-${{ matrix.name }}:ci" -ec '
             command -v hook2stream-storage-tool
+            exec 9>/tmp/hook2stream-backup-flock-smoke.lock
+            flock -n 9
+            flock -u 9
+            exec 9>&-
             ! command -v aws
             ! command -v age
             ! command -v python3
