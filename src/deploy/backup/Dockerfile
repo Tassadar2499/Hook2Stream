@@ -24,7 +24,7 @@ USER root
 RUN apk add --no-cache --upgrade \
         libcrypto3=3.5.8-r0 \
         libssl3=3.5.8-r0 \
-    && apk add --no-cache bash coreutils jq \
+    && apk add --no-cache bash coreutils jq=1.8.2-r0 \
     && rm -f /usr/local/bin/gosu
 
 COPY --from=storage-tool-build /out/hook2stream-storage-tool /usr/local/bin/hook2stream-storage-tool
