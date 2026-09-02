@@ -613,7 +613,9 @@ def advance_pipeline(
             f"/api/v1/releases/{project_id}/transcript",
             201,
             {
-                "source": transcript.get("source"),
+                # The GET revision is worker-owned `automatic`. Acknowledging
+                # its warnings creates a user revision, which must be `manual`.
+                "source": "manual",
                 "language": transcript.get("language"),
                 "isInstrumental": False,
                 "phrases": phrases,

@@ -333,6 +333,42 @@ ordered_release_checks = [
 positions = [staging_release.index(check) for check in ordered_release_checks]
 if positions != sorted(positions) or staging_release.count("print(STAGING_GATE)") != 1:
     raise SystemExit("capability output is not strictly after every live release check")
+
+advance = next(
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name == "advance_pipeline"
+)
+transcript_puts = [
+    node
+    for node in ast.walk(advance)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Name)
+    and node.func.id == "release_mutation"
+    and len(node.args) >= 6
+    and isinstance(node.args[2], ast.Constant)
+    and node.args[2].value == "PUT"
+    and "/transcript" in (ast.get_source_segment(source, node.args[3]) or "")
+]
+if len(transcript_puts) != 1 or not isinstance(transcript_puts[0].args[5], ast.Dict):
+    raise SystemExit("authenticated pipeline must retain one transcript revision PUT")
+transcript_payload = {
+    key.value: value
+    for key, value in zip(
+        transcript_puts[0].args[5].keys,
+        transcript_puts[0].args[5].values,
+        strict=True,
+    )
+    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+}
+revision_source = transcript_payload.get("source")
+if not isinstance(revision_source, ast.Constant) or revision_source.value != "manual":
+    raise SystemExit(
+        "user transcript revision must use manual source, never replay worker-owned automatic source"
+    )
+instrumental = transcript_payload.get("isInstrumental")
+if not isinstance(instrumental, ast.Constant) or instrumental.value is not False:
+    raise SystemExit("non-instrumental E2E transcript revision changed semantics")
+
 production_branch = next(
     node
     for node in ast.walk(next(
