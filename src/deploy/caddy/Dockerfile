@@ -26,8 +26,9 @@ RUN go get \
         golang.org/x/crypto@v0.55.0 \
         golang.org/x/net@v0.57.0 \
         golang.org/x/text@v0.41.0 \
-        google.golang.org/grpc@v1.82.1 \
+        google.golang.org/grpc@v1.83.1 \
     && test "$(go list -m -f '{{.Version}}' golang.org/x/crypto)" = "v0.55.0" \
+    && test "$(go list -m -f '{{.Version}}' google.golang.org/grpc)" = "v1.83.1" \
     && go mod verify \
     && CGO_ENABLED=0 GOOS=linux go build \
         -buildvcs=false \
@@ -37,7 +38,9 @@ RUN go get \
         ./cmd/caddy \
     && test "$(/out/caddy version)" = "${CADDY_RELEASE}" \
     && go version -m /out/caddy \
-        | grep -Eq '^[[:space:]]+dep[[:space:]]+golang.org/x/crypto[[:space:]]+v0\.55\.0[[:space:]]'
+        | grep -Eq '^[[:space:]]+dep[[:space:]]+golang.org/x/crypto[[:space:]]+v0\.55\.0[[:space:]]' \
+    && go version -m /out/caddy \
+        | grep -Eq '^[[:space:]]+dep[[:space:]]+google.golang.org/grpc[[:space:]]+v1\.83\.1[[:space:]]'
 RUN mkdir -p /runtime-root/data /runtime-root/config \
     && chown -R 10001:10001 /runtime-root/data /runtime-root/config \
     && chmod 0700 /runtime-root/data /runtime-root/config

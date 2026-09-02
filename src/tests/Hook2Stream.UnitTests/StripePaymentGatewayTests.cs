@@ -52,6 +52,57 @@ public sealed class StripePaymentGatewayTests
     }
 
     [Fact]
+    public async Task Release_pack_checkout_with_eighteen_items_uses_only_bounded_correlation_metadata()
+    {
+        var handler = new CapturingCheckoutHandler();
+        var gateway = CheckoutGateway(handler);
+        var itemIds = Enumerable.Range(1, 18)
+            .Select(value => Guid.Parse($"01981fee-6ac0-7000-8000-{value:000000000000}"))
+            .ToArray();
+        Assert.True(string.Join(',', itemIds.Select(value => value.ToString("N"))).Length > 500);
+
+        var result = await gateway.CreateCheckoutAsync(
+            CheckoutCommand(BillingProducts.ReleasePack, itemIds, ProjectId),
+            CancellationToken.None);
+
+        Assert.Equal("cs_test_checkout", result.ExternalSessionId);
+        Assert.False(result.CompletedSynchronously);
+        Assert.Equal("payment", handler.Fields["mode"]);
+        AssertCorrelationMetadata(
+            handler.Fields,
+            "payment_intent_data[metadata]",
+            BillingProducts.ReleasePack,
+            includeProject: true);
+        Assert.DoesNotContain(handler.Fields.Keys, key => key.Contains("item_ids", StringComparison.Ordinal));
+        Assert.All(
+            BillingMetadata(handler.Fields),
+            field => Assert.InRange(field.Value.Length, 1, 500));
+    }
+
+    [Fact]
+    public async Task Subscription_checkout_does_not_copy_item_ids_into_subscription_metadata()
+    {
+        var handler = new CapturingCheckoutHandler();
+        var gateway = CheckoutGateway(handler);
+        var itemIds = Enumerable.Range(1, 18)
+            .Select(value => Guid.Parse($"01981fee-6ac0-7000-8001-{value:000000000000}"))
+            .ToArray();
+
+        await gateway.CreateCheckoutAsync(
+            CheckoutCommand(BillingProducts.ActiveArtist, itemIds, projectId: null),
+            CancellationToken.None);
+
+        Assert.Equal("subscription", handler.Fields["mode"]);
+        AssertCorrelationMetadata(
+            handler.Fields,
+            "subscription_data[metadata]",
+            BillingProducts.ActiveArtist,
+            includeProject: false);
+        Assert.DoesNotContain(handler.Fields.Keys, key => key.Contains("item_ids", StringComparison.Ordinal));
+        Assert.DoesNotContain(handler.Fields.Keys, key => key.Contains("project_id", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Valid_checkout_webhook_is_verified_and_parsed_from_metadata()
     {
         var payload = EventPayload("evt_paid", "checkout.session.completed", BillingProducts.ReleasePack);
@@ -581,6 +632,56 @@ public sealed class StripePaymentGatewayTests
             WebhookToleranceSeconds = 300
         }));
 
+    private static StripePaymentGateway CheckoutGateway(HttpMessageHandler handler) => new(
+        new HttpClient(handler),
+        Options.Create(new StripeOptions
+        {
+            ApiBaseUrl = "https://api.stripe.test",
+            SecretKey = "sk_test_checkout",
+            PriceIds = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [BillingProducts.ReleasePack] = "price_release_pack",
+                [BillingProducts.ActiveArtist] = "price_active_artist"
+            }
+        }));
+
+    private static PaymentCheckoutCommand CheckoutCommand(
+        string productCode,
+        IReadOnlyList<Guid> itemIds,
+        Guid? projectId) => new(
+        CheckoutId,
+        WorkspaceId,
+        productCode,
+        projectId,
+        itemIds,
+        "buyer@example.test",
+        "https://app.example.test/billing/success",
+        "https://app.example.test/billing/cancel",
+        $"checkout:{CheckoutId:N}");
+
+    private static void AssertCorrelationMetadata(
+        IReadOnlyDictionary<string, string> fields,
+        string providerMetadataPrefix,
+        string productCode,
+        bool includeProject)
+    {
+        Assert.Equal(CheckoutId.ToString("N"), fields["client_reference_id"]);
+        Assert.Equal(CheckoutId.ToString("N"), fields["metadata[checkout_id]"]);
+        Assert.Equal(WorkspaceId.ToString("N"), fields["metadata[workspace_id]"]);
+        Assert.Equal(productCode, fields["metadata[product_code]"]);
+        Assert.Equal(CheckoutId.ToString("N"), fields[$"{providerMetadataPrefix}[checkout_id]"]);
+        Assert.Equal(WorkspaceId.ToString("N"), fields[$"{providerMetadataPrefix}[workspace_id]"]);
+        Assert.Equal(productCode, fields[$"{providerMetadataPrefix}[product_code]"]);
+        if (!includeProject) return;
+        Assert.Equal(ProjectId.ToString("N"), fields["metadata[project_id]"]);
+        Assert.Equal(ProjectId.ToString("N"), fields[$"{providerMetadataPrefix}[project_id]"]);
+    }
+
+    private static IEnumerable<KeyValuePair<string, string>> BillingMetadata(
+        IReadOnlyDictionary<string, string> fields) => fields.Where(field =>
+        field.Key.StartsWith("metadata[", StringComparison.Ordinal) ||
+        field.Key.Contains("[metadata][", StringComparison.Ordinal));
+
     private static byte[] EventPayload(string eventId, string type, string productCode) =>
         JsonSerializer.SerializeToUtf8Bytes(new
         {
@@ -651,5 +752,41 @@ public sealed class StripePaymentGatewayTests
         public string ApplicationName { get; set; } = "Hook2Stream.UnitTests";
         public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
         public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
+
+    private sealed class CapturingCheckoutHandler : HttpMessageHandler
+    {
+        public IReadOnlyDictionary<string, string> Fields { get; private set; } =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("https://api.stripe.test/v1/checkout/sessions", request.RequestUri?.AbsoluteUri);
+            Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+            Assert.Equal("sk_test_checkout", request.Headers.Authorization?.Parameter);
+            Assert.Equal($"checkout:{CheckoutId:N}", request.Headers.GetValues("Idempotency-Key").Single());
+            Fields = ParseForm(await request.Content!.ReadAsStringAsync(cancellationToken));
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"id\":\"cs_test_checkout\",\"url\":\"https://checkout.stripe.test/session\"}",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        }
+
+        private static IReadOnlyDictionary<string, string> ParseForm(string body) => body
+            .Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(field => field.Split('=', 2))
+            .ToDictionary(
+                field => Decode(field[0]),
+                field => field.Length == 2 ? Decode(field[1]) : string.Empty,
+                StringComparer.Ordinal);
+
+        private static string Decode(string value) =>
+            Uri.UnescapeDataString(value.Replace('+', ' '));
     }
 }
