@@ -371,6 +371,11 @@ grep -Fq 'sudo install -o root -g root -m 0555 scripts/validate-host.sh' \
     && grep -Fq '/usr/local/libexec/hook2stream/validate-host.sh app staging' \
         "$deployment_dir/host/README.md" \
     || fail_test "host runbook does not install and invoke the root-owned validator"
+grep -Fq 'sudo install -o root -g root -m 0500 scripts/post-deploy-e2e.sh' \
+    "$deployment_dir/host/README.md" \
+    && grep -Fq 'sudo install -o root -g root -m 0500 host/authenticated-e2e.sh' \
+        "$deployment_dir/host/README.md" \
+    || fail_test "host runbook does not install both root-owned authenticated E2E gates"
 if grep -Eq '(sudo )?(\./|src/deploy/)?scripts/validate-host\.sh app' \
     "$deployment_dir/host/README.md" "$deployment_dir/README.md" \
     "$deployment_dir/../../docs/operations/hook2stream-mvp-runbook.md"; then

@@ -69,6 +69,10 @@ sudo install -o root -g root -m 0555 scripts/lib/forced-command-trust.sh \
   /usr/local/libexec/hook2stream/lib/forced-command-trust.sh
 sudo install -o root -g root -m 0555 scripts/lib/host-validation-common.sh \
   /usr/local/libexec/hook2stream/lib/host-validation-common.sh
+sudo install -o root -g root -m 0500 scripts/post-deploy-e2e.sh \
+  /usr/local/libexec/hook2stream/post-deploy-e2e.sh
+sudo install -o root -g root -m 0500 host/authenticated-e2e.sh \
+  /usr/local/libexec/hook2stream/authenticated-e2e.sh
 sudo install -o root -g root -m 0555 scripts/deploy-forced-launcher.sh \
   /usr/local/sbin/hook2stream-deploy-launcher
 ```
