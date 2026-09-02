@@ -61,12 +61,15 @@ for module in \
     'golang.org/x/crypto@v0.55.0' \
     'golang.org/x/net@v0.57.0' \
     'golang.org/x/text@v0.41.0' \
-    'google.golang.org/grpc@v1.82.1'; do
+    'google.golang.org/grpc@v1.83.1'; do
     grep -Fq "$module" "$caddy" || fail "Caddy security dependency is not pinned: $module"
 done
 grep -Fq 'go list -m -f '\''{{.Version}}'\'' golang.org/x/crypto' "$caddy" \
     && grep -Fq "golang.org/x/crypto[[:space:]]+v0\\.55\\.0" "$caddy" \
     || fail "Caddy build does not assert the patched x/crypto module in its graph and binary"
+grep -Fq 'go list -m -f '\''{{.Version}}'\'' google.golang.org/grpc' "$caddy" \
+    && grep -Fq "google.golang.org/grpc[[:space:]]+v1\\.83\\.1" "$caddy" \
+    || fail "Caddy build does not assert the patched gRPC module in its graph and binary"
 grep -Fq 'FROM scratch AS runtime' "$caddy" \
     && grep -Fq 'CustomVersion=${CADDY_RELEASE}' "$caddy" \
     && grep -Fq 'USER 10001:10001' "$caddy" \
