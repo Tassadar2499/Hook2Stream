@@ -445,12 +445,40 @@ for check in (
     'client.request("HEAD", state["contentPath"], {200})',
     'real_seconds / 18 > baseline["renderSecondsPerItem"] * 1.2',
     'return_code != 124',
+    'advance_soak_probe_deadline(',
+    'if network_checks >= 60:',
     'print(json.dumps(result',
 ):
     if check not in soak:
         raise SystemExit(f"soak omitted live evidence before output: {check}")
 if '/renders' in soak or 'staging_billing_entitlement(' in soak or 'client.json("POST"' in soak:
     raise SystemExit("soak may not consume a billing or render entitlement")
+if 'next_check = time.monotonic() + 60' in soak or 'next_check += 60' in soak:
+    raise SystemExit("soak network cadence must not accumulate probe latency")
+if soak.index('start = time.monotonic()') < soak.index('if started.returncode != 0'):
+    raise SystemExit("soak schedule starts before Docker confirms its start request")
+if soak.index('if network_checks >= 60:') > soak.index('if now < next_check:'):
+    raise SystemExit("soak does not cap probes before scheduling another observation")
+
+deadline = 1.0
+for _ in range(60):
+    started = deadline + 0.25
+    deadline = module.advance_soak_probe_deadline(deadline, started, started + 2.5)
+if deadline != 3601.0:
+    raise SystemExit("anchored soak cadence does not schedule exactly 60 minute slots")
+for invalid_schedule in (
+    (1.0, 0.9, 1.0),
+    (1.0, 1.0, 0.9),
+    (1.0, 6.01, 6.02),
+    (1.0, 1.0, 61.0),
+    (1.0, 121.0, 121.1),
+):
+    try:
+        module.advance_soak_probe_deadline(*invalid_schedule)
+    except module.GateError:
+        pass
+    else:
+        raise SystemExit(f"unsafe soak cadence passed: {invalid_schedule}")
 
 creator = ast.get_source_segment(
     source,

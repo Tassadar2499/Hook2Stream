@@ -47,6 +47,9 @@ ROLLBACK_STATE_SCHEMA = "hook2stream-authenticated-e2e-rollback-state-v1"
 HOST_ROOT = Path("/srv/hook2stream")
 MAX_JSON = 4 * 1024 * 1024
 MAX_EXPORT = 2 * 1024 * 1024 * 1024
+SOAK_PROBE_INTERVAL_SECONDS = 60
+SOAK_PROBE_START_DELAY_SECONDS = 1
+SOAK_PROBE_START_SLACK_SECONDS = 5
 
 
 class GateError(RuntimeError):
@@ -1590,6 +1593,19 @@ def cpu_sample() -> tuple[int, int]:
     return sum(values[:8]), values[7]
 
 
+def advance_soak_probe_deadline(
+    scheduled_at: float, started_at: float, completed_at: float
+) -> float:
+    if started_at < scheduled_at or completed_at < started_at:
+        raise GateError("soak probe cadence accounting is invalid")
+    if started_at > scheduled_at + SOAK_PROBE_START_SLACK_SECONDS:
+        raise GateError("soak probe missed its scheduled cadence")
+    next_scheduled_at = scheduled_at + SOAK_PROBE_INTERVAL_SECONDS
+    if completed_at >= next_scheduled_at:
+        raise GateError("soak probe exceeded its scheduled cadence")
+    return next_scheduled_at
+
+
 def load_soak_state(config: dict[str, str], environment: str, commit: str) -> dict[str, Any]:
     work_root = Path(required(config, "HOOK2STREAM_E2E_WORK_DIR"))
     path = trusted_file(
@@ -1784,8 +1800,6 @@ def soak_gate(environment: str, config: dict[str, str], commit: str) -> None:
         running, oom, _, pid = soak_container_state(soak_name, soak_image, commit)
         if running or oom or pid != 0:
             raise GateError("synthetic FFmpeg container started before its isolation was verified")
-        start = time.monotonic()
-        deadline = start + 3660
         started = subprocess.run(
             ["docker", "start", soak_name],
             stdin=subprocess.DEVNULL,
@@ -1797,12 +1811,16 @@ def soak_gate(environment: str, config: dict[str, str], commit: str) -> None:
         )
         if started.returncode != 0 or started.stdout.strip() != soak_name:
             raise GateError("isolated synthetic FFmpeg container could not start")
+        # Anchor the measured hour after Docker confirms the start request so
+        # daemon startup latency cannot consume or manufacture probe slots.
+        start = time.monotonic()
+        deadline = start + 3660
         running, oom, _, soak_pid = soak_container_state(soak_name, soak_image, commit)
         if not running or oom or soak_pid <= 0:
             raise GateError("isolated synthetic FFmpeg container did not become healthy")
         initial_cgroup = container_cpu_stat(soak_pid)
         latest_cgroup = initial_cgroup
-        next_check = start + 1
+        next_check = start + SOAK_PROBE_START_DELAY_SECONDS
         previous_cpu = cpu_sample()
         windows: deque[tuple[int, int]] = deque(maxlen=5)
         network_checks = 0
@@ -1820,9 +1838,14 @@ def soak_gate(environment: str, config: dict[str, str], commit: str) -> None:
             now = time.monotonic()
             if now >= deadline:
                 raise GateError("synthetic FFmpeg soak exceeded its 3660-second safety deadline")
+            if network_checks >= 60:
+                time.sleep(min(deadline - now, 5))
+                continue
             if now < next_check:
                 time.sleep(min(next_check - now, 5))
                 continue
+            if now > next_check + SOAK_PROBE_START_SLACK_SECONDS:
+                raise GateError("soak probe missed its scheduled cadence")
             current_cpu = cpu_sample()
             total_delta = current_cpu[0] - previous_cpu[0]
             steal_delta = current_cpu[1] - previous_cpu[1]
@@ -1872,7 +1895,13 @@ def soak_gate(environment: str, config: dict[str, str], commit: str) -> None:
             except GateError:
                 network_failures += 1
                 raise
-            next_check = time.monotonic() + 60
+            # Anchor every probe to the original schedule without replaying
+            # missed observations in a burst. Re-basing on the end of each
+            # probe accumulates latency and can leave fewer than 60 successful
+            # checks in an otherwise healthy hour.
+            next_check = advance_soak_probe_deadline(
+                next_check, now, time.monotonic()
+            )
 
         _, final_oom, return_code, _ = soak_container_state(soak_name, soak_image, commit)
         oom_killed = oom_killed or final_oom
