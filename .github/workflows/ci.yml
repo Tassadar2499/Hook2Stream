@@ -270,6 +270,7 @@ jobs:
         run: |
           docker run --rm --entrypoint /bin/sh "hook2stream-${{ matrix.name }}:ci" -ec '
             command -v hook2stream-storage-tool
+            test "$(jq --version)" = jq-1.8.2
             exec 9>/tmp/hook2stream-backup-flock-smoke.lock
             flock -n 9
             flock -u 9

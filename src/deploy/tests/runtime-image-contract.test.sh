@@ -48,6 +48,8 @@ grep -Fq "docker.io/library/golang:1.27.0-alpine3.24@$go_digest" "$backup" \
     && grep -Fq "docker.io/library/postgres:17.11-alpine3.24@$postgres_digest" "$postgres" \
     && [ "$(grep -Fc "docker.io/library/postgres:17.11-alpine3.24@$postgres_digest" "$build_compose")" -eq 2 ] \
     || fail "backup/PostgreSQL base images are not digest-pinned in Docker and Compose builds"
+grep -Fq 'jq=1.8.2-r0' "$backup" \
+    || fail "backup jq package is not pinned to the reviewed patched version"
 
 grep -Fq "golang:1.27.0-alpine3.24@$go_digest" "$caddy" \
     || fail "Caddy builder is not pinned to reviewed Go 1.27.0 digest"
