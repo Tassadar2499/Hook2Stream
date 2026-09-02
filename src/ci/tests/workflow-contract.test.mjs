@@ -431,13 +431,15 @@ assert(!productionSecretJob.includes("promotion-payload/candidate/deploy/") &&
   !productionSecretJob.includes(". promotion-payload/candidate/") &&
   !productionSecretJob.includes("source promotion-payload/candidate/"),
   "the selected production candidate must remain data and never become runner policy code");
-assert(promotion.includes('test "$(jq -r .name <<<"$run_json")" = "Stage candidate"') &&
+assert((promotion.match(/test "\$\(jq -r \.name <<<"\$(?:staging_)?workflow_json"\)" = "Stage candidate"/g) ?? []).length === 2 &&
+  !promotion.includes('test "$(jq -r .name <<<"$run_json")" = "Stage candidate"') &&
+  !promotion.includes('test "$(jq -r .name <<<"$staging_run_json")" = "Stage candidate"') &&
   promotion.includes(".github/workflows/stage-candidate.yml") &&
   promotion.includes('receipt_name="staging-receipt-${SOURCE_STAGING_RUN_ID}-${{ steps.staging.outputs.attempt }}"') &&
   promotion.includes('gh run download "$SOURCE_STAGING_RUN_ID" --name "$receipt_name"') &&
   promotion.includes("$'staging-receipt.json\\nstaging-receipt.sig'") &&
   promotion.includes('--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/stage-candidate.yml"'),
-  "production must fetch and attest the receipt from the exact successful staging workflow run");
+  "production must identify Stage candidate through workflow metadata and fetch and attest the exact successful run despite a custom run-name");
 assert(!promotion.includes("provider-teardown-receipt.mjs") &&
   !promotion.includes("PROVIDER_LIFECYCLE_ALLOWED_SIGNERS") &&
   !promotion.includes("provider-destroy-receipt.json") &&

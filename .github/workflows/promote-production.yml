@@ -72,7 +72,6 @@ jobs:
           esac
 
           run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_STAGING_RUN_ID")"
-          test "$(jq -r .name <<<"$run_json")" = "Stage candidate"
           test "$(jq -r .event <<<"$run_json")" = workflow_dispatch
           test "$(jq -r .head_branch <<<"$run_json")" = main
           test "$(jq -r '.head_repository.full_name // empty' <<<"$run_json")" = "$GITHUB_REPOSITORY"
@@ -81,6 +80,7 @@ jobs:
 
           workflow_id="$(jq -r .workflow_id <<<"$run_json")"
           workflow_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id")"
+          test "$(jq -r .name <<<"$workflow_json")" = "Stage candidate"
           test "$(jq -r .path <<<"$workflow_json")" = .github/workflows/stage-candidate.yml
           test "$(jq -r .state <<<"$workflow_json")" = active
           test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
@@ -324,7 +324,6 @@ jobs:
           test "$(jq -r .protected <<<"$main_json")" = true
           test "$(jq -r .commit.sha <<<"$main_json")" = "$POLICY_SHA"
           staging_run_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_STAGING_RUN_ID")"
-          test "$(jq -r .name <<<"$staging_run_json")" = "Stage candidate"
           test "$(jq -r .event <<<"$staging_run_json")" = workflow_dispatch
           test "$(jq -r .head_branch <<<"$staging_run_json")" = main
           test "$(jq -r '.head_repository.full_name // empty' <<<"$staging_run_json")" = "$GITHUB_REPOSITORY"
@@ -334,6 +333,7 @@ jobs:
           test "$(jq -r .run_attempt <<<"$staging_run_json")" = "$SOURCE_STAGING_RUN_ATTEMPT"
           staging_workflow_id="$(jq -r .workflow_id <<<"$staging_run_json")"
           staging_workflow_json="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/$staging_workflow_id")"
+          test "$(jq -r .name <<<"$staging_workflow_json")" = "Stage candidate"
           test "$(jq -r .path <<<"$staging_workflow_json")" = .github/workflows/stage-candidate.yml
           test "$(jq -r .state <<<"$staging_workflow_json")" = active
           test "$(gh api "/repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
