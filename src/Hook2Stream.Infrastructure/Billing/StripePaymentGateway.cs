@@ -70,6 +70,8 @@ public sealed class StripePaymentGateway(
             new Uri(new Uri(_options.ApiBaseUrl.TrimEnd('/') + "/"), "v1/checkout/sessions"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.SecretKey);
         request.Headers.Add("Idempotency-Key", command.IdempotencyKey);
+        // Item IDs remain in the immutable BillingCheckout snapshot. A release
+        // pack's 18 UUIDs exceed Stripe's 500-character metadata value limit.
         var fields = new Dictionary<string, string>
         {
             ["mode"] = BillingProducts.IsSubscription(command.ProductCode) ? "subscription" : "payment",
@@ -81,8 +83,7 @@ public sealed class StripePaymentGateway(
             ["line_items[0][quantity]"] = "1",
             ["metadata[checkout_id]"] = command.CheckoutId.ToString("N"),
             ["metadata[workspace_id]"] = command.WorkspaceId.ToString("N"),
-            ["metadata[product_code]"] = command.ProductCode,
-            ["metadata[item_ids]"] = string.Join(',', command.ItemIds.Select(value => value.ToString("N")))
+            ["metadata[product_code]"] = command.ProductCode
         };
         if (command.ProjectId is { } projectId)
         {
@@ -93,7 +94,6 @@ public sealed class StripePaymentGateway(
             fields["subscription_data[metadata][checkout_id]"] = command.CheckoutId.ToString("N");
             fields["subscription_data[metadata][workspace_id]"] = command.WorkspaceId.ToString("N");
             fields["subscription_data[metadata][product_code]"] = command.ProductCode;
-            fields["subscription_data[metadata][item_ids]"] = string.Join(',', command.ItemIds.Select(value => value.ToString("N")));
             if (command.ProjectId is { } subscriptionProjectId)
                 fields["subscription_data[metadata][project_id]"] = subscriptionProjectId.ToString("N");
         }

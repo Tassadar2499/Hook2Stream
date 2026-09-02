@@ -309,6 +309,92 @@ public sealed class BillingWorkflowTests
     }
 
     [Fact]
+    public async Task Release_pack_checkout_and_webhook_keep_eighteen_item_snapshot_out_of_provider_metadata()
+    {
+        const string webhookSecret = "whsec_release_pack_snapshot_integration";
+        var stripeHandler = new CapturingStripeCheckoutHandler();
+        using var stripeClient = new HttpClient(stripeHandler);
+        var gateway = new StripePaymentGateway(
+            stripeClient,
+            Options.Create(new StripeOptions
+            {
+                ApiBaseUrl = "https://api.stripe.test",
+                SecretKey = "sk_test_release_pack",
+                WebhookSecret = webhookSecret,
+                WebhookToleranceSeconds = 300,
+                PriceIds = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [BillingProducts.ReleasePack] = "price_release_pack"
+                }
+            }));
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.RemoveAll<IPaymentGateway>();
+            services.AddSingleton<IPaymentGateway>(gateway);
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+        var seeded = await SeedCampaign(factory);
+
+        var checkoutResponse = await Checkout(client, "release-pack-snapshot", new
+        {
+            productCode = BillingProducts.ReleasePack,
+            projectId = seeded.ProjectId,
+            itemIds = seeded.ItemIds,
+            returnPath = $"/releases/{seeded.ProjectId}/campaign"
+        });
+
+        Assert.Equal(HttpStatusCode.Created, checkoutResponse.StatusCode);
+        var checkoutJson = await checkoutResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var checkoutId = checkoutJson.GetProperty("checkoutId").GetGuid();
+        Assert.DoesNotContain(stripeHandler.Fields.Keys, key => key.Contains("item_ids", StringComparison.Ordinal));
+        Assert.Equal(checkoutId.ToString("N"), stripeHandler.Fields["metadata[checkout_id]"]);
+        Assert.Equal(seeded.WorkspaceId.ToString("N"), stripeHandler.Fields["metadata[workspace_id]"]);
+        Assert.Equal(seeded.ProjectId.ToString("N"), stripeHandler.Fields["metadata[project_id]"]);
+        Assert.Equal(BillingProducts.ReleasePack, stripeHandler.Fields["metadata[product_code]"]);
+
+        var webhookMetadata = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["checkout_id"] = checkoutId.ToString("N"),
+            ["workspace_id"] = seeded.WorkspaceId.ToString("N"),
+            ["project_id"] = seeded.ProjectId.ToString("N"),
+            ["product_code"] = BillingProducts.ReleasePack
+        };
+        Assert.DoesNotContain("item_ids", webhookMetadata.Keys);
+        var webhook = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            id = "evt_release_pack_snapshot",
+            type = "checkout.session.completed",
+            created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            data = new
+            {
+                @object = new
+                {
+                    id = "cs_test_release_pack",
+                    customer = "cus_release_pack",
+                    payment_intent = "pi_release_pack",
+                    payment_status = "paid",
+                    amount_total = BillingProducts.AmountCents(BillingProducts.ReleasePack),
+                    currency = "usd",
+                    metadata = webhookMetadata
+                }
+            }
+        });
+
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await PostSignedStripeWebhook(client, webhook, webhookSecret)).StatusCode);
+
+        await using var verifyScope = factory.Services.CreateAsyncScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        var checkout = await db.BillingCheckouts.AsNoTracking().SingleAsync(value => value.Id == checkoutId);
+        var entitlement = await db.Entitlements.AsNoTracking().SingleAsync(value => value.CheckoutId == checkoutId);
+        Assert.Equal(seeded.ItemIds, JsonSerializer.Deserialize<Guid[]>(checkout.ItemIdsJson, StoredJson));
+        Assert.Equal(seeded.ItemIds, JsonSerializer.Deserialize<Guid[]>(entitlement.ItemIdsJson, StoredJson));
+        Assert.Equal(18, entitlement.IncludedItemCount);
+    }
+
+    [Fact]
     public async Task Paid_checkout_can_render_its_campaign_snapshot_after_regeneration()
     {
         await using var factory = new Hook2StreamApiFactory();
@@ -2375,6 +2461,35 @@ public sealed class BillingWorkflowTests
             var value = NextEvent ?? throw new InvalidOperationException("No webhook was configured.");
             return value with { PayloadHash = Convert.ToHexStringLower(SHA256.HashData(payload)) };
         }
+    }
+
+    private sealed class CapturingStripeCheckoutHandler : HttpMessageHandler
+    {
+        public IReadOnlyDictionary<string, string> Fields { get; private set; } =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Fields = (await request.Content!.ReadAsStringAsync(cancellationToken))
+                .Split('&', StringSplitOptions.RemoveEmptyEntries)
+                .Select(field => field.Split('=', 2))
+                .ToDictionary(
+                    field => Decode(field[0]),
+                    field => field.Length == 2 ? Decode(field[1]) : string.Empty,
+                    StringComparer.Ordinal);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"id\":\"cs_test_release_pack\",\"url\":\"https://checkout.stripe.test/release-pack\"}",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        }
+
+        private static string Decode(string value) =>
+            Uri.UnescapeDataString(value.Replace('+', ' '));
     }
 
     private sealed class InjectedWebhookConcurrencyInterceptor : SaveChangesInterceptor
