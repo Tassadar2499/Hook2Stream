@@ -219,6 +219,56 @@ if module.idempotency("audio", "a" * 40, operation_one) == module.idempotency(
 ):
     raise SystemExit("same-SHA E2E attempts unexpectedly share an idempotency key")
 
+checkout_session_id = "cs_test_" + "a1B2" * 16
+if module.stripe_test_checkout_session_id(
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}#opaque-client-state"
+) != checkout_session_id:
+    raise SystemExit("real Stripe test Checkout Session ID was not recovered from its URL")
+for invalid_checkout_url in (
+    f"http://checkout.stripe.com/c/pay/{checkout_session_id}",
+    f"https://checkout.stripe.com:444/c/pay/{checkout_session_id}",
+    f"https://checkout.stripe.com:/c/pay/{checkout_session_id}",
+    f"https://user@checkout.stripe.com/c/pay/{checkout_session_id}",
+    f"https://checkout.stripe.com/c/pay/cs_live_{'a' * 32}",
+    "https://checkout.stripe.com/c/pay/missing-session-id",
+    f"https://checkout.stripe.com/other/{checkout_session_id}",
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}/{checkout_session_id}",
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}/",
+    f"https://checkout.stripe.com/c/pay/cs%5Ftest%5F{'a' * 32}",
+    f"https://checkout.stripe.com/c/pay/%63s_test_{'a' * 32}",
+    f"https://checkout.stripe.com/c/pay/cs_test_{'a' * 248}",
+    f"https://checkout.stripe.com/c/pay/cs_test_{'a' * 16}-invalid",
+    f"https://checkout.stripe.com/c/pay/missing?session={checkout_session_id}",
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}?x=1",
+    f"https://checkout.stripe.com/c/pay/missing#{checkout_session_id}",
+    f"https://checkout.stripe.com.evil.invalid/c/pay/{checkout_session_id}",
+    f" https://checkout.stripe.com/c/pay/{checkout_session_id}",
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}\n",
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}#opaque state",
+    f"https://checkout.stripe.com/c/pay/{checkout_session_id}#" + "x" * 2048,
+):
+    try:
+        module.stripe_test_checkout_session_id(invalid_checkout_url)
+    except module.GateError:
+        pass
+    else:
+        raise SystemExit(f"unsafe Stripe Checkout URL unexpectedly passed: {invalid_checkout_url}")
+
+billing_gate = ast.get_source_segment(
+    source,
+    next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "staging_billing_entitlement"
+    ),
+)
+if (
+    "checkout_session_id = stripe_test_checkout_session_id(checkout_url)" not in billing_gate
+    or '"id": checkout_session_id' not in billing_gate
+    or "cs_test_h2s_e2e_" in billing_gate
+    or '"payment_intent"' in billing_gate
+):
+    raise SystemExit("synthetic Stripe webhook is not safely bound to the real Checkout Session ID")
+
 # Model the API's completed-upload behavior: replaying one operation would
 # receive the completed session and PUT=>409, while two persisted wrapper
 # attempts for the same release must allocate independent sessions.
