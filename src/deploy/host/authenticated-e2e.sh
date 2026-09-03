@@ -747,6 +747,31 @@ def sign_test_webhook(secret_file: Path, payload: bytes, timestamp: int) -> str:
     return f"t={timestamp},v1={digest}"
 
 
+def stripe_test_checkout_session_id(checkout_url: str) -> str:
+    if (
+        not checkout_url
+        or len(checkout_url) > 2048
+        or checkout_url.strip() != checkout_url
+        or any(ord(value) <= 0x20 or ord(value) == 0x7F for value in checkout_url)
+    ):
+        raise GateError("Stripe checkout URL is invalid")
+    try:
+        parsed = urllib.parse.urlsplit(checkout_url)
+    except ValueError as exc:
+        raise GateError("Stripe checkout URL is invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "checkout.stripe.com"
+        or parsed.query
+        or "?" in checkout_url.split("#", 1)[0]
+    ):
+        raise GateError("Stripe checkout URL is not a test Checkout Session")
+    match = re.fullmatch(r"/c/pay/(cs_test_[A-Za-z0-9]{1,247})", parsed.path)
+    if match is None:
+        raise GateError("Stripe checkout URL does not contain one test Checkout Session")
+    return match.group(1)
+
+
 def staging_billing_entitlement(
     client: ApiClient,
     config: dict[str, str],
@@ -784,13 +809,7 @@ def staging_billing_entitlement(
         raise GateError("Stripe checkout idempotency returned different resources")
     checkout_id = safe_uuid(first.get("checkoutId"), "checkout ID")
     checkout_url = str(first.get("checkoutUrl", ""))
-    checkout_parsed = urllib.parse.urlsplit(checkout_url)
-    if (
-        checkout_parsed.scheme != "https"
-        or checkout_parsed.hostname != "checkout.stripe.com"
-        or "cs_test_" not in checkout_url
-    ):
-        raise GateError("Stripe checkout URL is not a test Checkout Session")
+    checkout_session_id = stripe_test_checkout_session_id(checkout_url)
 
     def exact_entitlements() -> list[dict[str, Any]]:
         summary, _ = client.json("GET", "/api/v1/billing/summary", {200})
@@ -815,11 +834,14 @@ def staging_billing_entitlement(
             "created": timestamp,
             "data": {
                 "object": {
-                    "id": f"cs_test_h2s_e2e_{marker}",
+                    # The API already persists the real provider session ID
+                    # returned by Create Checkout. Reusing that exact ID proves
+                    # webhook correlation instead of bypassing it with a
+                    # fabricated, necessarily mismatched session identity.
+                    "id": checkout_session_id,
                     "payment_status": "paid",
                     "amount_total": 990,
                     "currency": "usd",
-                    "payment_intent": f"pi_h2s_e2e_{marker}",
                     "metadata": {
                         "checkout_id": checkout_id.replace("-", ""),
                         "workspace_id": workspace_id.replace("-", ""),
