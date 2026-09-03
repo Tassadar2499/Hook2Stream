@@ -82,6 +82,9 @@ tar -tzf "$candidate_dir/deploy-bundle.tar.gz" | while IFS= read -r member; do
             ;;
     esac
 done
+tar -tzf "$candidate_dir/deploy-bundle.tar.gz" \
+    | grep -Fxq 'deploy/compose.billing-stripe.yaml' \
+    || fail "bundle is missing the trusted Stripe billing overlay"
 if tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" | awk '$1 !~ /^[d-]/ {bad=1} END {exit bad ? 0 : 1}'; then fail "bundle links and special files are forbidden"; fi
 tar -tvzf "$candidate_dir/deploy-bundle.tar.gz" \
     | awk '{total += $3} END {exit total <= 268435456 ? 0 : 1}' \

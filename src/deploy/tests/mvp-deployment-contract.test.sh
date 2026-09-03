@@ -3,6 +3,7 @@ set -eu
 
 deployment_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 compose=$deployment_dir/compose.yaml
+billing_overlay=$deployment_dir/compose.billing-stripe.yaml
 wrapper=$deployment_dir/scripts/deploy-forced-command.sh
 release=$deployment_dir/scripts/deploy-release.sh
 rollback=$deployment_dir/scripts/rollback-application.sh
@@ -89,6 +90,7 @@ if grep -Fq 'rollback_dir/deploy/scripts/rollback-application.sh' "$wrapper"; th
 fi
 grep -Fq 'infrastructure_release_dir/deploy/scripts/lib/deployment-common.sh' "$wrapper" \
   && grep -Fq 'infrastructure_release_dir/deploy/compose.yaml' "$wrapper" \
+  && grep -Fq 'infrastructure_release_dir/deploy/compose.billing-stripe.yaml' "$wrapper" \
   && grep -Fq 'differs from the active infrastructure release marker' "$wrapper" \
   || fail "active infrastructure compose/helper source is not validated"
 grep -Fq 'application-images-only' "$wrapper" && grep -Fq 'infrastructure-unchanged' "$wrapper" \

@@ -25,6 +25,16 @@
         "responses": {
           "200": {
             "description": "OK"
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
           }
         }
       }
@@ -1654,6 +1664,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2608,7 +2628,8 @@
         "required": [
           "workspaceArtworkCredits",
           "activeSubscription",
-          "entitlements"
+          "entitlements",
+          "checkoutEnabled"
         ],
         "type": "object",
         "properties": {
@@ -2631,6 +2652,9 @@
             "items": {
               "$ref": "#/components/schemas/EntitlementResponse"
             }
+          },
+          "checkoutEnabled": {
+            "type": "boolean"
           }
         }
       },
@@ -3421,6 +3445,44 @@
           "cancelled",
           "stale"
         ]
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "title": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "status": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "detail": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "instance": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
       },
       "ProjectState": {
         "enum": [

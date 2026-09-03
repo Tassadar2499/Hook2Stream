@@ -11,7 +11,8 @@ namespace Hook2Stream.Infrastructure.Billing;
 public enum PaymentGatewayMode
 {
     Fixture = 1,
-    Stripe = 2
+    Stripe = 2,
+    Disabled = 3
 }
 
 public sealed class StripeOptions
@@ -47,6 +48,22 @@ public sealed class FixturePaymentGateway : IPaymentGateway
         string signatureHeader,
         DateTimeOffset now) =>
         throw new InvalidOperationException("Fixture checkout is fulfilled synchronously and has no webhook endpoint.");
+}
+
+public sealed class DisabledPaymentGateway : IPaymentGateway
+{
+    private const string Message = "Billing is disabled.";
+
+    public Task<PaymentCheckoutResult> CreateCheckoutAsync(
+        PaymentCheckoutCommand command,
+        CancellationToken cancellationToken) =>
+        Task.FromException<PaymentCheckoutResult>(new InvalidOperationException(Message));
+
+    public PaymentWebhookEvent ParseAndVerifyWebhook(
+        ReadOnlySpan<byte> payload,
+        string signatureHeader,
+        DateTimeOffset now) =>
+        throw new InvalidOperationException(Message);
 }
 
 public sealed class StripePaymentGateway(

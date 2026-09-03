@@ -149,6 +149,7 @@ export type BillingEntitlement = {
 };
 
 export type BillingSummary = {
+  checkoutEnabled: boolean;
   workspaceArtworkCredits: number;
   activeSubscription?: string | null;
   entitlements: BillingEntitlement[];

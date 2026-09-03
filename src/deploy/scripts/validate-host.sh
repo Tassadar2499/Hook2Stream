@@ -275,7 +275,7 @@ require_encrypted_subpath "$secrets_dir" "secrets directory"
 secret_gid=${SECRETS_GID:-2000}
 [ "$(stat -c '%u:%g:%a' "$secrets_dir")" = "0:${secret_gid}:750" ] \
     || fail "secret directory must be root:${secret_gid} mode 0750"
-for secret in $(hook2stream_required_secret_files "$role"); do
+for secret in $(hook2stream_required_secret_files "$role" "$environment"); do
     secret_path=$secrets_dir/$secret
     [ -f "$secret_path" ] && [ ! -L "$secret_path" ] \
         || fail "$secret is missing or a symlink"
@@ -285,6 +285,13 @@ for secret in $(hook2stream_required_secret_files "$role"); do
         || fail "$secret must not grant access through POSIX ACLs"
     [ -s "$secret_path" ] || fail "$secret is empty"
 done
+if [ "$environment" = production ]; then
+    for forbidden_stripe_secret in stripe_secret_key stripe_webhook_secret; do
+        forbidden_stripe_path=$secrets_dir/$forbidden_stripe_secret
+        [ ! -e "$forbidden_stripe_path" ] && [ ! -L "$forbidden_stripe_path" ] \
+            || fail "production BILLING_MODE=disabled forbids $forbidden_stripe_secret"
+    done
+fi
 hook2stream_no_extended_acl "$secrets_dir" \
     || fail "secret directory must not grant access through POSIX ACLs"
 
@@ -412,7 +419,27 @@ docker_socket=/var/run/docker.sock
     || fail "Docker socket must be root:docker mode 0660"
 hook2stream_no_extended_acl "$docker_socket" \
     || fail "Docker socket must not grant access through POSIX ACLs"
-require_trusted_file "/srv/hook2stream/config/${environment}.env" 600 "app environment"
+app_environment_file=/srv/hook2stream/config/${environment}.env
+require_trusted_file "$app_environment_file" 600 "app environment"
+configured_billing_mode=$(read_unique_environment_value "$app_environment_file" BILLING_MODE)
+case "${environment}:${configured_billing_mode}" in
+    staging:stripe|production:disabled) ;;
+    *) fail "$environment app environment has an invalid BILLING_MODE" ;;
+esac
+for stripe_price_identifier in \
+    STRIPE_PRICE_ART_CREDITS_5 \
+    STRIPE_PRICE_MINI_RELEASE \
+    STRIPE_PRICE_RELEASE_PACK \
+    STRIPE_PRICE_CLEAN_COVER \
+    STRIPE_PRICE_ACTIVE_ARTIST; do
+    stripe_price_count=$(awk -F= -v name="$stripe_price_identifier" \
+        '$1 == name { count++ } END { print count + 0 }' "$app_environment_file")
+    case "$environment:$stripe_price_count" in
+        staging:1|production:0) ;;
+        staging:*) fail "staging app environment must contain exactly one $stripe_price_identifier" ;;
+        production:*) fail "production BILLING_MODE=disabled forbids $stripe_price_identifier" ;;
+    esac
+done
 require_trusted_file /usr/local/sbin/hook2stream-deploy-launcher 555 "app deploy launcher"
 require_trusted_directory /usr/local/libexec/hook2stream 755 "app deploy gate directory"
 require_trusted_directory /usr/local/libexec/hook2stream/lib 755 "app deploy gate library directory"
@@ -504,6 +531,8 @@ if [ -e "$active_infrastructure" ] || [ -L "$active_infrastructure" ]; then
         "active infrastructure bundle digest"
     require_trusted_file "$active_infrastructure_dir/deploy/compose.yaml" 600 \
         "active infrastructure Compose source"
+    require_trusted_file "$active_infrastructure_dir/deploy/compose.billing-stripe.yaml" 600 \
+        "active infrastructure Stripe Compose overlay"
     require_trusted_file "$active_infrastructure_dir/deploy/scripts/lib/deployment-common.sh" 600 \
         "active infrastructure deployment helper"
     require_trusted_file "$active_infrastructure_dir/deploy/scripts/lib/forced-command-trust.sh" 700 \

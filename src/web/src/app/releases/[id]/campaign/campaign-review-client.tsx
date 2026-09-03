@@ -249,6 +249,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
       ),
     [billing, projectId],
   );
+  const checkoutEnabled = billing?.checkoutEnabled === true;
 
   const startRender = useCallback(async (
     entitlement: BillingEntitlement,
@@ -492,6 +493,7 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
   }
 
   async function checkout(productCode: string) {
+    if (!checkoutEnabled) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -544,6 +546,15 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
 
       {error && !selectedItem ? <div className="mt-6"><StatusPanel title="Campaign needs attention" message={error} tone="error" /></div> : null}
       {notice ? <div className="mt-6"><StatusPanel title="Campaign updated" message={notice} tone="success" /></div> : null}
+      {billing?.checkoutEnabled === false ? (
+        <div className="mt-6">
+          <StatusPanel
+            title="Payments paused"
+            message="Payments are temporarily unavailable"
+            tone="neutral"
+          />
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="mt-7"><StatusPanel title="Loading campaign" message="Reading hooks, storyboard and preview state…" tone="neutral" /></div>
@@ -653,9 +664,9 @@ export function CampaignReviewClient({ projectId }: { projectId: string }) {
                 </button>
               ) : null}
               <div className="mt-6 grid gap-4 md:grid-cols-3">
-                <PlanCard title="Mini Release" price="$5" description={`Exactly six clean videos · ${miniSelection.length}/6 selected`} action="Choose Mini" disabled={miniSelection.length !== 6 || busy} onClick={() => checkout("mini_release")} />
-                <PlanCard title="Release Pack" price="$9.90" description="All 18 clean videos, copy and calendar" action="Unlock full pack" disabled={busy} onClick={() => checkout("release_pack")} />
-                <PlanCard title="Active Artist" price="$29/mo" description="One Release Pack per billing period" action="Subscribe" disabled={busy} onClick={() => checkout("active_artist")} />
+                <PlanCard title="Mini Release" price="$5" description={`Exactly six clean videos · ${miniSelection.length}/6 selected`} action="Choose Mini" disabled={miniSelection.length !== 6 || busy || !checkoutEnabled} onClick={() => checkout("mini_release")} />
+                <PlanCard title="Release Pack" price="$9.90" description="All 18 clean videos, copy and calendar" action="Unlock full pack" disabled={busy || !checkoutEnabled} onClick={() => checkout("release_pack")} />
+                <PlanCard title="Active Artist" price="$29/mo" description="One Release Pack per billing period" action="Subscribe" disabled={busy || !checkoutEnabled} onClick={() => checkout("active_artist")} />
               </div>
               {videoEntitlements.length > 0 ? (
                 <div className="surface-soft mt-6 rounded-2xl border border-[var(--line)] p-5">

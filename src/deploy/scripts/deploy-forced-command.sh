@@ -514,6 +514,9 @@ case "$operation" in
       active_release_dir=$HOOK2STREAM_RELEASES_DIR/$requested_commit
       hook2stream_trusted_directory "$active_release_dir" 0:0 700 \
         && hook2stream_trusted_file "$active_release_dir/.deploy-bundle.sha256" 0:0 600 \
+        && hook2stream_trusted_file "$active_release_dir/deploy/compose.yaml" 0:0 600 \
+        && hook2stream_trusted_file "$active_release_dir/deploy/compose.billing-stripe.yaml" 0:0 600 \
+        && hook2stream_trusted_file "$active_release_dir/deploy/scripts/lib/deployment-common.sh" 0:0 600 \
         || fail "active release bundle is unavailable for receipt replay"
       [ "$(cat "$active_release_dir/.deploy-bundle.sha256")" = \
         "$(printf '%s' "$stored_receipt" | jq -r '.deployBundleSha256')" ] \
@@ -609,6 +612,7 @@ case "$operation" in
     hook2stream_trusted_directory "$release_dir" 0:0 700 \
       && hook2stream_trusted_file "$release_dir/.deploy-bundle.sha256" 0:0 600 \
       && hook2stream_trusted_file "$release_dir/deploy/compose.yaml" 0:0 600 \
+      && hook2stream_trusted_file "$release_dir/deploy/compose.billing-stripe.yaml" 0:0 600 \
       && hook2stream_trusted_file "$release_dir/deploy/scripts/lib/deployment-common.sh" 0:0 600 \
       && hook2stream_trusted_file "$release_env" 0:0 600 \
       || fail "pending candidate control plane or environment is unsafe"
@@ -943,6 +947,7 @@ case "$operation" in
     hook2stream_trusted_directory "$infrastructure_release_dir" 0:0 700 \
       && hook2stream_trusted_file "$infrastructure_release_dir/.deploy-bundle.sha256" 0:0 600 \
       && hook2stream_trusted_file "$infrastructure_release_dir/deploy/compose.yaml" 0:0 600 \
+      && hook2stream_trusted_file "$infrastructure_release_dir/deploy/compose.billing-stripe.yaml" 0:0 600 \
       && hook2stream_trusted_file "$infrastructure_release_dir/deploy/scripts/lib/deployment-common.sh" 0:0 600 \
       && hook2stream_trusted_file "$infrastructure_release_dir/deploy/scripts/lib/forced-command-trust.sh" 0:0 700 \
       || fail "active infrastructure bundle is unavailable or unsafe"

@@ -454,6 +454,7 @@ test("an artwork concurrency conflict keeps the selected candidate and complete 
     }
     if (request.method() === "GET" && path === "/api/v1/billing/summary") {
       return json(route, {
+        checkoutEnabled: true,
         workspaceArtworkCredits: 0,
         activeSubscription: null,
         entitlements: [],
@@ -624,6 +625,7 @@ test("approved artwork can retry missing campaign backgrounds once locally", asy
     }
     if (request.method() === "GET" && path === "/api/v1/billing/summary") {
       return json(route, {
+        checkoutEnabled: true,
         workspaceArtworkCredits: 0,
         activeSubscription: null,
         entitlements: [],
@@ -684,6 +686,67 @@ test("approved artwork can retry missing campaign backgrounds once locally", asy
   expect(approvalRequest?.body).toEqual({ revisionId: artworkRevisionId });
   await expect(
     page.getByRole("button", { name: "Campaign backgrounds complete" }),
+  ).toBeDisabled();
+});
+
+test("artwork purchases stay visible and disabled when checkout is unavailable", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+
+    if (request.method() === "GET" && path === `/api/v1/releases/${projectId}`) {
+      return json(route, releaseResponse([]), 200, '"7"');
+    }
+    if (request.method() === "GET" && path === "/api/v1/billing/summary") {
+      return json(route, {
+        checkoutEnabled: false,
+        workspaceArtworkCredits: 0,
+        activeSubscription: null,
+        entitlements: [],
+      });
+    }
+    if (
+      request.method() === "GET" &&
+      path === `/api/v1/releases/${projectId}/artwork`
+    ) {
+      return json(route, {
+        ...artworkReviewResponse(true),
+        operationNumber: 3,
+      }, 200, '"3"');
+    }
+    if (
+      request.method() === "GET" &&
+      path.startsWith(`/api/v1/releases/${projectId}/assets/`) &&
+      path.endsWith("/view-url")
+    ) {
+      const assetId = path.split("/").at(-2)!;
+      return json(route, {
+        assetId,
+        url: `/api/v1/releases/${projectId}/assets/${assetId}/content`,
+        expiresAt: "2030-01-01T00:10:00Z",
+      });
+    }
+    return problem(route, 404, "test.unhandled_route", `${request.method()} ${path}`);
+  });
+
+  await page.goto(`/releases/${projectId}/artwork`);
+
+  await expect(
+    page.getByRole("status").filter({ hasText: "Payments are temporarily unavailable" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Add 5 generations · $1" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Add 5 generations · $1" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Clean 3000×3000 cover · $2" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Clean 3000×3000 cover · $2" }),
   ).toBeDisabled();
 });
 
@@ -768,12 +831,37 @@ test("a stale campaign update keeps the card draft open", async ({ page }) => {
   await expect(text).toHaveValue("Unsaved cross-tab-safe headline");
 });
 
+test("campaign purchase plans stay visible and disabled when checkout is unavailable", async ({
+  page,
+}) => {
+  await installCampaignRoutes(
+    page,
+    async () => {},
+    () => false,
+    () => false,
+    "succeeded",
+    false,
+  );
+
+  await page.goto(`/releases/${projectId}/campaign`);
+
+  await expect(
+    page.getByRole("status").filter({ hasText: "Payments are temporarily unavailable" }),
+  ).toBeVisible();
+  for (const action of ["Choose Mini", "Unlock full pack", "Subscribe"]) {
+    const button = page.getByRole("button", { name: action });
+    await expect(button).toBeVisible();
+    await expect(button).toBeDisabled();
+  }
+});
+
 async function installCampaignRoutes(
   page: Page,
   onRetry: (request: import("@playwright/test").Request) => Promise<void>,
   retryQueued: () => boolean,
   staleCampaignUpdate: () => boolean = () => false,
   terminalPreviewState = "failed",
+  checkoutEnabled = true,
 ) {
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
@@ -812,6 +900,7 @@ async function installCampaignRoutes(
     }
     if (request.method() === "GET" && path === "/api/v1/billing/summary") {
       return json(route, {
+        checkoutEnabled,
         workspaceArtworkCredits: 0,
         activeSubscription: null,
         entitlements: [],

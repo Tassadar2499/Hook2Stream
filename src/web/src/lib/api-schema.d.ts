@@ -62,6 +62,15 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description Service Unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["ProblemDetails"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -1547,6 +1556,15 @@ export interface paths {
                         "application/json": components["schemas"]["CheckoutResponse"];
                     };
                 };
+                /** @description Service Unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/problem+json": components["schemas"]["ProblemDetails"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -2110,6 +2128,7 @@ export interface components {
             workspaceArtworkCredits: number | string;
             activeSubscription: null | string;
             entitlements: components["schemas"]["EntitlementResponse"][];
+            checkoutEnabled: boolean;
         };
         BrandKitResponse: {
             /** Format: uuid */
@@ -2306,6 +2325,14 @@ export interface components {
         JobType: "mediaIngest" | "assetCleanup" | "audioAnalysis" | "transcription" | "artworkGeneration" | "campaignGeneration" | "previewRender" | "finalRender" | "exportBundle" | "cleanCoverRender";
         /** @enum {unknown} */
         PipelineStageState: "notStarted" | "queued" | "running" | "waitingUser" | "retrying" | "succeeded" | "degraded" | "failed" | "cancelled" | "stale";
+        ProblemDetails: {
+            type?: null | string;
+            title?: null | string;
+            /** Format: int32 */
+            status?: null | number | string;
+            detail?: null | string;
+            instance?: null | string;
+        };
         /** @enum {unknown} */
         ProjectState: "draft" | "analyzing" | "hookReview" | "campaignReady" | "previewReady" | "rendering" | "ready" | "partiallyReady" | "archived";
         PutCampaignItemRequest: {

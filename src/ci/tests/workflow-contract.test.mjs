@@ -418,6 +418,28 @@ assert(promotion.includes("source_staging_run_id:") &&
   !promotion.includes("provider_teardown_signature_b64:") &&
   !promotion.includes("inputs.source_ci_run_id"),
   "production promotion must be selected by staging workflow run ID, not directly by CI run ID");
+assert(promotion.includes("      production_confirmation:\n") &&
+  promotion.includes("        required: true\n        type: string\n") &&
+  (promotion.match(/PRODUCTION_CONFIRMATION: \$\{\{ inputs\.production_confirmation \}\}/g) ?? []).length === 2,
+  "every production phase must require the explicit confirmation input before and after the Environment boundary");
+assert((promotion.match(/PRODUCTION_DEPLOY_ACTORS: \$\{\{ vars\.PRODUCTION_DEPLOY_ACTORS \}\}/g) ?? []).length === 2 &&
+  (promotion.match(/test "\$PRODUCTION_DEPLOY_ACTORS" = Tassadar2499/g) ?? []).length === 2 &&
+  (promotion.match(/test "\$DISPATCH_ACTOR" = Tassadar2499/g) ?? []).length === 2 &&
+  (promotion.match(/test "\$TRIGGERING_ACTOR" = Tassadar2499/g) ?? []).length === 2 &&
+  (promotion.match(/test "\$PRODUCTION_CONFIRMATION" = 'DEPLOY hook2stream\.com'/g) ?? []).length === 2,
+  "production must bind dispatch and rerun authority to the exact solo actor and confirmation phrase twice");
+const productionAuthorization = yamlNamedListItem(promotion, 6,
+  "Authorize exact solo production actor and confirmation");
+const productionBoundary = yamlNamedListItem(promotion, 6,
+  "Revalidate live protected-main policy after production Environment boundary");
+assert(productionAuthorization.includes("PRODUCTION_DEPLOY_ACTORS") &&
+  productionAuthorization.includes("PRODUCTION_CONFIRMATION") &&
+  promotion.indexOf("Authorize exact solo production actor and confirmation") < promotion.indexOf("actions/checkout@") &&
+  productionBoundary.includes("PRODUCTION_DEPLOY_ACTORS") &&
+  productionBoundary.includes("PRODUCTION_CONFIRMATION") &&
+  promotion.indexOf("Revalidate live protected-main policy after production Environment boundary") <
+    promotion.lastIndexOf("actions/checkout@"),
+  "solo actor and confirmation gates must run before candidate verification and again before production actions");
 assert((promotion.match(/ref: \$\{\{ github\.workflow_sha \}\}/g) ?? []).length === 2 &&
   promotion.includes('test "$GITHUB_SHA" = "$POLICY_SHA"') &&
   (promotion.match(/test "\$\(jq -r \.commit\.sha <<<"\$main_json"\)" = "\$POLICY_SHA"/g) ?? []).length >= 2 &&

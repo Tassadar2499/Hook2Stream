@@ -12,6 +12,8 @@ deployed object-storage host or storage release pipeline.
 
 - `compose.yaml`: Caddy, app, workers, PostgreSQL, PgBouncer, encrypted backup,
   Storj media janitor, storage probe, and role-specific egress proxies;
+- `compose.billing-stripe.yaml`: Stripe-only API configuration, price IDs, and
+  secret mounts; selected for staging and omitted from billing-disabled production;
 - `compose.minio.yaml`: disposable local-development and CI overlay only;
 - `environments/`: reviewed staging/production app-host templates;
 - `host/`: app forced-command SSH, sudo, and mount-guard templates;
@@ -73,6 +75,13 @@ Media and backup endpoint/region/path-style settings remain independent even
 when their current Storj values are equal. The egress renderer validates each
 exact credential-free HTTPS origin and renders separate media and backup proxy
 allowlists. Wildcards and arbitrary HTTPS origins are rejected.
+
+Billing is an explicit deployment capability. Staging sets
+`BILLING_MODE=stripe` and includes `compose.billing-stripe.yaml`; production
+sets `BILLING_MODE=disabled` and uses only the base Compose file. The disabled
+base starts the API with `Stripe__Mode=Disabled`, mounts no Stripe secrets,
+accepts no Stripe price identifiers, and omits `api.stripe.com` from the API
+egress allowlist. Any other environment/mode pairing fails before mutation.
 
 `VerifyOnly` checks the pre-created private media bucket and never creates a
 bucket or mutates CORS/lifecycle. Browser S3 URLs, object keys, grants, and
@@ -253,13 +262,15 @@ only after `prepare-pending` has made the public origin available; established
 hosts must have a valid session before `deploy-and-finalize`. The script calls
 the public API and fails closed. Staging performs
 upload/OpenRouter/test-billing/render; production performs deterministic
-upload/OpenRouter/preview but no live billing or final render. Printing either
+upload/OpenRouter/preview, proves `checkoutEnabled=false` and
+`503 billing.disabled` for checkout/webhook, and performs no final render.
+Printing either
 capability line without its environment-specific checks is not an installation
 option.
 Production installs the staging-receipt allowed-signers file with exactly one
 named ED25519 authority; additional or wildcard records are rejected. An
-accepted promotion carries and verifies the signed staging receipt before
-GitHub Environment approval and again on the host. No provider lifecycle
+accepted promotion carries and verifies the signed staging receipt before the
+production Environment boundary and again on the host. No provider lifecycle
 marker is part of release evidence.
 Secret scalar files live below `/srv/hook2stream/secrets/current` according to
 [`secrets/README.md`](secrets/README.md).
@@ -278,8 +289,12 @@ with the same CPU/memory limits, concurrency one, at least 60
 successful network checks, no meaningful cgroup/host throttling or OOM, and one
 healthy candidate-digest `worker-render`. Its strict result is included in the signed
 application receipt; hook diagnostics are not exposed to CI logs. Production
-takes the successful staging workflow
-run ID and accepts only its exact candidate after GitHub Environment approval.
+takes the successful staging workflow run ID and accepts only its exact
+candidate. Each phase is dispatched only by `Tassadar2499`, requires repository
+variable `PRODUCTION_DEPLOY_ACTORS=Tassadar2499`, and requires the exact input
+`production_confirmation=DEPLOY hook2stream.com` before and after the
+production Environment boundary. No second reviewer is required for this
+solo-developer MVP.
 All GitHub-runner policy and sourced helpers are pinned to the current
 `github.workflow_sha`; the selected release SHA is data only and is never
 checked out or executed in a credential-bearing job. A separate job/artifact

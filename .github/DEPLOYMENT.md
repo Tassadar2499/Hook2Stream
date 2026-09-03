@@ -7,20 +7,27 @@ Release candidates contain no application, provider, or infrastructure secret.
 
 ## Repository controls
 
-Protect `main`: require pull requests, the complete `CI` check set, approval,
-stale-approval dismissal, conversation resolution, and block force pushes,
-deletion, and bypass. Deployment Environments are only:
+Protect `main`: require pull requests, the complete `CI` check set,
+conversation resolution, and block force pushes, deletion, and bypass.
+Deployment Environments are only:
 
 - `staging`, restricted to protected `main`;
-- `production`, restricted to protected `main`, with two reviewers and
-  self-review disabled;
+- `production`, restricted to protected `main`;
 - `github-pages`, restricted to protected `main`.
 
 Delete legacy `storage-staging` and `storage-production` Environments only after
 confirming no workflow or secret consumer remains. Production MinIO/storage
 workflows, candidate receipts, deploy keys, and Tailscale tags do not belong to
-this architecture. Lack of production reviewer protection blocks live Stripe
-payments but does not block staging.
+this architecture. This solo-maintainer MVP intentionally has no second
+production reviewer; workflow actor and explicit-confirmation gates apply
+instead.
+
+Set the repository variable `PRODUCTION_DEPLOY_ACTORS` to exactly
+`Tassadar2499`. The production workflow accepts only a dispatch whose actor and
+triggering actor both equal that sole entry, and whose
+`production_confirmation` input is exactly `DEPLOY hook2stream.com`. It repeats
+these checks after entering the `production` Environment and before any
+credential-bearing or host-mutating action.
 
 ## Application deployment Environments
 
@@ -50,7 +57,7 @@ key used only for successful staging receipts. Store the corresponding public
 key as repository variable `STAGING_RECEIPT_ALLOWED_SIGNERS` in OpenSSH
 allowed-signers form. The value must contain exactly this one non-comment
 ED25519 record; extra, wildcard, stale, and non-ED25519 authorities fail both
-pre-approval and post-approval validation:
+pre-boundary and post-boundary validation:
 
 ```text
 hook2stream-staging ssh-ed25519 AAAA...
@@ -100,9 +107,9 @@ deployment, prove each CI tag reaches only its matching host and that strict
 OpenSSH rejects a deliberately wrong host key.
 
 Storj runtime/backup credentials, the storage marker digest, any optional
-Servers.Guru read-only API key, OAuth/Stripe/OpenRouter values, database/session secrets, age
-material, and H2SE keyrings are host/operator concerns and never GitHub
-Environment secrets.
+Servers.Guru read-only API key, OAuth/OpenRouter values, staging-only Stripe
+test values, database/session secrets, age material, and H2SE keyrings are
+host/operator concerns and never GitHub Environment secrets.
 
 ## Initial provider-to-CI handoff
 
@@ -126,7 +133,8 @@ Complete bootstrap once for each permanent host:
 3. Run `validate-serversguru-probe.sh staging|production` and the matching
    `validate-host.sh app staging|production`. Prove KVM, `/dev/net/tun`,
    Tailscale, loop/dm-crypt/LUKS2, VNC recovery, Docker Compose v2, static IPv4,
-   exact resource capacity, UFW, and required outbound integrations. Production
+   exact resource capacity, UFW, and required outbound integrations. Stripe
+   egress is required only on staging; production must reject it. Production
    also requires written support acceptance of one FFmpeg job using up to three
    vCPU for the 60-minute soak.
 4. Bootstrap and accept the environment's separate Storj contract, install its
@@ -134,8 +142,9 @@ Complete bootstrap once for each permanent host:
    Initialize each PostgreSQL database once and require its first encrypted
    backup. The permanent staging database is preserved between candidates
    unless an explicit test reset is approved.
-5. Register the exact Google callback and Stripe webhook for each environment;
-   staging/test and production/live credentials must not overlap.
+5. Register the exact Google callback for each environment and the Stripe test
+   webhook only for staging. Production starts with `BILLING_MODE=disabled` and
+   has no Stripe credentials, Price IDs, webhook registration, or Stripe egress.
 6. Configure the environment-specific deploy key, exact pinned ED25519 host
    key, Tailscale OIDC values, tailnet policy, and `DEPLOY_HOST`. Mirror the
    same first H2SE-capable `MIN_ROLLBACK_RELEASE_SHA` in both hosts and
@@ -145,13 +154,24 @@ Complete bootstrap once for each permanent host:
    remains absent because these locations do not currently offer IPv6.
 8. Select a successful protected-main candidate and dispatch `Stage candidate`
    with its `source_ci_run_id`. After the signed staging receipt and 60-minute
-   soak pass, dispatch `Promote production` with only that successful staging
-   run ID. Complete the protected approval inside the maintenance window.
+   soak pass, dispatch `Promote production` with that successful staging run
+   ID, the intended deployment phase, and the exact confirmation
+   `DEPLOY hook2stream.com`. Only `Tassadar2499` may dispatch it.
 
 The staging dispatch remains fail-closed until every bootstrap item is
 complete. Do not weaken Environment, host trust, Tailscale, storage, backup, or
 forced-command controls to make a deployment pass. Production accepts only the
 exact immutable candidate recorded by a successful signed staging receipt.
+
+The currently successful staging release predates
+`compose.billing-stripe.yaml`. Do not copy the overlay into that immutable
+release and do not install control-plane checks that require it before the first
+new candidate is active. Deploy the first overlay-bearing candidate through the
+previous reviewed staging wrapper, confirm that candidate is the active
+infrastructure release, then run the separate commit- and SHA-256-pinned staging
+one-shot updater for the complete installed control plane. Production is cold
+and uses its distinct updater before its first candidate. Verify both updater
+signatures and offline self-tests; never reuse an updater across environments.
 
 ## Candidate promotion
 
@@ -190,14 +210,16 @@ shell profile, or workflow command from that checkout is executed on a GitHub
 runner. The verified candidate crosses into the credential-bearing job through
 a new job/artifact boundary and is revalidated there with current policy.
 
-Production starts only from `workflow_dispatch(source_staging_run_id)`.
+Production starts only from `workflow_dispatch` with the required inputs
+`source_staging_run_id`, `deployment_phase`, and `production_confirmation`.
 Promotion verifies that exact successful `Stage candidate` run belongs to
 protected `main`, extracts the source CI run/attempt/SHA from its signed receipt,
-downloads that exact candidate, and verifies the dedicated staging-receipt
-ED25519 signature before and after protected approval. The production host
-checks the same receipt again and streams the same digest-only artifact without
-rebuild. A stale, failed, unsigned, cross-environment, or mismatched receipt is
-rejected.
+downloads that exact candidate, verifies the sole allowed actor and exact
+`DEPLOY hook2stream.com` confirmation, and verifies the dedicated
+staging-receipt ED25519 signature before and after the production Environment
+boundary. The production host checks the same receipt again and streams the
+same digest-only artifact without rebuild. A stale, failed, unsigned,
+cross-environment, or mismatched receipt is rejected.
 The staging and production concurrency groups are distinct and both use
 `cancel-in-progress:false`; host `flock` is the second lock.
 
@@ -290,8 +312,10 @@ API/Checkout identifiers. Production is a distinct non-billing gate: its
 dedicated QA identity performs deterministic encrypted upload/range,
 OpenRouter pipeline and preview verification, but it never creates a live
 Checkout or starts a final render. The accepted staging receipt proves the
-same digests' Stripe test, 18-render/ZIP and soak behavior. Controlled live
-payment, render/download and refund is a post-deploy operator go-live step.
+same digests' Stripe test, 18-render/ZIP and soak behavior. Production also
+proves that checkout and webhook calls fail with `billing.disabled`, purchase
+controls are disabled, Stripe secrets are absent, and `api.stripe.com` is
+denied. Live billing is a separate future release after Stripe onboarding.
 See the host README for the file and soak-baseline contracts.
 
 Every successful forward release gets a root-owned protocol-v2 capability

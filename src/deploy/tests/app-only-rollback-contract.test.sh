@@ -48,6 +48,7 @@ DEPLOYMENT_ENVIRONMENT=staging
 PUBLIC_ORIGIN=https://staging.hook2stream.com
 SECRET_PROVIDER=file
 STORAGE_MODE=external
+BILLING_MODE=stripe
 RELEASE_VERSION=$release_sha
 API_IMAGE=registry.example/hook2stream-api@sha256:$app_digest
 WORKER_IMAGE=registry.example/hook2stream-worker@sha256:$app_digest

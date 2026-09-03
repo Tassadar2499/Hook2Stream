@@ -139,26 +139,33 @@ public static class DependencyInjection
         {
             services.AddOptions<StripeOptions>()
                 .Bind(configuration.GetSection(StripeOptions.SectionName))
+                .Validate(options => Enum.IsDefined(options.Mode),
+                    "Stripe Mode must be Fixture, Stripe, or Disabled.")
                 .Validate(options => options.Mode != PaymentGatewayMode.Fixture ||
                                      environment.IsDevelopment() || environment.IsEnvironment("Testing"),
                     "Stripe Fixture mode is only allowed in Development or Testing.")
                 .Validate(options => Uri.TryCreate(options.PublicWebBaseUrl, UriKind.Absolute, out var uri) &&
                                      uri.Scheme is "http" or "https", "Stripe PublicWebBaseUrl is invalid.")
-                .Validate(options => options.Mode == PaymentGatewayMode.Fixture ||
+                .Validate(options => options.Mode != PaymentGatewayMode.Stripe ||
                                      options.SecretKey.StartsWith("sk_", StringComparison.Ordinal) &&
                                      options.WebhookSecret.StartsWith("whsec_", StringComparison.Ordinal),
                     "Stripe secrets are required in Stripe mode.")
-                .Validate(options => options.Mode == PaymentGatewayMode.Fixture ||
+                .Validate(options => options.Mode != PaymentGatewayMode.Stripe ||
                                      BillingProducts.All.All(product =>
                                          options.PriceIds.TryGetValue(product, out var price) && !string.IsNullOrWhiteSpace(price)),
                     "Every billing product requires a Stripe Price in Stripe mode.")
                 .ValidateOnStart();
             services.AddSingleton<FixturePaymentGateway>();
+            services.AddSingleton<DisabledPaymentGateway>();
             services.AddHttpClient<StripePaymentGateway>();
             services.AddTransient<IPaymentGateway>(serviceProvider =>
-                serviceProvider.GetRequiredService<IOptions<StripeOptions>>().Value.Mode == PaymentGatewayMode.Stripe
-                    ? serviceProvider.GetRequiredService<StripePaymentGateway>()
-                    : serviceProvider.GetRequiredService<FixturePaymentGateway>());
+                serviceProvider.GetRequiredService<IOptions<StripeOptions>>().Value.Mode switch
+                {
+                    PaymentGatewayMode.Stripe => serviceProvider.GetRequiredService<StripePaymentGateway>(),
+                    PaymentGatewayMode.Fixture => serviceProvider.GetRequiredService<FixturePaymentGateway>(),
+                    PaymentGatewayMode.Disabled => serviceProvider.GetRequiredService<DisabledPaymentGateway>(),
+                    var mode => throw new InvalidOperationException($"Unsupported payment gateway mode '{mode}'.")
+                });
         }
 
         services.AddSingleton<IAmazonS3>(serviceProvider =>

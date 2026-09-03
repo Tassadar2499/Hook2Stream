@@ -17,6 +17,7 @@ for contract in \
   '/parts/1' \
   'bytes=0-1,4-5' \
   '/api/v1/billing/stripe/webhook' \
+  'HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,billing-disabled,stripe-egress-deny,egress-deny' \
   'previewVideo' \
   'completed_lanes = {"audio", "analysis", "transcript", "artwork", "hooks", "campaign", "preview"}' \
   'len(videos) != 18' \
@@ -26,7 +27,7 @@ for contract in \
   'five-minute CPU steal exceeded ten percent' \
   'render worker cgroup throttling exceeded ten percent of soak time' \
   'real 18-item render throughput is over 20 percent slower than the accepted same-SKU baseline' \
-  'hook2stream-denied.invalid:443'; do
+  'hook2stream-denied.invalid'; do
   grep -Fq "$contract" "$hook" || fail "hook omits live contract: $contract"
 done
 
@@ -53,6 +54,9 @@ if grep -Eq 'shell[[:space:]]*=[[:space:]]*True|os\.system\(|subprocess\.(call|r
 fi
 
 post_gate=$deployment_dir/scripts/post-deploy-e2e.sh
+production_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,billing-disabled,stripe-egress-deny,egress-deny'
+grep -Fq "$production_gate" "$post_gate" \
+  || fail "post-deploy gate accepts a stale production capability"
 for orphan_boundary in \
   'child_pid=$!' \
   'kill -TERM "$child_pid"' \
@@ -431,11 +435,39 @@ production_branch = next(
 production_source = ast.get_source_segment(source, production_branch)
 if (
     "print(PRODUCTION_GATE)" not in production_source
+    or 'required(config, "BILLING_MODE") != "disabled"' not in production_source
+    or "verify_billing_disabled(client, project_id, item_ids, commit, operation_id)" not in production_source
     or not any(isinstance(node, ast.Return) for node in ast.walk(production_branch))
     or "render_and_export(" in production_source
     or "staging_billing_entitlement(" in production_source
 ):
     raise SystemExit("production gate does not stop before billing/final render")
+
+billing_disabled = ast.get_source_segment(
+    source,
+    next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_billing_disabled"),
+)
+for disabled_contract in (
+    'client.json("GET", "/api/v1/billing/summary", {200})',
+    'summary.get("checkoutEnabled") is not False',
+    '"/api/v1/billing/checkouts"',
+    '"/api/v1/billing/stripe/webhook"',
+    'problem.get("status") != 503',
+    'problem.get("code") != "billing.disabled"',
+):
+    if disabled_contract not in billing_disabled:
+        raise SystemExit(f"production billing-disabled gate omits: {disabled_contract}")
+
+egress_deny = ast.get_source_segment(
+    source,
+    next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_egress_deny"),
+)
+if (
+    'denied_hosts.append("api.stripe.com")' not in egress_deny
+    or 'environment == "production"' not in egress_deny
+    or "HTTP/1\\.[01] 403" not in egress_deny
+):
+    raise SystemExit("production egress gate does not prove api.stripe.com is denied")
 
 rollback = ast.get_source_segment(
     source,

@@ -96,6 +96,8 @@ fi
 
 bundle_listing="$scratch/bundle-listing.txt"
 tar -tzf "$candidate/deploy-bundle.tar.gz" > "$bundle_listing"
+grep -Fxq 'deploy/compose.billing-stripe.yaml' "$bundle_listing" \
+  || { echo "candidate omitted trusted Stripe billing overlay" >&2; exit 1; }
 for forbidden_path in \
   deploy/Caddyfile.minio \
   deploy/compose.minio.yaml \

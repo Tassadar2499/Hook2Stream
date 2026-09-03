@@ -71,7 +71,9 @@ The probe checks the exact visible CPU/RAM/disk class, KVM/QEMU, one expected
 public IPv4, absence of global IPv6, at least 20 percent free root space,
 `/dev/net/tun`, ordinary OpenSSH over Tailscale, the application UFW policy,
 Docker Compose v2, a temporary loop/dm-crypt/LUKS2 round trip, direct HTTPS to
-Storj/Google/Stripe/OpenRouter, and a three-thread FFmpeg workload. Its
+Storj/Google/OpenRouter plus staging-only Stripe, and a three-thread FFmpeg
+workload. Production does not probe or allow Stripe while
+`BILLING_MODE=disabled`. Its
 temporary LUKS image is removed on exit.
 
 Provider console actions remain manual and separately reviewed. Never

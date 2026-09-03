@@ -104,6 +104,11 @@ for (const [fileName, expected] of Object.entries(expectedTemplates)) {
   }
 }
 
+const apiTemplate = fs.readFileSync(path.join(templatesDir, "api.json.ctmpl"), "utf8");
+if (!apiTemplate.includes('if eq (env "BILLING_MODE") "stripe"')) {
+  throw new Error("api.json.ctmpl does not condition Stripe fields on BILLING_MODE=stripe");
+}
+
 const agent = fs.readFileSync(agentPath, "utf8");
 const agentSources = [...agent.matchAll(/source\s*=\s*"\/vault\/templates\/([^"]+)"/g)]
   .map((match) => match[1])

@@ -287,15 +287,7 @@ services:
       Google__PublicApiBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
       Google__PublicWebReturnBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
       GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google_client_secret
-      Stripe__Mode: Stripe
-      Stripe__PublicWebBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
-      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret_key
-      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
-      Stripe__PriceIds__art_credits_5: ${STRIPE_PRICE_ART_CREDITS_5:?Set STRIPE_PRICE_ART_CREDITS_5}
-      Stripe__PriceIds__mini_release: ${STRIPE_PRICE_MINI_RELEASE:?Set STRIPE_PRICE_MINI_RELEASE}
-      Stripe__PriceIds__release_pack: ${STRIPE_PRICE_RELEASE_PACK:?Set STRIPE_PRICE_RELEASE_PACK}
-      Stripe__PriceIds__clean_cover: ${STRIPE_PRICE_CLEAN_COVER:?Set STRIPE_PRICE_CLEAN_COVER}
-      Stripe__PriceIds__active_artist: ${STRIPE_PRICE_ACTIVE_ARTIST:?Set STRIPE_PRICE_ACTIVE_ARTIST}
+      Stripe__Mode: Disabled
       OperationalPolicy__RetentionSweepEnabled: "false"
     configs:
       - source: dotnet_load_secrets
@@ -309,8 +301,6 @@ services:
       - s3_runtime_access_key
       - s3_runtime_secret_key
       - google_client_secret
-      - stripe_secret_key
-      - stripe_webhook_secret
       - media_keyring
       - invited_emails
     healthcheck:
@@ -1005,10 +995,6 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/s3_runtime_secret_key
   google_client_secret:
     file: ${SECRETS_DIR:-./secrets}/google_client_secret
-  stripe_secret_key:
-    file: ${SECRETS_DIR:-./secrets}/stripe_secret_key
-  stripe_webhook_secret:
-    file: ${SECRETS_DIR:-./secrets}/stripe_webhook_secret
   openrouter_api_key:
     file: ${SECRETS_DIR:-./secrets}/openrouter_api_key
   backup_s3_access_key:

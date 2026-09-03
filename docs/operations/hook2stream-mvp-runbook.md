@@ -1,6 +1,7 @@
 # Hook2Stream MVP operations runbook
 
-This is the operator contract for the invite-only paid MVP. Production runs on
+This is the operator contract for the invite-only MVP with production billing
+temporarily disabled. Production runs on
 one permanent Servers.Guru `NL1-4` app VPS in Amsterdam. Staging runs on one
 permanent Servers.Guru `MTL1-3` app VPS in Montreal. Media ciphertext and
 age-encrypted PostgreSQL backups live in
@@ -23,8 +24,8 @@ host, automatic failover, PITR, or external monitoring. The exception expires
 | Storj project | `hook2stream-staging` | `hook2stream-production` |
 | Media threshold | 35 GiB | 160 GiB |
 | Backup threshold / retention | 10 GiB / 7 days | 30 GiB / 35 days |
-| Integrations | Google test, Stripe test, dedicated OpenRouter key | Google production, Stripe live, dedicated OpenRouter key |
-| Deployment | manual selection of a protected-main candidate | exact staging artifact after approval |
+| Integrations | Google test, Stripe test, dedicated OpenRouter key | Google production, billing disabled, dedicated OpenRouter key |
+| Deployment | manual selection of a protected-main candidate | exact staging artifact after solo actor/confirmation authorization |
 
 Both application hosts are persistent. Storj Standard is global and is not an
 EU-only data-location guarantee.
@@ -67,14 +68,17 @@ sudo src/deploy/scripts/validate-serversguru-probe.sh production
 
 The live gate requires panel VNC access before guest networking, `/dev/net/tun`,
 Tailscale, loop devices, dm-crypt/LUKS2, Docker Compose v2, static primary IPv4
-after reboot, access to Storj/Google/Stripe/OpenRouter, and independent
+after reboot, access to Storj/Google/OpenRouter, staging-only access to Stripe,
+and independent
 `findmnt`/`cryptsetup status` evidence. Obtain written support confirmation that
 one regular-VPS FFmpeg process may use up to three vCPU during the 60-minute
 soak; any throttling, OOM, or refusal blocks production.
 
 Initialize both PostgreSQL databases once. Restore environment-specific OAuth,
-Stripe, OpenRouter, Storj, invite allowlist, public age recipient, and H2SE
-keyring files from encrypted operator escrow only after LUKS is mounted.
+OpenRouter, Storj, invite allowlist, public age recipient, and H2SE keyring files
+from encrypted operator escrow only after LUKS is mounted. Restore Stripe test
+files only on staging. Production uses `BILLING_MODE=disabled` and must contain
+no Stripe secret files or Price IDs.
 Produce and verify the first age-encrypted backup before the first candidate.
 The permanent staging database and diagnostics survive releases unless an
 explicit test reset is approved. Staging and production escrow material never
@@ -140,11 +144,12 @@ configure the GitHub repository setting.
 
 Staging returns `X-Robots-Tag: noindex, nofollow, noarchive`. Register Google
 callbacks as `https://staging.hook2stream.com/api/v1/auth/callback` and
-`https://hook2stream.com/api/v1/auth/callback`. Register the corresponding
-Stripe webhooks at `/api/v1/billing/stripe/webhook` on those exact two origins.
-Unknown Google accounts fail closed; production accepts only pre-issued invites.
+`https://hook2stream.com/api/v1/auth/callback`. Register the Stripe test webhook
+at `https://staging.hook2stream.com/api/v1/billing/stripe/webhook` only.
+Production has no Stripe webhook while `BILLING_MODE=disabled`. Unknown Google
+accounts fail closed; production accepts only pre-issued invites.
 
-Configure both Stripe endpoints from the exact canonical list in
+Configure the staging Stripe endpoint from the exact canonical list in
 `src/deploy/stripe-webhook-events.txt`: `checkout.session.completed`,
 `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, `checkout.session.expired`,
@@ -328,9 +333,10 @@ GitHub Environments exactly as described in
 environment-specific CI tag cannot reach the other host.
 
 Role-specific Squid proxies are the only application egress paths. API and
-workers may reach only their required Google, Stripe, OpenRouter, and media
-Storj endpoints. `postgres-backup` uses a separate proxy that permits only the
-exact `BACKUP_S3_ENDPOINT_HOST`. Wildcards and arbitrary HTTPS origins are
+workers may reach only their required Google, OpenRouter, and media Storj
+endpoints. Staging API egress additionally permits exact `api.stripe.com`;
+production denies it. `postgres-backup` uses a separate proxy that permits only
+the exact `BACKUP_S3_ENDPOINT_HOST`. Wildcards and arbitrary HTTPS origins are
 forbidden. The currently pinned endpoint for both roles is
 `gateway.storjshare.io`, but media and backup endpoint variables remain
 independent and must be validated separately.
@@ -441,11 +447,13 @@ the blocking High/Critical scan.
 
 Each VPS has a separate root-owned secrets directory on its encrypted mount.
 Files are non-symlinks, owned by `root:<service-group>`, and mode `0640`. OAuth,
-Stripe, OpenRouter, runtime media S3, backup S3, PostgreSQL, session, invite,
-age, and H2SE keyring values never enter Git, Servers.Guru provider records,
-candidates, Compose output, or CI logs. Storj root and restore grants, any
-Self-Managed project passphrases, and the temporary bootstrap credential are
-operator-held off-host; the bootstrap credential is revoked after acceptance.
+OpenRouter, runtime media S3, backup S3, PostgreSQL, session, invite, age, H2SE
+keyring values, and staging-only Stripe test values never enter Git,
+Servers.Guru provider records, candidates, Compose output, or CI logs.
+Production must have no Stripe secret files while billing is disabled. Storj
+root and restore grants, any Self-Managed project passphrases, and the temporary
+bootstrap credential are operator-held off-host; the bootstrap credential is
+revoked after acceptance.
 
 Media objects use H2SE v1 ciphertext; Storj never receives plaintext or an H2SE
 KEK. Rotate the active environment-specific KEK every 90 days and retain old
@@ -476,8 +484,12 @@ a successful protected-main `source_ci_run_id`, verifies its attestations and
 candidate, deploys it without rebuild, runs smoke/E2E/storage gates plus the
 60-minute soak, and publishes a signed staging receipt. Production proves that
 receipt refers to the exact candidate through `workflow_dispatch` with the
-staging run ID, waits for two-reviewer/no-self-review GitHub Environment
-approval, and deploys the same digests without rebuild.
+staging run ID, deployment phase, and exact confirmation
+`DEPLOY hook2stream.com`. The repository variable
+`PRODUCTION_DEPLOY_ACTORS` must equal exactly `Tassadar2499`; both dispatch and
+triggering actor are rechecked before and after the production Environment
+boundary. No second reviewer is required. Production deploys the same digests
+without rebuild.
 
 The first release in each environment is an explicit two-dispatch cold
 bootstrap:
@@ -531,7 +543,7 @@ digests carry SBOM/provenance and must pass the blocking High/Critical scan with
 edoburu/PgBouncer, and Ubuntu/Squid repositories.
 
 Freeze protected `main` from the staging workflow dispatch through its signed
-application receipt, production approval, and
+application receipt, production authorization, and
 the production SSH deployment. A merge during deploy or the 60-minute soak
 intentionally makes the workflow policy SHA stale and invalidates that rollout;
 select and stage a new candidate instead of bypassing the live-main checks.
@@ -547,9 +559,9 @@ state before deploy or signing credentials are used.
 The signed staging receipt binds the exact workflow run/attempt, source CI
 run/attempt/SHA, immutable image digests, bundle hash, host-observed digests,
 Storj probe, backup freshness, smoke/E2E, and 60-minute soak result. Promotion
-verifies its dedicated ED25519 signature before and after approval; production
-repeats the same receipt check. Missing, stale, failed, cross-environment, or
-replay-mutated evidence blocks approval.
+verifies its dedicated ED25519 signature before and after the production
+Environment boundary; production repeats the same receipt check. Missing,
+stale, failed, cross-environment, or replay-mutated evidence blocks promotion.
 
 For the first H2SE v1 deployment, preselect a protected-main candidate whose
 build, test, security, and candidate-publication jobs succeeded. Before
@@ -674,11 +686,13 @@ staging run is diagnosed on the persistent host; capture logs and a fresh
 encrypted backup without deleting or rebuilding it. Production must promote
 the same accepted candidate without rebuild.
 
-Production additionally requires two GitHub reviewers, the exact staged
-digests, successful recovery evidence, TLS and security headers, OAuth, a
-controlled live Stripe payment/refund, encrypted upload/range/download, and at
-least 30 minutes of manual observation. Lack of the second reviewer blocks live
-payments but not staging.
+Production additionally requires the exact staged digests, successful recovery
+evidence, TLS and security headers, OAuth, encrypted upload/range/download, and
+at least 30 minutes of manual observation. It must prove purchase controls are
+disabled, billing summary reports `checkoutEnabled=false`, checkout and webhook
+return `503` with `billing.disabled`, Stripe files and Price IDs are absent, and
+`api.stripe.com` is denied. The only allowed production deploy actor is
+`Tassadar2499`, using the exact confirmation `DEPLOY hook2stream.com`.
 
 Before enabling live Stripe, retain evidence that the operating company and
 Stripe account are approved in a supported country. Hosting the application in

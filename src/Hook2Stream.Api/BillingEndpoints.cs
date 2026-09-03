@@ -22,17 +22,45 @@ public static class BillingEndpoints
         this IEndpointRouteBuilder endpoints,
         RouteGroupBuilder authenticatedApi)
     {
+        var paymentMode = endpoints.ServiceProvider
+            .GetRequiredService<IOptions<StripeOptions>>()
+            .Value.Mode;
+
         authenticatedApi.MapGet("/billing/summary", GetSummary)
             .Produces<BillingSummaryResponse>();
-        authenticatedApi.MapPost("/billing/checkouts", CreateCheckout)
-            .Produces<CheckoutResponse>(StatusCodes.Status201Created);
+        RouteHandlerBuilder checkoutEndpoint;
+        if (paymentMode == PaymentGatewayMode.Disabled)
+        {
+            // Selecting a body-free handler at startup ensures disabled billing
+            // rejects requests before JSON binding or payment-provider resolution.
+            checkoutEndpoint = authenticatedApi.MapPost("/billing/checkouts", BillingDisabled);
+        }
+        else
+        {
+            checkoutEndpoint = authenticatedApi.MapPost("/billing/checkouts", CreateCheckout);
+        }
+        checkoutEndpoint
+            .Accepts<CreateCheckoutRequest>("application/json")
+            .Produces<CheckoutResponse>(StatusCodes.Status201Created)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable);
         authenticatedApi.MapPost("/releases/{projectId:guid}/renders", StartRender)
             .Produces<RenderBatchResponse>(StatusCodes.Status202Accepted);
         authenticatedApi.MapGet("/releases/{projectId:guid}/renders/{batchId:guid}", GetRenderBatch)
             .Produces<RenderBatchStatusResponse>();
         authenticatedApi.MapGet("/releases/{projectId:guid}/artwork/clean-cover/download-url", GetCleanCoverDownload)
             .Produces<DownloadGrantResponse>();
-        endpoints.MapPost("/api/v1/billing/stripe/webhook", HandleStripeWebhook)
+        RouteHandlerBuilder webhookEndpoint;
+        if (paymentMode == PaymentGatewayMode.Disabled)
+        {
+            webhookEndpoint = endpoints.MapPost("/api/v1/billing/stripe/webhook", BillingDisabled);
+        }
+        else
+        {
+            webhookEndpoint = endpoints.MapPost("/api/v1/billing/stripe/webhook", HandleStripeWebhook);
+        }
+        webhookEndpoint
+            .Produces(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable)
             .AllowAnonymous();
         return endpoints;
     }
@@ -40,6 +68,7 @@ public static class BillingEndpoints
     private static async Task<IResult> GetSummary(
         CurrentUserService currentUser,
         Hook2StreamDbContext db,
+        IOptions<StripeOptions> stripeOptions,
         TimeProvider timeProvider,
         CancellationToken cancellationToken)
     {
@@ -62,8 +91,18 @@ public static class BillingEndpoints
             value.ValidUntil)).ToList();
         var subscription = entitlements.FirstOrDefault(value =>
             value.ProductCode == BillingProducts.ActiveArtist && IsActive(value, now))?.ProductCode;
-        return Results.Ok(new BillingSummaryResponse(wallet?.Balance ?? 0, subscription, responses));
+        return Results.Ok(new BillingSummaryResponse(
+            wallet?.Balance ?? 0,
+            subscription,
+            responses,
+            stripeOptions.Value.Mode != PaymentGatewayMode.Disabled));
     }
+
+    private static IResult BillingDisabled() =>
+        throw Problem(
+            StatusCodes.Status503ServiceUnavailable,
+            "billing.disabled",
+            "Payments are temporarily unavailable");
 
     private static async Task<IResult> CreateCheckout(
         CreateCheckoutRequest request,

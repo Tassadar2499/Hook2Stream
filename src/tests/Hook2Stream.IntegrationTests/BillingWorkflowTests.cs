@@ -20,6 +20,45 @@ public sealed class BillingWorkflowTests
     private static readonly JsonSerializerOptions StoredJson = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public async Task Disabled_billing_keeps_summary_available_and_rejects_commands_before_body_or_provider_work()
+    {
+        await using var factory = new Hook2StreamApiFactory(services =>
+        {
+            services.PostConfigure<StripeOptions>(options =>
+            {
+                options.Mode = PaymentGatewayMode.Disabled;
+                options.SecretKey = string.Empty;
+                options.WebhookSecret = string.Empty;
+                options.PriceIds.Clear();
+            });
+            services.RemoveAll<IPaymentGateway>();
+            services.AddTransient<IPaymentGateway>(_ =>
+                throw new InvalidOperationException("A disabled endpoint must not resolve the payment provider."));
+        });
+        using var client = factory.CreateClient();
+        await Onboard(client);
+
+        var summary = await client.GetFromJsonAsync<JsonElement>("/api/v1/billing/summary");
+        Assert.False(summary.GetProperty("checkoutEnabled").GetBoolean());
+        Assert.Equal(0, summary.GetProperty("workspaceArtworkCredits").GetInt32());
+        Assert.Empty(summary.GetProperty("entitlements").EnumerateArray());
+
+        using var malformedCheckout = new StringContent("{not-json", Encoding.UTF8, "application/json");
+        var checkout = await client.PostAsync("/api/v1/billing/checkouts", malformedCheckout);
+        await AssertBillingDisabled(checkout);
+
+        using var oversizedWebhook = new ByteArrayContent(new byte[1024 * 1024 + 1]);
+        oversizedWebhook.Headers.ContentType = new("application/json");
+        var webhook = await client.PostAsync("/api/v1/billing/stripe/webhook", oversizedWebhook);
+        await AssertBillingDisabled(webhook);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<Hook2StreamDbContext>();
+        Assert.Empty(await db.BillingCheckouts.AsNoTracking().ToListAsync());
+        Assert.Empty(await db.InboxMessages.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
     public async Task Fixture_artwork_credit_checkout_is_idempotent_and_grants_exactly_five()
     {
         await using var factory = new Hook2StreamApiFactory();
@@ -47,6 +86,7 @@ public sealed class BillingWorkflowTests
         Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
 
         var summary = await client.GetFromJsonAsync<JsonElement>("/api/v1/billing/summary");
+        Assert.True(summary.GetProperty("checkoutEnabled").GetBoolean());
         Assert.Equal(5, summary.GetProperty("workspaceArtworkCredits").GetInt32());
         Assert.Empty(summary.GetProperty("entitlements").EnumerateArray());
 
@@ -2235,6 +2275,14 @@ public sealed class BillingWorkflowTests
         };
         request.Headers.TryAddWithoutValidation("Idempotency-Key", key);
         return await client.SendAsync(request);
+    }
+
+    private static async Task AssertBillingDisabled(HttpResponseMessage response)
+    {
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("billing.disabled", problem.GetProperty("code").GetString());
+        Assert.Equal("billing.disabled", problem.GetProperty("title").GetString());
     }
 
     private static async Task<HttpResponseMessage> StartRender(

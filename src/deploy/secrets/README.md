@@ -11,8 +11,8 @@ for disposable local/CI profiles and must not exist as production credentials.
 | `s3_runtime_access_key` | API, workers, storage probe and janitor; Storj media bucket only |
 | `s3_runtime_secret_key` | matching least-privilege Storj media secret |
 | `google_client_secret` | API OAuth client |
-| `stripe_secret_key` | API Stripe client |
-| `stripe_webhook_secret` | API webhook verification |
+| `stripe_secret_key` | staging API Stripe test client; forbidden when `BILLING_MODE=disabled` |
+| `stripe_webhook_secret` | staging API test-webhook verification; forbidden when `BILLING_MODE=disabled` |
 | `openrouter_api_key` | control worker only |
 | `media_keyring` | API/workers; environment-specific H2SE v1 KEK keyring |
 | `invited_emails` | API invite allowlist; newline-delimited, `#` comments allowed |
@@ -30,6 +30,10 @@ dedicated numeric group (default `2000`), make the directory
 `root:<SECRETS_GID>` mode `0640`. Files must be regular non-symlinks. Compose
 preserves host ownership and joins containers to the supplemental group; no
 host login or deploy user may join it.
+
+Staging sets `BILLING_MODE=stripe` and requires both Stripe files. Production
+sets `BILLING_MODE=disabled`; both Stripe files must be absent, no Stripe price
+IDs are configured, and Compose does not declare or mount them.
 
 For a deployed host, create the directory only after LUKS is mounted:
 

@@ -77,6 +77,18 @@ sudo install -o root -g root -m 0555 scripts/deploy-forced-launcher.sh \
   /usr/local/sbin/hook2stream-deploy-launcher
 ```
 
+An existing successful release created before
+`compose.billing-stripe.yaml` must not be modified to add that file and must
+not receive the new unconditional overlay trust checks first. On staging,
+deploy the first candidate that already contains the overlay through the
+previous reviewed wrapper, confirm it became the active infrastructure release,
+and only then install the complete new control plane with a commit-pinned,
+SHA-256-pinned one-shot updater. A cold production host may install that updater
+before its first candidate because it has no legacy active release. Use distinct
+staging and production updaters, verify their signatures and offline self-tests,
+and update all installed files as one transaction under the forced-command
+lock. Never backfill or mutate an extracted historical release bundle.
+
 Run acceptance from a root shell through the installed root-owned copy; never
 source validator libraries from an operator-writable checkout. Start the
 mount-guarded Docker daemon first because validation inspects its root and
@@ -168,16 +180,19 @@ Any five-minute steal window over 10 percent, cgroup throttled time over 10
 percent, OOM/restart, or failed authenticated HEAD/Range check fails closed. A
 faster real render is accepted.
 
-Staging must use Stripe test credentials. The gate creates a real test Checkout
+Staging must set `BILLING_MODE=stripe` and use Stripe test credentials. The gate creates a real test Checkout
 Session, signs one bounded `checkout.session.completed` payload with the
 root-managed test webhook secret, submits the exact bytes twice, and proves the
 second delivery is a duplicate. This path is cryptographically blocked when
 the API key or Checkout Session is live. Production uses its dedicated invited
 QA account for deterministic encrypted upload/range, OpenRouter pipeline and
-preview verification, but performs no billing or final-render POST. The same
+preview verification. It requires `BILLING_MODE=disabled`, proves the billing
+summary has `checkoutEnabled=false`, proves checkout and webhook return
+`503 billing.disabled`, and confirms the API egress proxy rejects
+`api.stripe.com`; it performs no final-render POST. The same
 immutable digest's staging receipt supplies Stripe test, 18-render/ZIP and soak
-evidence. Controlled live payment, render/download and refund remain explicit
-post-deploy operator procedures.
+evidence. Live payment is a separate future rollout and no Stripe material is
+installed on production in this release.
 
 ## First release and normal deployment transactions
 

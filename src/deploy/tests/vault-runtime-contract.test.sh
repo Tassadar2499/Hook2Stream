@@ -21,6 +21,10 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 deployment_program=vault-runtime-contract-test
+environment_file=$temporary_dir/staging.env
+printf '%s\n' 'DEPLOYMENT_ENVIRONMENT=staging' 'BILLING_MODE=stripe' > "$environment_file"
+HOOK2STREAM_ENV_FILE=$environment_file
+export HOOK2STREAM_ENV_FILE
 . "$deployment_dir/scripts/lib/deployment-common.sh"
 
 # Splitting is normally root-only. These stubs let the contract test exercise
@@ -87,6 +91,35 @@ jq -e '
 jq -e '.activeKeyId == "k1" and (.keys | keys) == ["k1"]' \
     "$candidate/media_keyring" >/dev/null \
     || test_fail "one-line media keyring JSON was not materialized"
+
+disabled_candidate=$temporary_dir/disabled-candidate
+mkdir "$disabled_candidate"
+printf '%s\n' '{"kv_version":21,"secrets":{"postgres_password":"postgres"}}' \
+    > "$disabled_candidate/foundation.json"
+printf '%s\n' '{"kv_version":22,"secrets":{"access_key_id":"media-id","secret_access_key":"media-secret"}}' \
+    > "$disabled_candidate/runtime-s3.json"
+printf '%s\n' '{"kv_version":23,"secrets":{"google_client_secret":"google"}}' \
+    > "$disabled_candidate/api.json"
+printf '%s\n' '{"kv_version":24,"secrets":{"openrouter_api_key":"openrouter"}}' \
+    > "$disabled_candidate/control.json"
+printf '%s\n' '{"kv_version":25,"secrets":{"access_key_id":"backup-id","secret_access_key":"backup-secret"}}' \
+    > "$disabled_candidate/backup-s3.json"
+printf '%s\n' '{"kv_version":26,"secrets":{"invited_emails":"first@example.com","media_keyring":"{\"activeKeyId\":\"k1\",\"keys\":{\"k1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}}"}}' \
+    > "$disabled_candidate/media-security.json"
+printf '%s\n' '{"kv_version":27,"secrets":{"age_recipient":"age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"}}' \
+    > "$disabled_candidate/backup-encryption.json"
+environment_file=$temporary_dir/production.env
+printf '%s\n' 'DEPLOYMENT_ENVIRONMENT=production' 'BILLING_MODE=disabled' > "$environment_file"
+vault_validate_candidate_bundles "$disabled_candidate" \
+    || test_fail "billing-disabled Vault candidate without Stripe was rejected"
+vault_split_candidate "$disabled_candidate" \
+    || test_fail "billing-disabled Vault candidate splitting failed"
+vault_validate_generation "$disabled_candidate" \
+    || test_fail "billing-disabled Vault generation validation failed"
+if find "$disabled_candidate" -maxdepth 1 -type f -name 'stripe_*' | grep -q .; then
+    test_fail "billing-disabled Vault generation materialized Stripe secrets"
+fi
+environment_file=$temporary_dir/staging.env
 
 active=$temporary_dir/active
 cp -R "$candidate" "$active"

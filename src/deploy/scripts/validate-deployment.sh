@@ -124,6 +124,22 @@ SECRET_PROVIDER=file SECRETS_DIR=$secret_dir docker compose \
 node "$deployment_dir/../ci/validate-compose-images.mjs" \
     "$temporary_dir/external-compose.json"
 
+BILLING_MODE=stripe \
+DEPLOYMENT_ENVIRONMENT=staging \
+STRIPE_PRICE_ART_CREDITS_5=price_test_art \
+STRIPE_PRICE_MINI_RELEASE=price_test_mini \
+STRIPE_PRICE_RELEASE_PACK=price_test_pack \
+STRIPE_PRICE_CLEAN_COVER=price_test_cover \
+STRIPE_PRICE_ACTIVE_ARTIST=price_test_artist \
+SECRET_PROVIDER=file SECRETS_DIR=$secret_dir docker compose \
+    --env-file "$deployment_dir/.env.example" \
+    --profile tools \
+    -f "$deployment_dir/compose.yaml" \
+    -f "$deployment_dir/compose.billing-stripe.yaml" \
+    config --format json > "$temporary_dir/stripe-compose.json"
+node "$deployment_dir/../ci/validate-compose-images.mjs" \
+    "$temporary_dir/stripe-compose.json"
+
 SECRET_PROVIDER=file SECRETS_DIR=$secret_dir docker compose \
     --env-file "$deployment_dir/.env.example" \
     --profile tools \

@@ -15,6 +15,7 @@ candidate=$temporary_dir/candidate
 bundle_root=$temporary_dir/bundle
 mkdir -p "$candidate" "$bundle_root/deploy/scripts"
 printf '%s\n' '#!/bin/sh' > "$bundle_root/deploy/scripts/deploy-release.sh"
+printf '%s\n' 'services: {}' > "$bundle_root/deploy/compose.billing-stripe.yaml"
 tar -czf "$candidate/deploy-bundle.tar.gz" -C "$bundle_root" deploy
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

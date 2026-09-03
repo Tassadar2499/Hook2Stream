@@ -64,6 +64,8 @@ esac
 current_stage=configuration-validation
 deployment_environment=$(read_env_value DEPLOYMENT_ENVIRONMENT)
 case "$deployment_environment" in staging|production) ;; *) fail "DEPLOYMENT_ENVIRONMENT must be staging or production" ;; esac
+billing_mode=$(deployment_billing_mode)
+deployment_validate_environment_billing_mode "$deployment_environment" "$billing_mode"
 public_origin=$(read_env_value PUBLIC_ORIGIN)
 case "$public_origin" in
     https://?*) ;;
@@ -179,12 +181,7 @@ esac
 for required_identifier in \
     S3_MEDIA_BUCKET \
     BACKUP_S3_BUCKET \
-    GOOGLE_CLIENT_ID \
-    STRIPE_PRICE_ART_CREDITS_5 \
-    STRIPE_PRICE_MINI_RELEASE \
-    STRIPE_PRICE_RELEASE_PACK \
-    STRIPE_PRICE_CLEAN_COVER \
-    STRIPE_PRICE_ACTIVE_ARTIST; do
+    GOOGLE_CLIENT_ID; do
     required_identifier_value=$(read_env_value "$required_identifier")
     case "$required_identifier_value" in
         ""|*replace*|*example.com*)
@@ -192,6 +189,27 @@ for required_identifier in \
             ;;
     esac
 done
+stripe_price_identifiers='STRIPE_PRICE_ART_CREDITS_5 STRIPE_PRICE_MINI_RELEASE STRIPE_PRICE_RELEASE_PACK STRIPE_PRICE_CLEAN_COVER STRIPE_PRICE_ACTIVE_ARTIST'
+case "$billing_mode" in
+    stripe)
+        for required_identifier in $stripe_price_identifiers; do
+            required_identifier_value=$(read_env_value "$required_identifier")
+            case "$required_identifier_value" in
+                ""|*replace*|*example.com*)
+                    fail "$required_identifier must be replaced with a Stripe price identifier in $environment_file"
+                    ;;
+                price_*) ;;
+                *) fail "$required_identifier must be a Stripe price identifier beginning with price_" ;;
+            esac
+        done
+        ;;
+    disabled)
+        for forbidden_identifier in $stripe_price_identifiers; do
+            ! deployment_environment_has_name "$forbidden_identifier" \
+                || fail "BILLING_MODE=disabled forbids $forbidden_identifier in $environment_file"
+        done
+        ;;
+esac
 for image_variable in \
     API_IMAGE \
     WORKER_IMAGE \
