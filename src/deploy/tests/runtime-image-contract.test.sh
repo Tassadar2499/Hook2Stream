@@ -60,14 +60,14 @@ for module in \
     'github.com/go-chi/chi/v5@v5.3.0' \
     'github.com/klauspost/compress@v1.18.7' \
     'go.opentelemetry.io/otel@v1.44.0' \
-    'golang.org/x/crypto@v0.55.0' \
+    'golang.org/x/crypto@v0.56.0' \
     'golang.org/x/net@v0.57.0' \
     'golang.org/x/text@v0.41.0' \
     'google.golang.org/grpc@v1.83.1'; do
     grep -Fq "$module" "$caddy" || fail "Caddy security dependency is not pinned: $module"
 done
 grep -Fq 'go list -m -f '\''{{.Version}}'\'' golang.org/x/crypto' "$caddy" \
-    && grep -Fq "golang.org/x/crypto[[:space:]]+v0\\.55\\.0" "$caddy" \
+    && grep -Fq "golang.org/x/crypto[[:space:]]+v0\\.56\\.0" "$caddy" \
     || fail "Caddy build does not assert the patched x/crypto module in its graph and binary"
 grep -Fq 'go list -m -f '\''{{.Version}}'\'' google.golang.org/grpc' "$caddy" \
     && grep -Fq "google.golang.org/grpc[[:space:]]+v1\\.83\\.1" "$caddy" \
