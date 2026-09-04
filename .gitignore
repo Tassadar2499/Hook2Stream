@@ -42,6 +42,7 @@ ScaffoldingReadMe.txt
 .env.*.local
 
 # Local infrastructure credentials and encrypted operator state
+/.codex-tmp/
 /src/deploy/secrets/*
 !/src/deploy/secrets/README.md
 *.pem

@@ -268,8 +268,8 @@ public sealed class PostgresPreviewRetryTests
                 workspaceName = "PostgreSQL preview retry tests",
                 acceptTerms = true,
                 acceptPrivacy = true,
-                termsVersion = "draft-2026-07-16",
-                privacyVersion = "draft-2026-07-16",
+                termsVersion = "2026-09-04",
+                privacyVersion = "2026-09-04",
                 displayName = "Test artist"
             });
         response.EnsureSuccessStatusCode();

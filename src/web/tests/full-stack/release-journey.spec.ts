@@ -262,8 +262,8 @@ async function ensureWorkspace(page: import("@playwright/test").Page) {
     await expect(onboarding).toBeVisible();
     await page.getByLabel("Workspace name").fill("Playwright E2E workspace");
     await page.getByLabel("Artist display name").fill("Playwright Artist");
-    await page.getByLabel(/I accept the current draft Terms/i).check();
-    await page.getByLabel(/I accept the current draft Privacy/i).check();
+    await page.getByLabel(/I accept the Terms of Service/i).check();
+    await page.getByLabel(/I accept the Privacy Policy/i).check();
     await page.getByRole("button", { name: "Enter workspace" }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByText("Playwright E2E workspace")).toBeVisible();

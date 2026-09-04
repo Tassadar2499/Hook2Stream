@@ -843,8 +843,8 @@ public sealed class Mp3FirstWorkflowTests
             workspaceName = "MP3 workflow tests",
             acceptTerms = true,
             acceptPrivacy = true,
-            termsVersion = "draft-2026-07-16",
-            privacyVersion = "draft-2026-07-16",
+            termsVersion = "2026-09-04",
+            privacyVersion = "2026-09-04",
             displayName = "Test artist"
         });
         response.EnsureSuccessStatusCode();

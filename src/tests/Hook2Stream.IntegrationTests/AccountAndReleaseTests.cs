@@ -35,6 +35,30 @@ public sealed class AccountAndReleaseTests
     }
 
     [Fact]
+    public async Task Onboarding_rejects_superseded_legal_versions()
+    {
+        await using var factory = new Hook2StreamApiFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.PutAsJsonAsync(
+            "/api/v1/account/onboarding",
+            Onboarding() with
+            {
+                TermsVersion = "draft-2026-07-16",
+                PrivacyVersion = "draft-2026-07-16"
+            });
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("validation.failed", problem.GetProperty("code").GetString());
+        var errors = problem.GetProperty("errors");
+        Assert.True(errors.TryGetProperty("termsVersion", out var termsErrors));
+        Assert.True(termsErrors.GetArrayLength() > 0);
+        Assert.True(errors.TryGetProperty("privacyVersion", out var privacyErrors));
+        Assert.True(privacyErrors.GetArrayLength() > 0);
+    }
+
+    [Fact]
     public async Task Release_update_requires_the_current_etag()
     {
         await using var factory = new Hook2StreamApiFactory();
@@ -99,8 +123,8 @@ public sealed class AccountAndReleaseTests
             workspaceName,
             acceptTerms,
             true,
-            "draft-2026-07-16",
-            "draft-2026-07-16",
+            "2026-09-04",
+            "2026-09-04",
             "Test artist");
 
     private static ReleaseRequest ValidRelease() =>

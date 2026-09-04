@@ -65,6 +65,8 @@ x-dotnet-environment: &dotnet-environment
   OperationalPolicy__DeletionFenceMinutes: "15"
   OperationalPolicy__IdempotencyDays: "7"
   OperationalPolicy__RetentionSweepMinutes: "60"
+  Legal__TermsVersion: "2026-09-04"
+  Legal__PrivacyVersion: "2026-09-04"
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
   OTEL_SERVICE_VERSION: ${RELEASE_VERSION:?Set RELEASE_VERSION}
   Telemetry__ServiceVersion: ${RELEASE_VERSION:?Set RELEASE_VERSION}

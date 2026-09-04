@@ -18,6 +18,8 @@ for value in \
   'StorageEncryption__MaxConcurrentDownloads: ${H2SE_MAX_CONCURRENT_DOWNLOADS:-4}' \
   'Auth__InviteOnly: "true"' \
   'Auth__InvitedEmailsFile: /run/secrets/invited_emails' \
+  'Legal__TermsVersion: "2026-09-04"' \
+  'Legal__PrivacyVersion: "2026-09-04"' \
   'BACKUP_AGE_RECIPIENT_FILE: /run/secrets/backup_age_recipient' \
   'TMPDIR: /tmp'; do
   grep -Fq "$value" "$compose" || fail "Compose is missing $value"

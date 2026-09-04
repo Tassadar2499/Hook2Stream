@@ -2473,8 +2473,8 @@ public sealed class BillingWorkflowTests
             workspaceName = "Billing tests",
             acceptTerms = true,
             acceptPrivacy = true,
-            termsVersion = "draft-2026-07-16",
-            privacyVersion = "draft-2026-07-16",
+            termsVersion = "2026-09-04",
+            privacyVersion = "2026-09-04",
             displayName = "Billing artist"
         });
         response.EnsureSuccessStatusCode();
