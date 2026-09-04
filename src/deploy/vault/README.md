@@ -20,7 +20,7 @@ Mount the KV v2 engine at `hook2stream-kv` and create:
 |---|---|---|
 | `hook2stream-kv/data/production/foundation` | `postgres_password` | `foundation.json` |
 | `hook2stream-kv/data/production/runtime-s3` | `access_key_id`, `secret_access_key` | `runtime-s3.json` |
-| `hook2stream-kv/data/production/api` | `google_client_secret`, `stripe_secret_key`, `stripe_webhook_secret` | `api.json` |
+| `hook2stream-kv/data/production/api` | always `google_client_secret`; add `stripe_secret_key`, `stripe_webhook_secret` only for `BILLING_MODE=stripe` | `api.json` |
 | `hook2stream-kv/data/production/control` | `openrouter_api_key` | `control.json` |
 | `hook2stream-kv/data/production/backup-s3` | `access_key_id`, `secret_access_key` | `backup-s3.json` |
 | `hook2stream-kv/data/production/media-security` | `media_keyring`, `invited_emails` | `media-security.json` |
@@ -28,7 +28,10 @@ Mount the KV v2 engine at `hook2stream-kv` and create:
 
 Every candidate has exactly `kv_version` and `secrets` at its root. Candidate
 field names are strict and the reconciler maps them to scalar names documented
-in `../secrets/README.md`. `backup-s3` accepts only `access_key_id` and
+in `../secrets/README.md`. The API template receives the explicit
+`BILLING_MODE`: disabled production rejects Stripe fields and materializes only
+the Google secret, while Stripe staging requires all three API fields.
+`backup-s3` accepts only `access_key_id` and
 `secret_access_key`; a legacy payload containing `heartbeat_url` or any other
 extra field is rejected. There is no `bootstrap-s3` renderer record because
 deployed Storj bootstrap credentials remain off-host; local/CI MinIO uses its
@@ -53,13 +56,17 @@ mounted as `/vault/tls/ca.pem`; TLS verification is never disabled. Create
 `VAULT_CANDIDATE_DIR` as `root:<SECRETS_GID>` mode `0750` before rendering. It is
 the renderer's only writable host mount.
 
-Run the one-shot renderer through both Compose files:
+Run the billing-disabled one-shot renderer through the base and Vault files:
 
 ```sh
 docker compose --env-file .env \
   -f compose.yaml -f compose.vault.yaml \
   --profile tools run --rm vault-renderer
 ```
+
+For `BILLING_MODE=stripe`, include `compose.billing-stripe.yaml` between the
+base and Vault files. The deployment helper selects this exact file set and
+rejects any environment/mode mismatch.
 
 The Vault Agent image must be pinned by digest. The default identity is root
 with GID `SECRETS_GID`, allowing the reconciler to create root-owned,

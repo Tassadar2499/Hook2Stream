@@ -59,23 +59,66 @@ deployment_storage_mode() {
     printf '%s\n' "${deployment_mode:-external}"
 }
 
+deployment_billing_mode() {
+    deployment_mode=$(read_env_value BILLING_MODE)
+    case "$deployment_mode" in
+        disabled|stripe) printf '%s\n' "$deployment_mode" ;;
+        *) fail "BILLING_MODE must be explicitly set to disabled or stripe in $environment_file" ;;
+    esac
+}
+
+deployment_validate_environment_billing_mode() {
+    deployment_selected_environment=${1:-$(read_env_value DEPLOYMENT_ENVIRONMENT)}
+    deployment_selected_billing_mode=${2:-$(deployment_billing_mode)}
+    case "${deployment_selected_environment}:${deployment_selected_billing_mode}" in
+        staging:stripe|production:disabled) ;;
+        staging:disabled) fail "staging must use BILLING_MODE=stripe" ;;
+        production:stripe) fail "production must use BILLING_MODE=disabled until a separately approved billing rollout" ;;
+        *) fail "DEPLOYMENT_ENVIRONMENT must be staging or production" ;;
+    esac
+}
+
+deployment_environment_has_name() {
+    deployment_requested_name=$1
+    awk -F= -v requested="$deployment_requested_name" '
+        $1 == requested { found=1 }
+        END { exit found ? 0 : 1 }
+    ' "$environment_file"
+}
+
 compose() {
     deployment_compose_secret_provider=$(deployment_secret_provider)
     deployment_compose_storage_mode=$(deployment_storage_mode)
-    case "${deployment_compose_secret_provider}:${deployment_compose_storage_mode}" in
-        file:external)
+    deployment_compose_billing_mode=$(deployment_billing_mode)
+    deployment_validate_environment_billing_mode \
+        "$(read_env_value DEPLOYMENT_ENVIRONMENT)" "$deployment_compose_billing_mode"
+    case "${deployment_compose_secret_provider}:${deployment_compose_storage_mode}:${deployment_compose_billing_mode}" in
+        file:external:disabled)
             docker --config "${DOCKER_CONFIG:?DOCKER_CONFIG is required}" \
                 compose --env-file "$environment_file" \
                 -f "$deployment_dir/compose.yaml" "$@"
             ;;
-        vault:external)
+        file:external:stripe)
+            docker --config "${DOCKER_CONFIG:?DOCKER_CONFIG is required}" \
+                compose --env-file "$environment_file" \
+                -f "$deployment_dir/compose.yaml" \
+                -f "$deployment_dir/compose.billing-stripe.yaml" "$@"
+            ;;
+        vault:external:disabled)
             docker --config "${DOCKER_CONFIG:?DOCKER_CONFIG is required}" \
                 compose --env-file "$environment_file" \
                 -f "$deployment_dir/compose.yaml" \
                 -f "$deployment_dir/compose.vault.yaml" "$@"
             ;;
+        vault:external:stripe)
+            docker --config "${DOCKER_CONFIG:?DOCKER_CONFIG is required}" \
+                compose --env-file "$environment_file" \
+                -f "$deployment_dir/compose.yaml" \
+                -f "$deployment_dir/compose.billing-stripe.yaml" \
+                -f "$deployment_dir/compose.vault.yaml" "$@"
+            ;;
         *)
-            fail "deployed releases require SECRET_PROVIDER=file|vault and STORAGE_MODE=external; MinIO is local/CI only"
+            fail "deployed releases require SECRET_PROVIDER=file|vault, STORAGE_MODE=external, and BILLING_MODE=disabled|stripe; MinIO is local/CI only"
             ;;
     esac
 }
@@ -106,11 +149,26 @@ compose_tools() {
 compose_vault_renderer() {
     vault_render_output=$1
     shift
-    VAULT_CANDIDATE_DIR=$vault_render_output \
-        docker compose --env-file "$environment_file" \
-            -f "$deployment_dir/compose.yaml" \
-            -f "$deployment_dir/compose.vault.yaml" \
-            --profile tools "$@"
+    deployment_vault_billing_mode=$(deployment_billing_mode)
+    deployment_validate_environment_billing_mode \
+        "$(read_env_value DEPLOYMENT_ENVIRONMENT)" "$deployment_vault_billing_mode"
+    case "$deployment_vault_billing_mode" in
+        disabled)
+            VAULT_CANDIDATE_DIR=$vault_render_output \
+                docker compose --env-file "$environment_file" \
+                    -f "$deployment_dir/compose.yaml" \
+                    -f "$deployment_dir/compose.vault.yaml" \
+                    --profile tools "$@"
+            ;;
+        stripe)
+            VAULT_CANDIDATE_DIR=$vault_render_output \
+                docker compose --env-file "$environment_file" \
+                    -f "$deployment_dir/compose.yaml" \
+                    -f "$deployment_dir/compose.billing-stripe.yaml" \
+                    -f "$deployment_dir/compose.vault.yaml" \
+                    --profile tools "$@"
+            ;;
+    esac
 }
 
 deployment_require_command() {
@@ -125,6 +183,7 @@ deployment_compose_input_names() {
 
     for deployment_compose_source in \
         "$deployment_dir/compose.yaml" \
+        "$deployment_dir/compose.billing-stripe.yaml" \
         "$deployment_dir/compose.vault.yaml"; do
         [ -r "$deployment_compose_source" ] || continue
         grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$deployment_compose_source" \
@@ -186,19 +245,23 @@ deployment_secret_gid() {
 }
 
 deployment_required_secret_files() {
+    deployment_secret_billing_mode=${1:-$(deployment_billing_mode)}
     printf '%s\n' \
         postgres_password \
         s3_runtime_access_key \
         s3_runtime_secret_key \
         google_client_secret \
-        stripe_secret_key \
-        stripe_webhook_secret \
         openrouter_api_key \
         media_keyring \
         invited_emails \
         backup_s3_access_key \
         backup_s3_secret_key \
         backup_age_recipient
+    case "$deployment_secret_billing_mode" in
+        stripe) printf '%s\n' stripe_secret_key stripe_webhook_secret ;;
+        disabled) ;;
+        *) fail "cannot determine required secrets for invalid BILLING_MODE" ;;
+    esac
 }
 
 deployment_validate_scalar_secret_content() {
@@ -229,6 +292,7 @@ deployment_validate_scalar_secret_content() {
 
 deployment_validate_file_secrets() {
     deployment_require_command stat
+    deployment_file_billing_mode=$(deployment_billing_mode)
     if [ -n "${SECRETS_DIR:-}" ]; then
         deployment_file_secret_dir=$SECRETS_DIR
     else
@@ -248,7 +312,7 @@ deployment_validate_file_secrets() {
     [ "$deployment_secret_dir_metadata" = "0:${deployment_file_secret_gid}:750" ] \
         || fail "SECRETS_DIR must be root:${deployment_file_secret_gid} with mode 0750"
 
-    for deployment_secret_name in $(deployment_required_secret_files); do
+    for deployment_secret_name in $(deployment_required_secret_files "$deployment_file_billing_mode"); do
         deployment_secret_path=${deployment_file_secret_dir}/${deployment_secret_name}
         [ -f "$deployment_secret_path" ] && [ ! -L "$deployment_secret_path" ] \
             || fail "required secret must be a regular non-symlink file: $deployment_secret_path"
@@ -258,6 +322,14 @@ deployment_validate_file_secrets() {
         [ -s "$deployment_secret_path" ] \
             || fail "required secret file is empty: $deployment_secret_path"
     done
+
+    if [ "$deployment_file_billing_mode" = disabled ]; then
+        for deployment_forbidden_secret_name in stripe_secret_key stripe_webhook_secret; do
+            deployment_forbidden_secret_path=${deployment_file_secret_dir}/${deployment_forbidden_secret_name}
+            [ ! -e "$deployment_forbidden_secret_path" ] && [ ! -L "$deployment_forbidden_secret_path" ] \
+                || fail "BILLING_MODE=disabled forbids Stripe secret material: $deployment_forbidden_secret_path"
+        done
+    fi
 
 }
 
@@ -480,7 +552,11 @@ vault_bundle_scalar_files() {
     case "$1" in
         foundation) printf '%s\n' postgres_password ;;
         runtime-s3) printf '%s\n' s3_runtime_access_key s3_runtime_secret_key ;;
-        api) printf '%s\n' google_client_secret stripe_secret_key stripe_webhook_secret ;;
+        api)
+            printf '%s\n' google_client_secret
+            [ "$(deployment_billing_mode)" != stripe ] \
+                || printf '%s\n' stripe_secret_key stripe_webhook_secret
+            ;;
         control) printf '%s\n' openrouter_api_key ;;
         backup-s3) printf '%s\n' backup_s3_access_key backup_s3_secret_key ;;
         media-security) printf '%s\n' media_keyring invited_emails ;;
@@ -534,6 +610,7 @@ vault_validate_bundle() {
 
 vault_validate_candidate_bundles() {
     vault_candidate_dir=$1
+    vault_candidate_billing_mode=$(deployment_billing_mode)
     [ -d "$vault_candidate_dir" ] && [ ! -L "$vault_candidate_dir" ] \
         || return 1
     [ -z "$(find "$vault_candidate_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ] \
@@ -545,8 +622,16 @@ vault_validate_candidate_bundles() {
         '["postgres_password"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/runtime-s3.json" \
         '["access_key_id","secret_access_key"]' || return 1
-    vault_validate_bundle "$vault_candidate_dir/api.json" \
-        '["google_client_secret","stripe_secret_key","stripe_webhook_secret"]' || return 1
+    case "$vault_candidate_billing_mode" in
+        disabled)
+            vault_validate_bundle "$vault_candidate_dir/api.json" \
+                '["google_client_secret"]' || return 1
+            ;;
+        stripe)
+            vault_validate_bundle "$vault_candidate_dir/api.json" \
+                '["google_client_secret","stripe_secret_key","stripe_webhook_secret"]' || return 1
+            ;;
+    esac
     vault_validate_bundle "$vault_candidate_dir/control.json" \
         '["openrouter_api_key"]' || return 1
     vault_validate_bundle "$vault_candidate_dir/backup-s3.json" \
@@ -581,6 +666,7 @@ vault_write_scalar() {
 
 vault_split_candidate() {
     vault_candidate_dir=$1
+    vault_candidate_billing_mode=$(deployment_billing_mode)
 
     vault_write_scalar "$vault_candidate_dir/foundation.json" postgres_password \
         "$vault_candidate_dir/postgres_password" || return 1
@@ -590,10 +676,12 @@ vault_split_candidate() {
         "$vault_candidate_dir/s3_runtime_secret_key" || return 1
     vault_write_scalar "$vault_candidate_dir/api.json" google_client_secret \
         "$vault_candidate_dir/google_client_secret" || return 1
-    vault_write_scalar "$vault_candidate_dir/api.json" stripe_secret_key \
-        "$vault_candidate_dir/stripe_secret_key" || return 1
-    vault_write_scalar "$vault_candidate_dir/api.json" stripe_webhook_secret \
-        "$vault_candidate_dir/stripe_webhook_secret" || return 1
+    if [ "$vault_candidate_billing_mode" = stripe ]; then
+        vault_write_scalar "$vault_candidate_dir/api.json" stripe_secret_key \
+            "$vault_candidate_dir/stripe_secret_key" || return 1
+        vault_write_scalar "$vault_candidate_dir/api.json" stripe_webhook_secret \
+            "$vault_candidate_dir/stripe_webhook_secret" || return 1
+    fi
     vault_write_scalar "$vault_candidate_dir/control.json" openrouter_api_key \
         "$vault_candidate_dir/openrouter_api_key" || return 1
     vault_write_scalar "$vault_candidate_dir/backup-s3.json" access_key_id \
@@ -647,9 +735,12 @@ vault_validate_generation() {
         || return 1
     [ -z "$(find "$vault_generation_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ] \
         || return 1
-    vault_generation_file_count=$(find "$vault_generation_dir" \
-        -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
-    [ "$vault_generation_file_count" = 13 ] || return 1
+    vault_expected_generation_files=$(printf '%s\n%s\n' \
+        "$(vault_required_scalar_files)" manifest.json | LC_ALL=C sort)
+    vault_actual_generation_files=$(find "$vault_generation_dir" \
+        -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+    [ "$vault_actual_generation_files" = "$vault_expected_generation_files" ] \
+        || return 1
     for vault_scalar_file in $(vault_required_scalar_files); do
         [ -f "$vault_generation_dir/$vault_scalar_file" ] \
             && [ ! -L "$vault_generation_dir/$vault_scalar_file" ] \

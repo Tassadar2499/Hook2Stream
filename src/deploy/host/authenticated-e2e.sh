@@ -37,7 +37,7 @@ from typing import Any, BinaryIO, Callable
 
 
 STAGING_GATE = "HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-test-idempotency,egress-deny"
-PRODUCTION_GATE = "HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,egress-deny"
+PRODUCTION_GATE = "HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,billing-disabled,stripe-egress-deny,egress-deny"
 ROLLBACK_GATE = "HOOK2STREAM_ROLLBACK_GATE=oauth,h2se-range,workers-state,preview-export,egress-deny"
 SOAK_SCHEMA = "hook2stream-soak-hook-result-v1"
 STATE_SCHEMA = "hook2stream-authenticated-e2e-state-v1"
@@ -781,6 +781,8 @@ def staging_billing_entitlement(
     commit: str,
     operation_id: str,
 ) -> str:
+    if required(config, "BILLING_MODE") != "stripe":
+        raise GateError("staging billing E2E requires BILLING_MODE=stripe")
     stripe_mode = required(config, "HOOK2STREAM_E2E_STRIPE_MODE")
     if stripe_mode != "test":
         raise GateError("the automated Stripe transaction is staging-test-only")
@@ -902,6 +904,45 @@ def staging_billing_entitlement(
     if len(candidates) != 1:
         raise GateError("Stripe test flow did not create one exact active render entitlement")
     return safe_uuid(candidates[0].get("id"), "test entitlement ID")
+
+
+def verify_billing_disabled(
+    client: ApiClient,
+    project_id: str,
+    item_ids: list[str],
+    commit: str,
+    operation_id: str,
+) -> None:
+    summary, _ = client.json("GET", "/api/v1/billing/summary", {200})
+    if not isinstance(summary, dict) or summary.get("checkoutEnabled") is not False:
+        raise GateError("production billing summary does not prove checkout is disabled")
+
+    checkout_problem, _ = client.json(
+        "POST",
+        "/api/v1/billing/checkouts",
+        {503},
+        payload={
+            "productCode": "release_pack",
+            "projectId": project_id,
+            "itemIds": item_ids,
+            "returnPath": f"/releases/{project_id}/campaign",
+        },
+        headers={"Idempotency-Key": idempotency("disabled-checkout", commit, operation_id)},
+    )
+    webhook_problem, _ = client.json(
+        "POST",
+        "/api/v1/billing/stripe/webhook",
+        {503},
+        payload={"id": "evt_disabled_probe", "type": "checkout.session.completed"},
+    )
+    for label, problem in (("checkout", checkout_problem), ("webhook", webhook_problem)):
+        if (
+            not isinstance(problem, dict)
+            or problem.get("status") != 503
+            or problem.get("code") != "billing.disabled"
+            or problem.get("title") != "billing.disabled"
+        ):
+            raise GateError(f"production {label} did not return billing.disabled")
 
 
 def render_and_export(
@@ -1298,7 +1339,7 @@ def container_cpu_stat(pid: int) -> tuple[int, int]:
     return nr_throttled, throttled_usec
 
 
-def verify_egress_deny(project: str) -> None:
+def verify_egress_deny(project: str, environment: str) -> None:
     container_id, running, oom, _, _ = docker_service_state(project, "egress-api")
     if not running or oom:
         raise GateError("API egress proxy is unhealthy or OOM-killed")
@@ -1322,18 +1363,25 @@ def verify_egress_deny(project: str) -> None:
         raise GateError("API egress proxy network state is unreadable") from exc
     if inspected.returncode != 0 or len(addresses) != 1:
         raise GateError("API egress proxy must have one private address")
-    try:
-        with socket.create_connection((addresses[0], 3128), timeout=5) as connection:
-            connection.sendall(
-                b"CONNECT hook2stream-denied.invalid:443 HTTP/1.1\r\n"
-                b"Host: hook2stream-denied.invalid:443\r\nConnection: close\r\n\r\n"
-            )
-            response = connection.recv(4096)
-    except OSError as exc:
-        raise GateError("API egress proxy deny probe failed") from exc
-    first_line = response.split(b"\r\n", 1)[0]
-    if not re.fullmatch(rb"HTTP/1\.[01] 403(?: .*)?", first_line):
-        raise GateError("API egress proxy did not reject an unrelated HTTPS origin")
+    denied_hosts = ["hook2stream-denied.invalid"]
+    if environment == "production":
+        denied_hosts.append("api.stripe.com")
+    elif environment != "staging":
+        raise GateError("egress deny probe environment is invalid")
+    for denied_host in denied_hosts:
+        request = (
+            f"CONNECT {denied_host}:443 HTTP/1.1\r\n"
+            f"Host: {denied_host}:443\r\nConnection: close\r\n\r\n"
+        ).encode("ascii")
+        try:
+            with socket.create_connection((addresses[0], 3128), timeout=5) as connection:
+                connection.sendall(request)
+                response = connection.recv(4096)
+        except OSError as exc:
+            raise GateError("API egress proxy deny probe failed") from exc
+        first_line = response.split(b"\r\n", 1)[0]
+        if not re.fullmatch(rb"HTTP/1\.[01] 403(?: .*)?", first_line):
+            raise GateError(f"API egress proxy did not reject {denied_host}")
 
 
 def atomic_state(path: Path, state: dict[str, Any]) -> None:
@@ -1475,7 +1523,10 @@ def release_gate(
         )
 
         if environment == "production":
-            verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"))
+            if required(config, "BILLING_MODE") != "disabled":
+                raise GateError("production E2E requires BILLING_MODE=disabled")
+            verify_billing_disabled(client, project_id, item_ids, commit, operation_id)
+            verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"), environment)
             checkpoint(
                 work_root,
                 environment,
@@ -1559,7 +1610,7 @@ def release_gate(
                 "exportPath": export_path,
             },
         )
-        verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"))
+        verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"), environment)
         atomic_state(
             state_directory(work_root) / f"{environment}-{commit}.json",
             {
@@ -1750,7 +1801,7 @@ def rollback_gate(environment: str, config: dict[str, str], commit: str) -> None
             if batch.get("state") != "succeeded" or len(batch.get("items", [])) != 18:
                 raise GateError("rollback render evidence no longer contains 18 successes")
             head_and_ranges(client, state["exportPath"])
-        verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"))
+        verify_egress_deny(required(config, "COMPOSE_PROJECT_NAME"), environment)
         if not workspace_id:
             raise GateError("rollback account workspace is unavailable")
         print(ROLLBACK_GATE)

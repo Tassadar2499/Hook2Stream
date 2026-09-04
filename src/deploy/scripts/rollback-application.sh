@@ -34,6 +34,7 @@ case "$deployment_dir" in /*/deploy) ;; *) fail_rollback "ACTIVE_INFRA_DEPLOY_DI
 deployment_owner=$(id -u):$(id -g)
 for deployment_helper in \
     "$deployment_dir/compose.yaml" \
+    "$deployment_dir/compose.billing-stripe.yaml" \
     "$deployment_dir/scripts/lib/deployment-common.sh" \
     "$deployment_dir/scripts/lib/forced-command-trust.sh"; do
     [ -f "$deployment_helper" ] && [ ! -L "$deployment_helper" ] \

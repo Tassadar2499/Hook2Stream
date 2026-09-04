@@ -2,9 +2,10 @@
 {
   "kv_version": {{ .Data.metadata.version }},
   "secrets": {
-    "google_client_secret": {{ .Data.data.google_client_secret | toJSON }},
+    "google_client_secret": {{ .Data.data.google_client_secret | toJSON }}{{ if eq (env "BILLING_MODE") "stripe" }},
     "stripe_secret_key": {{ .Data.data.stripe_secret_key | toJSON }},
     "stripe_webhook_secret": {{ .Data.data.stripe_webhook_secret | toJSON }}
+    {{- end }}
   }
 }
 {{- end -}}

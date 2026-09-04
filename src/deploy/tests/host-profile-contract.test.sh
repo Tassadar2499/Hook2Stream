@@ -280,21 +280,29 @@ if hook2stream_gid_list_contains '1000 27 998' 2000; then
     fail_test "unrelated supplemental group was classified as secrets access"
 fi
 
-app_secrets=$(hook2stream_required_secret_files app)
-printf '%s\n' "$app_secrets" | grep -qx postgres_password \
+staging_app_secrets=$(hook2stream_required_secret_files app staging)
+production_app_secrets=$(hook2stream_required_secret_files app production)
+printf '%s\n' "$staging_app_secrets" | grep -qx postgres_password \
     || fail_test "app database secret is missing"
-printf '%s\n' "$app_secrets" | grep -qx media_keyring \
+printf '%s\n' "$staging_app_secrets" | grep -qx media_keyring \
     || fail_test "app media keyring is missing"
-if printf '%s\n' "$app_secrets" | grep -qx backup_heartbeat_url; then
+for stripe_secret in stripe_secret_key stripe_webhook_secret; do
+    printf '%s\n' "$staging_app_secrets" | grep -qx "$stripe_secret" \
+        || fail_test "staging is missing required $stripe_secret"
+    if printf '%s\n' "$production_app_secrets" | grep -qx "$stripe_secret"; then
+        fail_test "billing-disabled production still requires $stripe_secret"
+    fi
+done
+if printf '%s\n' "$staging_app_secrets" | grep -qx backup_heartbeat_url; then
     fail_test "removed app backup heartbeat secret is still required"
 fi
-if printf '%s\n' "$app_secrets" | grep -qx minio_root_password; then
+if printf '%s\n' "$staging_app_secrets" | grep -qx minio_root_password; then
     fail_test "app host unexpectedly requires MinIO root credentials"
 fi
-if printf '%s\n' "$app_secrets" | grep -Eq '^s3_bootstrap_(access_key|secret_key)$'; then
+if printf '%s\n' "$staging_app_secrets" | grep -Eq '^s3_bootstrap_(access_key|secret_key)$'; then
     fail_test "app host unexpectedly requires operator-only bootstrap credentials"
 fi
-if hook2stream_required_secret_files storage >/dev/null; then
+if hook2stream_required_secret_files storage staging >/dev/null; then
     fail_test "removed storage host secret profile was accepted"
 fi
 

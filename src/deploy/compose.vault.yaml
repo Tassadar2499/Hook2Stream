@@ -17,6 +17,7 @@ services:
     pids_limit: 128
     environment:
       HOME: /tmp
+      BILLING_MODE: ${BILLING_MODE:?Set BILLING_MODE}
       VAULT_ADDR: ${VAULT_ADDR:?Set VAULT_ADDR to the external HTTPS Vault origin}
       VAULT_CACERT: /vault/tls/ca.pem
       VAULT_NAMESPACE: ${VAULT_NAMESPACE:-}

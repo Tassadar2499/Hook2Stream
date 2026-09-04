@@ -192,7 +192,9 @@ cryptsetup close "$probe_mapper"
 losetup -d "$probe_loop"
 probe_loop=
 
-for https_origin in https://gateway.storjshare.io https://accounts.google.com https://api.stripe.com https://openrouter.ai; do
+probe_https_origins='https://gateway.storjshare.io https://accounts.google.com https://openrouter.ai'
+[ "$environment" != staging ] || probe_https_origins="$probe_https_origins https://api.stripe.com"
+for https_origin in $probe_https_origins; do
     curl -q --proxy '' --noproxy '*' --silent --show-error --output /dev/null \
         --connect-timeout 10 --max-time 20 --max-redirs 0 --proto '=https' --tlsv1.2 \
         "$https_origin" || fail "direct HTTPS probe failed: $https_origin"

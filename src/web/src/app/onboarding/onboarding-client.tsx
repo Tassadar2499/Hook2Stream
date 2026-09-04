@@ -6,7 +6,7 @@ import { useAppAuth } from "@/components/app-auth-provider";
 import { StatusPanel } from "@/components/status-panel";
 import { ApiRequestError, apiFetch } from "@/lib/api";
 
-const legalVersion = "draft-2026-07-16";
+const legalVersion = "2026-09-04";
 
 export function OnboardingClient() {
   const { getToken } = useAppAuth();
@@ -103,7 +103,18 @@ export function OnboardingClient() {
                 checked={acceptTerms}
                 onChange={(event) => setAcceptTerms(event.target.checked)}
               />
-              <span>I accept the current draft Terms for local MVP testing.</span>
+              <span>
+                I accept the{" "}
+                <a
+                  className="text-[var(--violet)] underline underline-offset-4"
+                  href="https://www.hook2stream.com/terms/"
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Terms of Service
+                </a>
+                .
+              </span>
             </label>
             <label className="flex min-h-11 items-start gap-3 font-semibold">
               <input
@@ -112,7 +123,18 @@ export function OnboardingClient() {
                 checked={acceptPrivacy}
                 onChange={(event) => setAcceptPrivacy(event.target.checked)}
               />
-              <span>I accept the current draft Privacy policy.</span>
+              <span>
+                I accept the{" "}
+                <a
+                  className="text-[var(--violet)] underline underline-offset-4"
+                  href="https://www.hook2stream.com/privacy/"
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Privacy Policy
+                </a>
+                .
+              </span>
             </label>
           </div>
 

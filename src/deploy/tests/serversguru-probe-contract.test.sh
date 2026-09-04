@@ -25,6 +25,8 @@ for contract in \
     'libx264 -threads 3'; do
     grep -Fq "$contract" "$probe" || fail "probe omits contract: $contract"
 done
+grep -Fq '[ "$environment" != staging ] || probe_https_origins=' "$probe" \
+    || fail 'Stripe connectivity must be staging-only while production billing is disabled'
 
 grep -Fq 'hook2stream_validate_ufw_status app "$ufw_status"' "$probe" \
     || fail 'probe does not reuse the exact app UFW policy'

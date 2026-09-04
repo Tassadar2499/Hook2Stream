@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0d0b12" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta
+      name="description"
+      content="How the hosted Hook2Stream MVP collects, uses, stores and deletes personal data and creative content."
+    />
+    <meta name="robots" content="index,follow" />
+    <title>Privacy Policy — Hook2Stream</title>
+    <link rel="canonical" href="https://www.hook2stream.com/privacy/" />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body class="legal-page">
+    <header class="site-header">
+      <a class="brand" href="../" aria-label="Hook2Stream home">
+        <span class="brand-mark" aria-hidden="true">H2S</span>
+        <span>Hook2Stream</span>
+      </a>
+      <span class="pilot-badge">Private MVP</span>
+    </header>
+
+    <main class="legal">
+      <header class="legal-hero">
+        <p class="eyebrow">Hosted service policy</p>
+        <h1>Privacy Policy</h1>
+        <p class="effective-date">Effective September 4, 2026</p>
+        <p class="summary">
+          Hook2Stream is an open-source project with an invite-only hosted MVP. This policy
+          explains the hosted service's limited use of account data and creative material.
+          It does not govern independently operated, self-hosted copies of the software.
+        </p>
+      </header>
+
+      <div class="legal-sections">
+        <section aria-labelledby="operator">
+          <h2 id="operator">Who operates the service</h2>
+          <p>
+            The Hook2Stream project maintainer operates the hosted MVP and determines how
+            data is used for that service. No company, office address or compliance
+            certification is represented by this policy. For privacy questions or requests,
+            email <a href="mailto:markevich.roma@gmail.com">markevich.roma@gmail.com</a>.
+          </p>
+        </section>
+
+        <section aria-labelledby="collection">
+          <h2 id="collection">Data we collect</h2>
+          <ul>
+            <li>
+              <strong>Google sign-in data.</strong> With your permission, we request only the
+              <code>openid</code>, <code>email</code> and <code>profile</code> scopes. We keep
+              your Google subject identifier, verified email address and, if available,
+              display name to authenticate you, check the invite list and show your account.
+              The Google access token used during sign-in is not retained by Hook2Stream.
+            </li>
+            <li>
+              <strong>Creative content.</strong> We receive the songs, file names, release
+              details, rights confirmations, transcripts, artwork, edits and campaign choices
+              that you provide, plus generated previews, videos and export bundles.
+            </li>
+            <li>
+              <strong>Service records.</strong> We keep workspace and project metadata, job
+              state, consent versions, entitlements, audit events and security session data in
+              PostgreSQL so the workflow can run reliably and access can be enforced.
+            </li>
+            <li>
+              <strong>Technical data.</strong> Server logs may contain an IP address, browser
+              or request metadata, timestamps, response status and diagnostic identifiers.
+              Sensitive upload and download routes are excluded from access logs; cookies,
+              authorization headers and query strings are removed or redacted.
+            </li>
+            <li>
+              <strong>Messages.</strong> If you email the maintainer, we receive your address
+              and whatever you include in the message.
+            </li>
+          </ul>
+        </section>
+
+        <section aria-labelledby="use">
+          <h2 id="use">How we use data</h2>
+          <p>
+            We use this data only to provide and secure sign-in, run the requested media and AI
+            workflow, preserve your edits, generate and deliver release assets, troubleshoot
+            failures, prevent abuse, maintain backups and comply with valid legal obligations.
+            We do not sell personal data, serve advertising or use your content to train our
+            own models.
+          </p>
+        </section>
+
+        <section aria-labelledby="providers">
+          <h2 id="providers">Service providers and disclosures</h2>
+          <p>Data is shared only as needed to operate the service:</p>
+          <ul>
+            <li>
+              <strong>Google</strong> handles OAuth sign-in and returns the basic identity data
+              described above.
+            </li>
+            <li>
+              <strong>OpenRouter and routed model providers</strong> process the audio, text,
+              release context or image instructions needed for AI features. Hook2Stream is
+              configured to require Zero Data Retention routing and to disallow prompt
+              collection. OpenRouter still records request metadata, and provider processing
+              remains subject to their own terms and policies.
+            </li>
+            <li>
+              <strong>Storj</strong> stores private media objects after Hook2Stream encrypts
+              them with H2SE. PostgreSQL backups are encrypted with age before upload. Storj
+              and its gateway process ciphertext and operational object-access metadata.
+            </li>
+            <li>
+              <strong>Infrastructure providers</strong> supply the VPS, networking, DNS,
+              source hosting and deployment systems needed to operate Hook2Stream.
+            </li>
+          </ul>
+          <p>
+            We may also disclose information when required by law, or when reasonably necessary
+            to protect users, the service or others. The hosted service currently has no ads or
+            data-broker sharing.
+          </p>
+        </section>
+
+        <section aria-labelledby="payments">
+          <h2 id="payments">Payments</h2>
+          <p>
+            Production billing is disabled as of the effective date. Hook2Stream does not
+            currently send production payment details to Stripe, process charges or offer paid
+            checkout. A private staging environment may use Stripe's test mode with test-only
+            data. This policy will be updated before live billing is introduced.
+          </p>
+        </section>
+
+        <section aria-labelledby="retention">
+          <h2 id="retention">Retention and deletion</h2>
+          <p>
+            Data is kept only for the workflow, security and recovery periods configured for
+            the MVP. Login state expires after about 10 minutes and an authenticated session
+            after no more than 7 days. Incomplete uploads and temporary processing objects are
+            normally eligible for cleanup after 24 hours. Inactive projects without a paid
+            entitlement are normally eligible for cleanup after 30 days.
+          </p>
+          <p>
+            Deleting a project starts a fenced cleanup process scheduled to purge its live media
+            within 7 days. Limited project, audit or deletion records may remain where needed to
+            preserve system integrity or meet legal obligations. Encrypted backups expire on a
+            separate schedule—up to 7 days for staging and 35 days for production—so deleted
+            data may remain in encrypted backups until those backups expire. Backup contents are
+            decrypted only when needed for disaster recovery.
+          </p>
+          <p>
+            You can delete a project in the app. To request access, correction or deletion of
+            account-level data, email the contact address above. We may verify the request before
+            acting. You can also revoke Hook2Stream's Google access from your Google Account.
+          </p>
+        </section>
+
+        <section aria-labelledby="security">
+          <h2 id="security">Security and international processing</h2>
+          <p>
+            Hook2Stream uses HTTPS, restricted service credentials, encrypted host storage,
+            application-layer authenticated encryption for media and encrypted off-host
+            backups. No Internet service can promise absolute security. Providers, including
+            global object storage and AI providers, may process data outside your country. Their
+            locations and safeguards are governed by their own service terms and policies.
+          </p>
+        </section>
+
+        <section aria-labelledby="changes">
+          <h2 id="changes">Changes</h2>
+          <p>
+            Material changes will be posted here with a new effective date. A future feature that
+            materially changes how Google user data is used will not be enabled until any separate
+            notice or renewed-consent step required for that feature can be provided by the MVP.
+          </p>
+        </section>
+
+        <section class="contact-card" aria-labelledby="contact">
+          <h2 id="contact">Contact</h2>
+          <p>
+            Privacy and data requests:
+            <a href="mailto:markevich.roma@gmail.com">markevich.roma@gmail.com</a>
+          </p>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <a href="../">Hook2Stream</a>
+      <nav class="footer-links" aria-label="Legal">
+        <a href="../privacy/" aria-current="page">Privacy</a>
+        <a href="../terms/">Terms</a>
+      </nav>
+      <span>Invite-only MVP</span>
+    </footer>
+  </body>
+</html>

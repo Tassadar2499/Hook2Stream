@@ -33,6 +33,8 @@ EOF
 chmod 0700 "${stub_bin}/stat"
 
 cat > "$environment_file" <<EOF
+DEPLOYMENT_ENVIRONMENT=staging
+BILLING_MODE=stripe
 SECRETS_DIR=$secret_dir
 SECRETS_GID=2000
 EOF
@@ -55,6 +57,35 @@ printf '%s' \
     > "$secret_dir/backup_age_recipient"
 
 PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
+
+production_environment_file=${temporary_dir}/production.env
+cat > "$production_environment_file" <<EOF
+DEPLOYMENT_ENVIRONMENT=production
+BILLING_MODE=disabled
+SECRETS_DIR=$secret_dir
+SECRETS_GID=2000
+EOF
+environment_file=$production_environment_file
+deployment_validate_environment_billing_mode production disabled
+if deployment_required_secret_files | grep -Eq '^stripe_(secret_key|webhook_secret)$'; then
+    test_fail "billing-disabled production still requires Stripe secrets"
+fi
+if (PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets) >/dev/null 2>&1; then
+    test_fail "billing-disabled production accepted residual Stripe secret files"
+fi
+rm "$secret_dir/stripe_secret_key" "$secret_dir/stripe_webhook_secret"
+PATH="${stub_bin}:${PATH}" deployment_validate_file_secrets
+printf '%s' test-secret > "$secret_dir/stripe_secret_key"
+printf '%s' test-secret > "$secret_dir/stripe_webhook_secret"
+environment_file=${temporary_dir}/deployment.env
+deployment_validate_environment_billing_mode staging stripe
+
+if (deployment_validate_environment_billing_mode staging disabled) >/dev/null 2>&1; then
+    test_fail "staging accepted BILLING_MODE=disabled"
+fi
+if (deployment_validate_environment_billing_mode production stripe) >/dev/null 2>&1; then
+    test_fail "production accepted BILLING_MODE=stripe"
+fi
 
 if (PATH="${stub_bin}:${PATH}" TEST_SECRET_MODE=644 \
     deployment_validate_file_secrets) >/dev/null 2>&1; then
@@ -198,6 +229,18 @@ EOF
             test_fail "Vault contract accepted prohibited scalar whitespace/control bytes"
         fi
     done
+
+    environment_file=$production_environment_file
+    if vault_validate_candidate_bundles "$vault_candidate"; then
+        test_fail "billing-disabled Vault contract accepted Stripe fields"
+    fi
+    printf '%s\n' '{"kv_version":1,"secrets":{"google_client_secret":"google"}}' \
+        > "$vault_candidate/api.json"
+    vault_validate_candidate_bundles "$vault_candidate" \
+        || test_fail "billing-disabled Vault contract rejected the Google-only API schema"
+    environment_file=${temporary_dir}/deployment.env
+    printf '%s\n' '{"kv_version":1,"secrets":{"google_client_secret":"google","stripe_secret_key":"stripe","stripe_webhook_secret":"webhook"}}' \
+        > "$vault_candidate/api.json"
 
     printf '%s\n' '{"kv_version":1,"secrets":{"age_recipient":"not-an-age-recipient"}}' \
         > "$vault_candidate/backup-encryption.json"

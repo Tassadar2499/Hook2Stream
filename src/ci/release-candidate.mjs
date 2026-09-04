@@ -147,6 +147,10 @@ function validateBundle(path) {
   const listing = run("tar", ["-tzf", path]);
   const entries = listing.split("\n").filter(Boolean);
   if (entries.length === 0) fail("deploy bundle is empty");
+  const normalizedEntries = new Set(entries.map((entry) => entry.replace(/\/$/, "")));
+  if (!normalizedEntries.has("deploy/compose.billing-stripe.yaml")) {
+    fail("deploy bundle is missing the trusted Stripe billing overlay");
+  }
   for (const entry of entries) {
     if (entry.includes("\\") || entry.startsWith("/") || /(^|\/)\.\.?(\/|$)/.test(entry)) {
       fail(`unsafe deploy bundle path: ${JSON.stringify(entry)}`);

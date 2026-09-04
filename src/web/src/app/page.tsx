@@ -24,7 +24,7 @@ const steps = [
   {
     number: "03",
     title: "Post for three weeks",
-    copy: "Review or tune 18 generated video cards, then unlock the clean files, copy and calendar you need.",
+    copy: "Review or tune 18 generated video cards and prepare the copy and calendar you need. Clean exports remain protected by entitlement.",
     icon: "calendar",
   },
 ];

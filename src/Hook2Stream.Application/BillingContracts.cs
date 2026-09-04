@@ -60,7 +60,8 @@ public sealed record EntitlementResponse(
 public sealed record BillingSummaryResponse(
     int WorkspaceArtworkCredits,
     string? ActiveSubscription,
-    IReadOnlyList<EntitlementResponse> Entitlements);
+    IReadOnlyList<EntitlementResponse> Entitlements,
+    bool CheckoutEnabled);
 
 public sealed record StartRenderRequest(
     Guid EntitlementId,

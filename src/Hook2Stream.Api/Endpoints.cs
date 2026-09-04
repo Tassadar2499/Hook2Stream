@@ -138,8 +138,8 @@ public static class Endpoints
             errors.Add("acceptPrivacy", "Privacy policy must be accepted.");
         }
 
-        var termsVersion = configuration["Legal:TermsVersion"] ?? "draft-2026-07-16";
-        var privacyVersion = configuration["Legal:PrivacyVersion"] ?? "draft-2026-07-16";
+        var termsVersion = configuration["Legal:TermsVersion"] ?? "2026-09-04";
+        var privacyVersion = configuration["Legal:PrivacyVersion"] ?? "2026-09-04";
         if (!string.Equals(request.TermsVersion, termsVersion, StringComparison.Ordinal))
         {
             errors.Add("termsVersion", "Accept the current Terms version.");

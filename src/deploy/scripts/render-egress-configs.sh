@@ -26,6 +26,17 @@ duplicate_names=$(awk -F= '
     || fail "environment file contains duplicate assignments: $(printf '%s' "$duplicate_names" | tr '\n' ' ')"
 environment=$(read_value DEPLOYMENT_ENVIRONMENT)
 case "$environment" in staging|production) ;; *) fail "DEPLOYMENT_ENVIRONMENT must be staging or production" ;; esac
+billing_mode=$(read_value BILLING_MODE)
+case "$environment:$billing_mode" in
+    staging:stripe|production:disabled) ;;
+    staging:disabled) fail "staging must use BILLING_MODE=stripe" ;;
+    production:stripe) fail "production must use BILLING_MODE=disabled until a separately approved billing rollout" ;;
+    *) fail "BILLING_MODE must be explicitly set to disabled or stripe" ;;
+esac
+case "$billing_mode" in
+    stripe) stripe_allowlist=' api.stripe.com' ;;
+    disabled) stripe_allowlist= ;;
+esac
 
 validate_endpoint_pair() {
     endpoint_label=$1
@@ -107,10 +118,11 @@ for config_name in api s3 control backup; do
     sed \
         -e "s/__HOOK2STREAM_MEDIA_S3_ENDPOINT_HOST__/$media_endpoint_host/g" \
         -e "s/__HOOK2STREAM_BACKUP_S3_ENDPOINT_HOST__/$backup_endpoint_host/g" \
+        -e "s/__HOOK2STREAM_STRIPE_ALLOWLIST__/$stripe_allowlist/g" \
         "$template" > "$temporary_file"
     case "$config_name" in
         api)
-            expected_allowlist="acl allowed_domains dstdomain $media_endpoint_host accounts.google.com oauth2.googleapis.com openidconnect.googleapis.com api.stripe.com"
+            expected_allowlist="acl allowed_domains dstdomain $media_endpoint_host accounts.google.com oauth2.googleapis.com openidconnect.googleapis.com${stripe_allowlist}"
             ;;
         control)
             expected_allowlist="acl allowed_domains dstdomain $media_endpoint_host openrouter.ai"

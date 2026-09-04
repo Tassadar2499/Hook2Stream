@@ -16,6 +16,7 @@ write_environment() {
     render_file=$3
     cat > "$render_file" <<EOF
 DEPLOYMENT_ENVIRONMENT=$render_environment
+BILLING_MODE=$(if [ "$render_environment" = staging ]; then printf stripe; else printf disabled; fi)
 STORAGE_MODE=external
 STORAGE_PROVISIONING_MODE=VerifyOnly
 STORAGE_OBJECT_EXPIRATION_MODE=Storj
@@ -63,10 +64,23 @@ for render_environment in staging production; do
     done
 
     rendered_api=$render_output/api.conf
-    grep -Fxq \
-        "acl allowed_domains dstdomain $render_host accounts.google.com oauth2.googleapis.com openidconnect.googleapis.com api.stripe.com" \
-        "$rendered_api" \
-        || fail_test "API proxy does not contain the exact role allowlist"
+    case "$render_environment" in
+        staging)
+            grep -Fxq \
+                "acl allowed_domains dstdomain $render_host accounts.google.com oauth2.googleapis.com openidconnect.googleapis.com api.stripe.com" \
+                "$rendered_api" \
+                || fail_test "staging API proxy does not contain the exact Stripe-enabled role allowlist"
+            ;;
+        production)
+            grep -Fxq \
+                "acl allowed_domains dstdomain $render_host accounts.google.com oauth2.googleapis.com openidconnect.googleapis.com" \
+                "$rendered_api" \
+                || fail_test "production API proxy does not contain the exact billing-disabled role allowlist"
+            if grep -Fq 'api.stripe.com' "$rendered_api"; then
+                fail_test "production BILLING_MODE=disabled retained Stripe egress"
+            fi
+            ;;
+    esac
     if grep -Eq '(^|[[:space:]])\.(google|googleapis|gstatic|stripe)\.com([[:space:]]|$)' \
         "$rendered_api"; then
         fail_test "API proxy retained a broad Google or Stripe domain suffix"
@@ -74,6 +88,18 @@ for render_environment in staging production; do
 done
 
 bad_env=$temporary_dir/bad.env
+write_environment production gateway.storjshare.io "$bad_env"
+sed -i 's/BILLING_MODE=disabled/BILLING_MODE=stripe/' "$bad_env"
+if sh "$deployment_dir/scripts/render-egress-configs.sh" "$bad_env" "$temporary_dir/bad" >/dev/null 2>&1; then
+    fail_test "production accepted BILLING_MODE=stripe"
+fi
+
+write_environment staging gateway.storjshare.io "$bad_env"
+sed -i 's/BILLING_MODE=stripe/BILLING_MODE=disabled/' "$bad_env"
+if sh "$deployment_dir/scripts/render-egress-configs.sh" "$bad_env" "$temporary_dir/bad" >/dev/null 2>&1; then
+    fail_test "staging accepted BILLING_MODE=disabled"
+fi
+
 write_environment production gateway.storjshare.io "$bad_env"
 sed -i 's/hook2stream-com-production-media/hook2stream-com-staging-media/' "$bad_env"
 if sh "$deployment_dir/scripts/render-egress-configs.sh" "$bad_env" "$temporary_dir/bad" >/dev/null 2>&1; then

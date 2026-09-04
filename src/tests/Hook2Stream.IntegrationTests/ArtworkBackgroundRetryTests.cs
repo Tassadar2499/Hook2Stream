@@ -332,8 +332,8 @@ public sealed class ArtworkBackgroundRetryTests
             workspaceName = "Artwork background retry tests",
             acceptTerms = true,
             acceptPrivacy = true,
-            termsVersion = "draft-2026-07-16",
-            privacyVersion = "draft-2026-07-16",
+            termsVersion = "2026-09-04",
+            privacyVersion = "2026-09-04",
             displayName = "Retry artist"
         });
         response.EnsureSuccessStatusCode();

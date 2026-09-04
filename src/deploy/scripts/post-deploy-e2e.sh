@@ -105,7 +105,7 @@ case "$environment" in
     expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview-render18-zip,stripe-test-idempotency,egress-deny'
     ;;
   production)
-    expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,egress-deny'
+    expected_gate='HOOK2STREAM_E2E_GATE=oauth,h2se-upload-range,workers-openrouter,preview,billing-disabled,stripe-egress-deny,egress-deny'
     ;;
 esac
 fi

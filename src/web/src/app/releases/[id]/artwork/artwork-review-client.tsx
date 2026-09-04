@@ -187,6 +187,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
   );
   const remainingIncluded = artwork ? Math.max(0, 3 - artwork.operationNumber) : 3;
   const availableArtworkOperations = remainingIncluded + (billing?.workspaceArtworkCredits ?? 0);
+  const checkoutEnabled = billing?.checkoutEnabled === true;
   const composition = useMemo(() => JSON.stringify(edit), [edit]);
   const compositionDirty = artwork
     ? composition !== JSON.stringify(parseArtworkEdit(artwork.compositionJson))
@@ -332,6 +333,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
   }
 
   async function checkout(productCode: "art_credits_5" | "clean_cover") {
+    if (!checkoutEnabled) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -389,6 +391,15 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
 
       {error ? <div className="mt-6"><StatusPanel title="Artwork needs attention" message={error} tone="error" /></div> : null}
       {notice ? <div className="mt-6"><StatusPanel title="Artwork updated" message={notice} tone="success" /></div> : null}
+      {billing?.checkoutEnabled === false ? (
+        <div className="mt-6">
+          <StatusPanel
+            title="Payments paused"
+            message="Payments are temporarily unavailable"
+            tone="neutral"
+          />
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="mt-7"><StatusPanel title="Loading artwork" message="Reading candidate history…" tone="neutral" /></div>
@@ -424,7 +435,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
             {availableArtworkOperations === 0 ? (
               <div className="surface-inset mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--line)] p-4">
                 <p className="flex-1 font-bold">Need another direction? Add five complete artwork generations for $1.</p>
-                <button className="button-quiet" type="button" disabled={busy} onClick={() => checkout("art_credits_5")}>Add 5 generations · $1</button>
+                <button className="button-quiet" type="button" disabled={busy || !checkoutEnabled} onClick={() => checkout("art_credits_5")}>Add 5 generations · $1</button>
               </div>
             ) : null}
           </form>
@@ -603,7 +614,7 @@ export function ArtworkReviewClient({ projectId }: { projectId: string }) {
                         Clean cover is rendering…
                       </span>
                     ) : artwork.state === "approved" ? (
-                      <button className="button-quiet" type="button" disabled={busy} onClick={() => checkout("clean_cover")}>Clean 3000×3000 cover · $2</button>
+                      <button className="button-quiet" type="button" disabled={busy || !checkoutEnabled} onClick={() => checkout("clean_cover")}>Clean 3000×3000 cover · $2</button>
                     ) : null}
                   </div>
                   <p className="mt-3 text-sm text-[var(--muted)]">Changing an approved cover starts a new artwork operation because its three backgrounds must be rebuilt.</p>

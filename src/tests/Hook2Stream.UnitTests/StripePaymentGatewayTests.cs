@@ -608,6 +608,47 @@ public sealed class StripePaymentGatewayTests
     }
 
     [Fact]
+    public void Disabled_gateway_is_allowed_in_production_without_Stripe_secrets_or_prices()
+    {
+        var services = new ServiceCollection();
+        services.AddHook2StreamInfrastructure(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Stripe:Mode"] = "disabled",
+                ["Stripe:PublicWebBaseUrl"] = "https://app.example.test"
+            }).Build(),
+            new TestHostEnvironment(Environments.Production));
+        using var provider = services.BuildServiceProvider();
+
+        var options = provider.GetRequiredService<IOptions<StripeOptions>>().Value;
+
+        Assert.Equal(PaymentGatewayMode.Disabled, options.Mode);
+        Assert.Empty(options.SecretKey);
+        Assert.Empty(options.WebhookSecret);
+        Assert.Empty(options.PriceIds);
+        Assert.IsType<DisabledPaymentGateway>(provider.GetRequiredService<IPaymentGateway>());
+    }
+
+    [Fact]
+    public void Undefined_gateway_mode_is_rejected_during_options_validation()
+    {
+        var services = new ServiceCollection();
+        services.AddHook2StreamInfrastructure(
+            new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Stripe:Mode"] = "4",
+                ["Stripe:PublicWebBaseUrl"] = "https://app.example.test"
+            }).Build(),
+            new TestHostEnvironment(Environments.Production));
+        using var provider = services.BuildServiceProvider();
+
+        var exception = Assert.Throws<OptionsValidationException>(() =>
+            _ = provider.GetRequiredService<IOptions<StripeOptions>>().Value);
+
+        Assert.Contains("must be Fixture, Stripe, or Disabled", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Stripe_gateway_fails_fast_without_secrets_and_catalog_prices()
     {
         var services = new ServiceCollection();

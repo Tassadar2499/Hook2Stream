@@ -23,9 +23,11 @@ hook2stream_host_profile() {
 }
 
 hook2stream_required_secret_files() {
+    [ "$#" -eq 2 ] || return 1
     hook2stream_secret_role=$1
-    case "$hook2stream_secret_role" in
-        app)
+    hook2stream_secret_environment=$2
+    case "${hook2stream_secret_role}:${hook2stream_secret_environment}" in
+        app:staging)
             printf '%s\n' \
                 postgres_password \
                 s3_runtime_access_key \
@@ -33,6 +35,19 @@ hook2stream_required_secret_files() {
                 google_client_secret \
                 stripe_secret_key \
                 stripe_webhook_secret \
+                openrouter_api_key \
+                media_keyring \
+                invited_emails \
+                backup_s3_access_key \
+                backup_s3_secret_key \
+                backup_age_recipient
+            ;;
+        app:production)
+            printf '%s\n' \
+                postgres_password \
+                s3_runtime_access_key \
+                s3_runtime_secret_key \
+                google_client_secret \
                 openrouter_api_key \
                 media_keyring \
                 invited_emails \

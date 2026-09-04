@@ -1,0 +1,25 @@
+name: ${COMPOSE_PROJECT_NAME:-hook2stream}
+
+# Explicitly selected only when BILLING_MODE=stripe. The base deployment is
+# fail-closed and starts the API in Disabled mode without Stripe material.
+services:
+  api:
+    environment:
+      Stripe__Mode: Stripe
+      Stripe__PublicWebBaseUrl: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN}
+      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret_key
+      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
+      Stripe__PriceIds__art_credits_5: ${STRIPE_PRICE_ART_CREDITS_5:?Set STRIPE_PRICE_ART_CREDITS_5}
+      Stripe__PriceIds__mini_release: ${STRIPE_PRICE_MINI_RELEASE:?Set STRIPE_PRICE_MINI_RELEASE}
+      Stripe__PriceIds__release_pack: ${STRIPE_PRICE_RELEASE_PACK:?Set STRIPE_PRICE_RELEASE_PACK}
+      Stripe__PriceIds__clean_cover: ${STRIPE_PRICE_CLEAN_COVER:?Set STRIPE_PRICE_CLEAN_COVER}
+      Stripe__PriceIds__active_artist: ${STRIPE_PRICE_ACTIVE_ARTIST:?Set STRIPE_PRICE_ACTIVE_ARTIST}
+    secrets:
+      - stripe_secret_key
+      - stripe_webhook_secret
+
+secrets:
+  stripe_secret_key:
+    file: ${SECRETS_DIR:-./secrets}/stripe_secret_key
+  stripe_webhook_secret:
+    file: ${SECRETS_DIR:-./secrets}/stripe_webhook_secret

@@ -17,6 +17,10 @@ on:
           - prepare-pending
           - deploy-and-finalize
           - finalize-pending
+      production_confirmation:
+        description: Type exactly DEPLOY hook2stream.com to authorize this production phase
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -45,7 +49,24 @@ jobs:
       GH_REPO: ${{ github.repository }}
       SOURCE_STAGING_RUN_ID: ${{ inputs.source_staging_run_id }}
       POLICY_SHA: ${{ github.workflow_sha }}
+      PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
+      PRODUCTION_DEPLOY_ACTORS: ${{ vars.PRODUCTION_DEPLOY_ACTORS }}
+      DISPATCH_ACTOR: ${{ github.actor }}
+      TRIGGERING_ACTOR: ${{ github.triggering_actor }}
     steps:
+      - name: Authorize exact solo production actor and confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$PRODUCTION_DEPLOY_ACTORS" = Tassadar2499 \
+            || { echo "PRODUCTION_DEPLOY_ACTORS must be exactly the approved solo actor" >&2; exit 1; }
+          test "$DISPATCH_ACTOR" = Tassadar2499 \
+            || { echo "production dispatch actor is not approved" >&2; exit 1; }
+          test "$TRIGGERING_ACTOR" = Tassadar2499 \
+            || { echo "production triggering actor is not approved" >&2; exit 1; }
+          test "$PRODUCTION_CONFIRMATION" = 'DEPLOY hook2stream.com' \
+            || { echo "production_confirmation does not match the exact required phrase" >&2; exit 1; }
+
       - name: Bind workflow policy to the current protected-main dispatch
         shell: bash
         run: |
@@ -286,11 +307,23 @@ jobs:
       SOURCE_SHA: ${{ needs.verify-source.outputs.source-sha }}
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: hook2stream-deploy
+      PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
+      PRODUCTION_DEPLOY_ACTORS: ${{ vars.PRODUCTION_DEPLOY_ACTORS }}
+      DISPATCH_ACTOR: ${{ github.actor }}
+      TRIGGERING_ACTOR: ${{ github.triggering_actor }}
     steps:
       - name: Revalidate live protected-main policy after production Environment boundary
         shell: bash
         run: |
           set -euo pipefail
+          test "$PRODUCTION_DEPLOY_ACTORS" = Tassadar2499 \
+            || { echo "PRODUCTION_DEPLOY_ACTORS must remain exactly the approved solo actor" >&2; exit 1; }
+          test "$DISPATCH_ACTOR" = Tassadar2499 \
+            || { echo "production dispatch actor is not approved" >&2; exit 1; }
+          test "$TRIGGERING_ACTOR" = Tassadar2499 \
+            || { echo "production triggering actor is not approved" >&2; exit 1; }
+          test "$PRODUCTION_CONFIRMATION" = 'DEPLOY hook2stream.com' \
+            || { echo "production_confirmation no longer matches the exact required phrase" >&2; exit 1; }
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$POLICY_SHA"
           [[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]

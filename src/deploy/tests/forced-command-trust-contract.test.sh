@@ -317,6 +317,14 @@ for required in \
     grep -F "$required" "$app_wrapper" >/dev/null \
         || fail "app wrapper omitted trust boundary: $required"
 done
+[ "$(grep -Fc 'deploy/compose.billing-stripe.yaml" 0:0 600' "$app_wrapper")" -ge 3 ] \
+    || fail "forced command does not trust the billing overlay at replay, finalize, and rollback boundaries"
+grep -Fq 'deploy/compose.billing-stripe.yaml" 600' \
+    "$deployment_dir/scripts/validate-host.sh" \
+    || fail "host validator does not trust the active billing overlay"
+grep -Fq '"$deployment_dir/compose.billing-stripe.yaml"' \
+    "$deployment_dir/scripts/rollback-application.sh" \
+    || fail "rollback does not trust the active billing overlay"
 if grep -Eq 'provider[_-](window|lifecycle|deadline)|HOOK2STREAM_PROVIDER' "$app_wrapper"; then
     fail "permanent Servers.Guru staging still depends on ephemeral provider-window state"
 fi
